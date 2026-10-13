@@ -142,7 +142,8 @@ import {
 	BrowserTracingController,
 } from "./tracing";
 import {
-	WebMcpController,
+	installWebMcp,
+	type WebMcpController,
 	type WebMcpEventsOptions,
 	type WebMcpEventsResult,
 	type WebMcpInvokeOptions,
@@ -1782,7 +1783,7 @@ export class WorkerCore {
 				// interactive without raising a window; explicit settle-freeze still applies.
 				await this.#page.emulateFocusedPage(true);
 			}
-			this.#webmcp = new WebMcpController(this.#page);
+			this.#webmcp = await installWebMcp(this.#page);
 			await installVitalsObservers(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
 			if (payload.ignoreHttpsErrors) this.#certificateOverride = await applyIgnoreHttpsErrors(this.#page);
@@ -1812,6 +1813,8 @@ export class WorkerCore {
 			// with a fresh worker), so close it before reporting. An adopted target —
 			// a borrowed page, or an owned one a recycle retries — is never closed here.
 			const page = this.#page;
+			await this.#webmcp?.dispose().catch(() => undefined);
+			this.#webmcp = undefined;
 			if (payload.mode === "headless" && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
@@ -3577,6 +3580,8 @@ export class WorkerCore {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		});
+		await this.#webmcp?.dispose().catch(() => undefined);
+		this.#webmcp = undefined;
 		this.#dialogs?.dispose();
 		await this.#network?.close();
 		await this.#downloads?.close();
