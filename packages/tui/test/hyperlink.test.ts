@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
@@ -45,6 +45,11 @@ function isHyperlinked(text: string): boolean {
 function setHyperlinkMode(mode: "off" | "auto" | "always"): void {
 	applyHyperlinkSetting(mode);
 }
+
+beforeEach(() => {
+	delete Bun.env.PI_LINK_SCHEME;
+	delete Bun.env.PI_LINK_HOST;
+});
 
 afterEach(() => {
 	applyHyperlinkSetting("auto");
