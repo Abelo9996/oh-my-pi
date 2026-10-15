@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- SVG figures can now fit smaller overlays and panes using a caller-provided row limit ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu)).
+- SVG figures and table charts now respect caller-provided row limits, including zero, and visible SIXEL figures stay drawn while shrinking ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu)).
 
 ## [18.11.0] - 2026-10-14
 

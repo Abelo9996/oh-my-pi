@@ -221,7 +221,7 @@ export function describeTableChart(chart: TableChart, key: string): NativeNode {
 export interface TableChartFigureOptions {
 	/** Shared inline-image budget. */
 	budget?: ImageBudget;
-	/** Row ceiling for the raster; defaults to a share of the terminal viewport. */
+	/** Row ceiling including the separator; fewer than two rows hides the chart. Defaults to a share of the viewport. */
 	maxRows?: number | (() => number | undefined);
 	/** The chart's rows changed outside a text update: its pick or raster landed. */
 	onChange: () => void;
@@ -236,6 +236,7 @@ export interface TableChartFigureOptions {
 export class TableChartFigure implements Component {
 	readonly #options: TableChartFigureOptions;
 	readonly #figure: SvgFigure;
+	#maxRows?: number | (() => number | undefined);
 	#table: Tokens.Table | undefined;
 	/** `undefined` while not looked up or waiting for a pick. */
 	#chart: TableChart | null | undefined;
@@ -244,15 +245,23 @@ export class TableChartFigure implements Component {
 
 	constructor(options: TableChartFigureOptions) {
 		this.#options = options;
+		this.#maxRows = options.maxRows;
 		this.#figure = new SvgFigure({
 			budget: options.budget,
-			maxRows: options.maxRows,
+			maxRows: () => this.#resolveMaxRows(),
 			onChange: options.onChange,
 		});
 	}
 
 	setMaxRows(maxRows?: number | (() => number | undefined)): void {
-		this.#figure.setMaxRows(maxRows);
+		this.#maxRows = maxRows;
+		this.#figure.setMaxRows(() => this.#resolveMaxRows());
+	}
+
+	/** Reserve the separator inside the caller's ceiling before sizing the image. */
+	#resolveMaxRows(maxRows?: number): number | undefined {
+		const bound = maxRows ?? (typeof this.#maxRows === "function" ? this.#maxRows() : this.#maxRows);
+		return bound != null && Number.isFinite(bound) ? Math.max(0, Math.floor(bound) - 1) : undefined;
 	}
 
 	/** Point the figure at `table`. */
@@ -271,7 +280,7 @@ export class TableChartFigure implements Component {
 	render(width: number, maxRows?: number): readonly string[] {
 		if (this.#chart === undefined && !this.#waiting) this.#resolve();
 		if (!this.#chart) return [];
-		const rows = this.#figure.render(width, maxRows);
+		const rows = this.#figure.render(width, this.#resolveMaxRows(maxRows));
 		return rows.length ? ["", ...rows] : rows;
 	}
 

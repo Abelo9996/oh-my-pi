@@ -16,8 +16,10 @@ import {
 	lookupTableChart,
 	setTableCharts,
 	splitTableCharts,
+	TableChartFigure,
 	type TableChartPlanner,
 } from "@oh-my-pi/pi-tui/chat/table-chart";
+import { renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
 import { lexDocument } from "@oh-my-pi/pi-tui/components/markdown";
 import { trimBlankEdges } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
@@ -641,6 +643,39 @@ describe("table charts in assistant Markdown", () => {
 	});
 
 	const answer = `Timings:\n\n${TIMINGS}\n\nThat is all.`;
+
+	it.each(["render argument", "row callback", "setter"] as const)(
+		"fits a chart and its separator within a %s ceiling and hides both with fewer than two rows",
+		async bound => {
+			const protocol = TERMINAL.imageProtocol;
+			setTerminalImageProtocol(ImageProtocol.Sixel);
+			setTableCharts("always");
+			let maxRows = 4;
+			const landed = Promise.withResolvers<void>();
+			const chart = new TableChartFigure({
+				maxRows: bound === "row callback" ? () => maxRows : bound === "setter" ? maxRows : undefined,
+				onChange: () => landed.resolve(),
+			});
+			chart.update(table(TIMINGS));
+			const render = () => chart.render(76, bound === "render argument" ? maxRows : undefined);
+			try {
+				render();
+				await landed.promise;
+				const drawn = renderForScrollback(render);
+				expect(drawn.length).toBeLessThanOrEqual(maxRows);
+				expect(drawn[0]).toBe("");
+				expect(drawn.at(-1)).toMatch(/\x1bP[\d;]*q/);
+				for (const ceiling of [1, 0]) {
+					maxRows = ceiling;
+					if (bound === "setter") chart.setMaxRows(maxRows);
+					expect(render()).toEqual([]);
+				}
+			} finally {
+				chart.dispose();
+				setTerminalImageProtocol(protocol);
+			}
+		},
+	);
 
 	it("leaves a table streaming at the tail whole and charts it once the answer moves on", () => {
 		setTableCharts("always");

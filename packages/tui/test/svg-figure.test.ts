@@ -1,8 +1,9 @@
 import * as path from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as natives from "@oh-my-pi/pi-natives";
 import { FigureMarkdown } from "@oh-my-pi/pi-tui/chat/figure-markdown";
 import { SvgFigure } from "@oh-my-pi/pi-tui/chat/svg-figure";
-import { renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
+import { ImageBudget, renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
 import { fencedCode, Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
@@ -69,6 +70,7 @@ describe("SvgFigure", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		setTerminalImageProtocol(originalProtocol);
 		setCellDimensions(originalCell);
 		setKittyGraphics(originalGraphics);
@@ -178,27 +180,47 @@ describe("SvgFigure", () => {
 		"keeps an already drawn SVG within a smaller %s bound while its raster is replaced",
 		async bound => {
 			setTerminalImageProtocol(ImageProtocol.Sixel);
+			const encoded = spyOn(natives, "encodeSixelAsync");
+			const budget = new ImageBudget(1);
 			let maxRows = 12;
 			let landed = Promise.withResolvers<void>();
 			const svg = new SvgFigure({
+				budget,
 				maxRows: bound === "row callback" ? () => maxRows : bound === "setter" ? maxRows : undefined,
 				onChange: () => landed.resolve(),
 			});
 			svg.update(LANDSCAPE_SVG, true);
-			const render = () => svg.render(76, bound === "render argument" ? maxRows : undefined);
+			const render = (): readonly string[] => {
+				budget.beginPass();
+				let rows = svg.render(76, bound === "render argument" ? maxRows : undefined);
+				if (budget.endPass()) {
+					budget.beginPass();
+					rows = svg.render(76, bound === "render argument" ? maxRows : undefined);
+					budget.endPass();
+				}
+				return rows;
+			};
 			try {
 				render();
 				await landed.promise;
-				expect(renderForScrollback(render).length).toBeGreaterThan(4);
+				render();
+				await encoded.mock.results.at(-1)?.value;
+				const initial = render();
+				expect(initial.length).toBeGreaterThan(4);
+				expect(initial.at(-1)).toMatch(/\x1bP[\d;]*q/);
 
 				landed = Promise.withResolvers<void>();
 				maxRows = 4;
 				if (bound === "setter") svg.setMaxRows(maxRows);
-				const pending = renderForScrollback(render);
+				const pending = render();
 				expect(pending.length).toBeLessThanOrEqual(maxRows);
 				expect(pending.at(-1)).toMatch(/\x1bP[\d;]*q/);
 				await landed.promise;
-				const drawn = renderForScrollback(render);
+				const replacing = render();
+				expect(replacing.length).toBeLessThanOrEqual(maxRows);
+				expect(replacing.at(-1)).toMatch(/\x1bP[\d;]*q/);
+				await encoded.mock.results.at(-1)?.value;
+				const drawn = render();
 				expect(drawn.length).toBeLessThanOrEqual(maxRows);
 				expect(drawn.at(-1)).toMatch(/\x1bP[\d;]*q/);
 				const raster = /"\d+;\d+;(\d+);(\d+)/.exec(drawn.join("\n"));
@@ -209,6 +231,63 @@ describe("SvgFigure", () => {
 			}
 		},
 	);
+
+	it.each(["render argument", "row callback", "setter"] as const)(
+		"hides placeholders and existing images at zero rows through a %s, then draws when room returns",
+		async bound => {
+			let maxRows = 0;
+			const landed = Promise.withResolvers<void>();
+			const block = new FigureMarkdown(fencedCode("svg", LANDSCAPE_SVG), {
+				markdown: text => new Markdown(text, 0, 0, getMarkdownTheme()),
+				charts: false,
+				maxRows: bound === "row callback" ? () => maxRows : bound === "setter" ? maxRows : undefined,
+				onChange: () => landed.resolve(),
+			});
+			const render = () => block.render(76, bound === "render argument" ? maxRows : undefined);
+			try {
+				expect(render()).toEqual([]);
+				await Promise.resolve();
+				expect(render()).toEqual([]);
+				expect(block.pending).toBe(false);
+
+				maxRows = 4;
+				if (bound === "setter") block.setMaxRows(maxRows);
+				render();
+				await landed.promise;
+				expect(render().some(row => TERMINAL.isImageLine(row))).toBe(true);
+
+				maxRows = 0;
+				if (bound === "setter") block.setMaxRows(maxRows);
+				expect(render()).toEqual([]);
+				maxRows = 4;
+				if (bound === "setter") block.setMaxRows(maxRows);
+				expect(render().some(row => TERMINAL.isImageLine(row))).toBe(true);
+			} finally {
+				block.dispose();
+			}
+		},
+	);
+
+	it("keeps failed SVG code within its ceiling and hides it when no rows remain", async () => {
+		const landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({
+			markdown: text => new Markdown(text, 0, 0, getMarkdownTheme()),
+			maxRows: 2,
+			onChange: () => landed.resolve(),
+		});
+		svg.update("not an svg", true);
+		try {
+			svg.render(76);
+			await landed.promise;
+			const fallback = svg.render(76);
+			expect(fallback.length).toBeLessThanOrEqual(2);
+			expect(fallback.join("\n")).toContain("svg");
+			expect(svg.render(76, 0)).toEqual([]);
+			expect(svg.render(76).length).toBeLessThanOrEqual(2);
+		} finally {
+			svg.dispose();
+		}
+	});
 
 	it("restores the configured row callback after a FigureMarkdown render override", async () => {
 		setTerminalImageProtocol(ImageProtocol.Sixel);

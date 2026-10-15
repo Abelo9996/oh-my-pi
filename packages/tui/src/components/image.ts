@@ -693,6 +693,25 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	/** Resize a mutable surface's image without discarding its settled SIXEL encode. */
+	setMaxHeightCells(maxHeightCells?: number): void {
+		if (this.#options.maxHeightCells === maxHeightCells) return;
+		this.#options.maxHeightCells = maxHeightCells;
+		this.#renderedGraphicRows = 0;
+		this.#native = undefined;
+		this.invalidate();
+	}
+
+	/** Whether the live render is waiting for its off-thread SIXEL encode. */
+	get pending(): boolean {
+		return (
+			TERMINAL.imageProtocol === ImageProtocol.Sixel &&
+			!this.#cachedSuppressed &&
+			this.#sixel !== undefined &&
+			this.#sixel.sequence === undefined
+		);
+	}
+
 	releaseRenderCaches(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
@@ -702,13 +721,16 @@ export class Image implements Component {
 	 * SIXEL sequence for a target size. A new size starts the encode off the JS
 	 * thread and answers `undefined` until it settles; the settled encode
 	 * invalidates the cached lines and requests a repaint. A render bound for
-	 * scrollback cannot wait, so it encodes synchronously.
+	 * scrollback cannot wait, so it encodes synchronously. Shrinking a settled
+	 * graphic also encodes synchronously: the old payload no longer fits, and
+	 * reserving blank rows would erase an image that is already visible.
 	 */
 	#sixelSequence(widthPx: number, heightPx: number): string | null | undefined {
 		const current = this.#sixel;
 		const sameSize = current !== undefined && current.widthPx === widthPx && current.heightPx === heightPx;
 		if (sameSize && current.sequence !== undefined) return current.sequence;
-		if (scrollbackRenderDepth > 0) {
+		const shrinking = current?.sequence != null && widthPx <= current.widthPx && heightPx <= current.heightPx;
+		if (scrollbackRenderDepth > 0 || shrinking) {
 			// Replacing the entry makes a still-pending async encode settle as stale.
 			const sequence = encodeSixelNow(this.#base64Data, widthPx, heightPx);
 			this.#sixel = { widthPx, heightPx, sequence };
@@ -754,7 +776,8 @@ export class Image implements Component {
 		return this.#native;
 	}
 
-	render(width: number): readonly string[] {
+	/** Keep a previous raster visible while this image's SIXEL encode is pending. Both share one budget slot. */
+	render(width: number, previous?: Image): readonly string[] {
 		const imageProtocol = TERMINAL.imageProtocol;
 		const hasProtocol = imageProtocol != null;
 		const cellDimensions = getCellDimensions();
@@ -796,13 +819,20 @@ export class Image implements Component {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
 			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
-			const result = renderImage(this.#base64Data, this.#dimensions, {
+			let result = renderImage(this.#base64Data, this.#dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: this.#options.maxHeightCells,
 				imageId: this.#imageId,
 				includeTransmit: needsTransmit,
 				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx),
 			});
+			if (imageProtocol === ImageProtocol.Sixel && result?.sequence === undefined && previous && this.pending) {
+				result = renderImage(previous.#base64Data, previous.#dimensions, {
+					maxWidthCells: maxWidth,
+					maxHeightCells: this.#options.maxHeightCells,
+					sixel: (widthPx, heightPx) => previous.#sixelSequence(widthPx, heightPx),
+				});
+			}
 
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {
 				this.#budget.enqueueTransmit(this.#imageId, result.transmit);
