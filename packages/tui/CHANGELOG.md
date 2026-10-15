@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- SVG figures can now fit smaller overlays and panes using a caller-provided row limit ([#15661](https://github.com/can1357/oh-my-pi/issues/15661)).
+
 ## [18.11.0] - 2026-10-14
 
 ### Added

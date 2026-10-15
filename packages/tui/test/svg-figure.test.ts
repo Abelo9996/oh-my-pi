@@ -1,6 +1,9 @@
 import * as path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { FigureMarkdown } from "@oh-my-pi/pi-tui/chat/figure-markdown";
 import { SvgFigure } from "@oh-my-pi/pi-tui/chat/svg-figure";
+import { renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
+import { fencedCode, Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
 	type CellDimensions,
@@ -10,7 +13,7 @@ import {
 	setTerminalImageProtocol,
 	TERMINAL,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TUI } from "@oh-my-pi/pi-tui/tui";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
@@ -21,6 +24,7 @@ withoutTerminalMultiplexer();
 /** A HiDPI cell; 838 units at 2.25 px/unit is 1885.5 px, not a whole number of cells. */
 const CELL: CellDimensions = { widthPx: 16, heightPx: 36 };
 const SVG = `<svg viewBox="0 0 838 200"><rect width="838" height="200" fill="var(--accent)"/></svg>`;
+const LANDSCAPE_SVG = '<svg viewBox="0 0 400 300"><rect width="400" height="300" fill="#f00"/></svg>';
 
 /** A final figure whose raster landings resolve `landed()`. */
 function figure(): { figure: SvgFigure; landed: () => Promise<void> } {
@@ -144,6 +148,95 @@ describe("SvgFigure", () => {
 		const shown = placement(svg, 80);
 		expect(shown.columns).toBe(78);
 		expect(shown.box).toBe(shown.raster);
+	});
+
+	it("fits an SVG fence's reserved rows and SIXEL payload within a smaller surface", async () => {
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		let changed = Promise.withResolvers<void>();
+		const block = new FigureMarkdown(fencedCode("svg", LANDSCAPE_SVG), {
+			markdown: text => new Markdown(text, 0, 0, getMarkdownTheme()),
+			charts: false,
+			maxRows: () => 4,
+			onChange: () => changed.resolve(),
+		});
+		try {
+			block.render(76);
+			await changed.promise;
+			changed = Promise.withResolvers<void>();
+			const reserved = block.render(76);
+			await changed.promise;
+			const drawn = block.render(76);
+			expect(reserved.length).toBeLessThanOrEqual(4);
+			expect(drawn.length).toBeLessThanOrEqual(4);
+			expect(drawn.at(-1)).toMatch(/\x1bP[\d;]*q/);
+		} finally {
+			block.dispose();
+		}
+	});
+
+	it.each(["render argument", "row callback", "setter"] as const)(
+		"keeps an already drawn SVG within a smaller %s bound while its raster is replaced",
+		async bound => {
+			setTerminalImageProtocol(ImageProtocol.Sixel);
+			let maxRows = 12;
+			let landed = Promise.withResolvers<void>();
+			const svg = new SvgFigure({
+				maxRows: bound === "row callback" ? () => maxRows : bound === "setter" ? maxRows : undefined,
+				onChange: () => landed.resolve(),
+			});
+			svg.update(LANDSCAPE_SVG, true);
+			const render = () => svg.render(76, bound === "render argument" ? maxRows : undefined);
+			try {
+				render();
+				await landed.promise;
+				expect(renderForScrollback(render).length).toBeGreaterThan(4);
+
+				landed = Promise.withResolvers<void>();
+				maxRows = 4;
+				if (bound === "setter") svg.setMaxRows(maxRows);
+				const pending = renderForScrollback(render);
+				expect(pending.length).toBeLessThanOrEqual(maxRows);
+				expect(pending.at(-1)).toMatch(/\x1bP[\d;]*q/);
+				await landed.promise;
+				const drawn = renderForScrollback(render);
+				expect(drawn.length).toBeLessThanOrEqual(maxRows);
+				expect(drawn.at(-1)).toMatch(/\x1bP[\d;]*q/);
+				const raster = /"\d+;\d+;(\d+);(\d+)/.exec(drawn.join("\n"));
+				expect(raster).not.toBeNull();
+				expect(Math.ceil(Number(raster![2]) / CELL.heightPx)).toBeLessThanOrEqual(maxRows);
+			} finally {
+				svg.dispose();
+			}
+		},
+	);
+
+	it("restores the configured row callback after a FigureMarkdown render override", async () => {
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		let maxRows = 12;
+		let landed = Promise.withResolvers<void>();
+		const block = new FigureMarkdown(fencedCode("svg", LANDSCAPE_SVG), {
+			markdown: text => new Markdown(text, 0, 0, getMarkdownTheme()),
+			charts: false,
+			maxRows: () => maxRows,
+			onChange: () => landed.resolve(),
+		});
+		try {
+			block.render(76, 4);
+			await landed.promise;
+			expect(renderForScrollback(() => block.render(76, 4))).toHaveLength(4);
+
+			landed = Promise.withResolvers<void>();
+			maxRows = 6;
+			block.render(76);
+			await landed.promise;
+			const drawn = renderForScrollback(() => block.render(76));
+			expect(drawn).toHaveLength(maxRows);
+			const raster = /"\d+;\d+;(\d+);(\d+)/.exec(drawn.join("\n"));
+			expect(raster).not.toBeNull();
+			expect(Math.ceil(Number(raster![2]) / CELL.heightPx)).toBe(maxRows);
+		} finally {
+			block.dispose();
+		}
 	});
 
 	// Regression (#15660): with no theme installed the palette threw inside the

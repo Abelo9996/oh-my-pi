@@ -221,6 +221,8 @@ export function describeTableChart(chart: TableChart, key: string): NativeNode {
 export interface TableChartFigureOptions {
 	/** Shared inline-image budget. */
 	budget?: ImageBudget;
+	/** Row ceiling for the raster; defaults to a share of the terminal viewport. */
+	maxRows?: number | (() => number | undefined);
 	/** The chart's rows changed outside a text update: its pick or raster landed. */
 	onChange: () => void;
 }
@@ -242,7 +244,15 @@ export class TableChartFigure implements Component {
 
 	constructor(options: TableChartFigureOptions) {
 		this.#options = options;
-		this.#figure = new SvgFigure({ budget: options.budget, onChange: options.onChange });
+		this.#figure = new SvgFigure({
+			budget: options.budget,
+			maxRows: options.maxRows,
+			onChange: options.onChange,
+		});
+	}
+
+	setMaxRows(maxRows?: number | (() => number | undefined)): void {
+		this.#figure.setMaxRows(maxRows);
 	}
 
 	/** Point the figure at `table`. */
@@ -258,10 +268,10 @@ export class TableChartFigure implements Component {
 		return this.#table !== undefined && (this.#chart === undefined || (this.#chart !== null && this.#figure.pending));
 	}
 
-	render(width: number): readonly string[] {
+	render(width: number, maxRows?: number): readonly string[] {
 		if (this.#chart === undefined && !this.#waiting) this.#resolve();
 		if (!this.#chart) return [];
-		const rows = this.#figure.render(width);
+		const rows = this.#figure.render(width, maxRows);
 		return rows.length ? ["", ...rows] : rows;
 	}
 

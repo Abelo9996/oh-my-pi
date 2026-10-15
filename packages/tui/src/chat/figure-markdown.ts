@@ -14,6 +14,8 @@ export interface FigureMarkdownOptions {
 	charts: boolean;
 	/** Shared inline-image budget for the figures. */
 	budget?: ImageBudget;
+	/** Row ceiling for child figures; defaults to a share of the terminal viewport. */
+	maxRows?: number | (() => number | undefined);
 	/** A figure's rows changed outside a text update (raster landed, fell back to code). */
 	onChange: () => void;
 }
@@ -36,6 +38,10 @@ type Part =
  */
 export class FigureMarkdown extends Container {
 	readonly #options: FigureMarkdownOptions;
+	#maxRows?: number | (() => number | undefined);
+	#renderMaxRows?: number;
+	readonly #figureMaxRows = (): number | undefined =>
+		this.#renderMaxRows ?? (typeof this.#maxRows === "function" ? this.#maxRows() : this.#maxRows);
 	#text = "";
 	#transient = false;
 	#parts: Part[] = [];
@@ -43,7 +49,23 @@ export class FigureMarkdown extends Container {
 	constructor(text: string, options: FigureMarkdownOptions) {
 		super();
 		this.#options = options;
+		this.#maxRows = options.maxRows;
 		this.setText(text);
+	}
+
+	/** Replace the configured row ceiling and clear any render-time override. */
+	setMaxRows(maxRows?: number | (() => number | undefined)): void {
+		this.#maxRows = maxRows;
+		this.#renderMaxRows = undefined;
+		for (const part of this.#parts) {
+			if (part.kind === "svg" || part.kind === "chart") part.figure.setMaxRows(this.#figureMaxRows);
+		}
+	}
+
+	/** Render with an optional row ceiling overriding the configuration for this pass. */
+	override render(width: number, maxRows?: number): readonly string[] {
+		this.#renderMaxRows = maxRows;
+		return super.render(width);
 	}
 
 	/** Replace the source; returns whether it changed. */
@@ -109,7 +131,11 @@ export class FigureMarkdown extends Container {
 				}
 				reshaped = true;
 				const { budget, onChange } = this.#options;
-				return { kind: "chart", figure: new TableChartFigure({ budget, onChange }), table: segment.table };
+				return {
+					kind: "chart",
+					figure: new TableChartFigure({ budget, maxRows: this.#figureMaxRows, onChange }),
+					table: segment.table,
+				};
 			}
 			if (segment.kind === "markdown") {
 				const text = segment.text.trim();
@@ -130,7 +156,7 @@ export class FigureMarkdown extends Container {
 			const { markdown, budget, onChange } = this.#options;
 			return {
 				kind: "svg",
-				figure: new SvgFigure({ markdown, budget, onChange }),
+				figure: new SvgFigure({ markdown, budget, maxRows: this.#figureMaxRows, onChange }),
 				source: segment.source,
 				closed: segment.closed,
 			};

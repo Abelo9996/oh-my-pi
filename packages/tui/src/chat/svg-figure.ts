@@ -113,6 +113,8 @@ export interface SvgFigureOptions {
 	markdown?: (text: string) => Markdown;
 	/** Shared inline-image budget; superseded rasters are released from it. */
 	budget?: ImageBudget;
+	/** Row ceiling for the raster; defaults to a share of the terminal viewport. */
+	maxRows?: number | (() => number | undefined);
 	/** The figure's rows changed outside a text update: a raster landed or rendering fell back to code. */
 	onChange: () => void;
 }
@@ -149,9 +151,12 @@ interface Attempt {
 
 let nextFigureId = 0;
 
-/** Cells a figure rendered at `width` may fill: the image's width, a share of the viewport, and the raster edge cap. */
-function limitsFor(width: number, cell: CellDimensions): Limits {
-	const viewportRows = Math.floor((process.stdout.rows || 24) * MAX_VIEWPORT_SHARE);
+/** Cells a figure rendered at `width` may fill: the image's width, the caller's row ceiling (or a share of the viewport), and the raster edge cap. */
+function limitsFor(width: number, cell: CellDimensions, maxRows?: number): Limits {
+	const viewportRows =
+		maxRows != null && maxRows > 0
+			? Math.max(1, Math.floor(maxRows))
+			: Math.max(1, Math.floor((process.stdout.rows || 24) * MAX_VIEWPORT_SHARE));
 	return {
 		columns: Math.min(imageMaxColumns(width), Math.floor(MAX_EDGE_PX / cell.widthPx)),
 		rows: Math.max(1, Math.min(viewportRows, Math.floor(MAX_EDGE_PX / cell.heightPx))),
@@ -161,6 +166,8 @@ function limitsFor(width: number, cell: CellDimensions): Limits {
 export class SvgFigure implements Component {
 	readonly #options: SvgFigureOptions;
 	readonly #id = nextFigureId++;
+	#maxRows?: number | (() => number | undefined);
+	#renderMaxRows?: number;
 	#source = "";
 	/** No more text arrives for this fence: no throttling, and a failed raster falls back to code. */
 	#final = false;
@@ -177,13 +184,14 @@ export class SvgFigure implements Component {
 	#disposed = false;
 	/** Last render width; rasters wait for the first render to know their room. */
 	#width: number | undefined;
-	#image: { raster: Raster; component: Image } | undefined;
+	#image: { raster: Raster; rows: number; component: Image } | undefined;
 	#fallback: { source: string; md: Markdown } | undefined;
 	#placeholder: readonly string[] | undefined;
 
 	constructor(options: SvgFigureOptions) {
 		ensureThemeSync();
 		this.#options = options;
+		this.#maxRows = options.maxRows;
 	}
 
 	/** Feed the fence body; `final` once the fence closed or the message stopped streaming. */
@@ -206,9 +214,28 @@ export class SvgFigure implements Component {
 		return this.#final && this.#raster?.source !== this.#source && this.#failed !== this.#source;
 	}
 
-	render(width: number): readonly string[] {
+	/** Replace the configured row ceiling and clear any render-time override. */
+	setMaxRows(maxRows?: number | (() => number | undefined)): void {
+		this.#maxRows = maxRows;
+		this.#renderMaxRows = undefined;
+		this.#schedule();
+	}
+
+	#resolveMaxRows(): number | undefined {
+		const bound =
+			this.#renderMaxRows !== undefined
+				? this.#renderMaxRows
+				: typeof this.#maxRows === "function"
+					? this.#maxRows()
+					: this.#maxRows;
+		return bound != null && Number.isFinite(bound) && bound > 0 ? bound : undefined;
+	}
+
+	/** Render with an optional row ceiling overriding the configuration for this pass. */
+	render(width: number, maxRows?: number): readonly string[] {
 		// Width, cell size and theme are render-time inputs; a change re-rasterizes.
 		this.#width = width;
+		this.#renderMaxRows = maxRows;
 		this.#schedule();
 		if (this.#failed === this.#source) return this.#fallbackRows(width);
 		const raster = this.#raster;
@@ -217,7 +244,8 @@ export class SvgFigure implements Component {
 			this.#placeholder ??= [` ${theme.fg("dim", "Drawing SVG…")}`];
 			return this.#placeholder;
 		}
-		return this.#imageFor(raster).render(width);
+		const limits = limitsFor(width, getCellDimensions(), this.#resolveMaxRows());
+		return this.#imageFor(raster, limits.rows).render(width);
 	}
 
 	invalidate(): void {
@@ -247,7 +275,7 @@ export class SvgFigure implements Component {
 		const attempt = this.#attempt;
 		if (this.#failed === this.#source) return false;
 		const cell = getCellDimensions();
-		const limits = limitsFor(width, cell);
+		const limits = limitsFor(width, cell, this.#resolveMaxRows());
 		return (
 			attempt === undefined ||
 			attempt.source !== this.#source ||
@@ -302,7 +330,7 @@ export class SvgFigure implements Component {
 		const attempt: Attempt = {
 			source: this.#source,
 			cell,
-			limits: limitsFor(width, cell),
+			limits: limitsFor(width, cell, this.#resolveMaxRows()),
 			themeEpoch: getThemeEpoch(),
 			final: this.#final,
 		};
@@ -366,11 +394,11 @@ export class SvgFigure implements Component {
 	 * cell size and room it was drawn for that box is its pixels exactly; a
 	 * raster outdated by a resize is scaled by {@link Image} until its redraw lands.
 	 */
-	#imageFor(raster: Raster): Image {
+	#imageFor(raster: Raster, maxRows: number): Image {
 		const current = this.#image;
-		if (current?.raster === raster) return current.component;
 		const columns = raster.widthPx / raster.cell.widthPx;
-		const rows = raster.heightPx / raster.cell.heightPx;
+		const rows = Math.min(raster.heightPx / raster.cell.heightPx, maxRows);
+		if (current?.raster === raster && current.rows === rows) return current.component;
 		const component = new Image(
 			raster.data,
 			"image/png",
@@ -385,7 +413,7 @@ export class SvgFigure implements Component {
 			},
 			{ widthPx: raster.widthPx, heightPx: raster.heightPx },
 		);
-		this.#image = { raster, component };
+		this.#image = { raster, rows, component };
 		return component;
 	}
 
