@@ -78,7 +78,10 @@ export function fileUriForTerminal(
 	const scheme = Bun.env.PI_LINK_SCHEME;
 	if (scheme) {
 		const host = Bun.env.PI_LINK_HOST || os.hostname();
-		return `${scheme}://${host}${url.pathToFileURL(filePath).pathname}`;
+		const fileUrl = url.pathToFileURL(filePath);
+		// Keep UNC servers in the path: ompfile://remote//nas/share/file.ts.
+		const targetPath = fileUrl.host ? `//${fileUrl.host}${fileUrl.pathname}` : fileUrl.pathname;
+		return `${scheme}://${host}${targetPath}`;
 	}
 	if (terminalId !== "vscode") return tryFileUri(filePath);
 	// vscode:// takes a filesystem path with forward slashes. Encode each

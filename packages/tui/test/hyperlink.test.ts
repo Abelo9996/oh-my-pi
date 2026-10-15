@@ -234,6 +234,19 @@ describe("fileHyperlink", () => {
 		expect(fileUriForTerminal(filePath, undefined, "iterm2")).toBe(`ompfile://beelink${expectedPathname}`);
 	});
 
+	it.skipIf(process.platform !== "win32")(
+		"preserves UNC servers and encoded filenames in custom OSC 8 targets",
+		() => {
+			setHyperlinkMode("always");
+			Bun.env.PI_LINK_SCHEME = "ompfile";
+			Bun.env.PI_LINK_HOST = "beelink";
+			const filePath = "\\\\nas\\share\\remote project\\a#b% 中文.ts";
+			const uri = extractLinkUri(fileHyperlink(filePath, "a#b% 中文.ts"));
+			expect(uri).toBe("ompfile://beelink//nas/share/remote%20project/a%23b%25%20%E4%B8%AD%E6%96%87.ts");
+			expect(url.fileURLToPath(`file:${new URL(uri!).pathname}`)).toBe(filePath);
+		},
+	);
+
 	it("defaults host to os.hostname() when only PI_LINK_SCHEME is set", () => {
 		Bun.env.PI_LINK_SCHEME = "ompfile";
 		const filePath = path.resolve("/Users/foo/bar.ts");
