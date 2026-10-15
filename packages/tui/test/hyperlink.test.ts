@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
@@ -23,8 +23,6 @@ const ST = "\x1b\\";
 const BEL = "\x07";
 const LINK_END = `${OSC}8;;${ST}`;
 const ORIGINAL_NO_COLOR = Bun.env.NO_COLOR;
-const ORIGINAL_PI_LINK_SCHEME = Bun.env.PI_LINK_SCHEME;
-const ORIGINAL_PI_LINK_HOST = Bun.env.PI_LINK_HOST;
 
 /** Extract the hyperlink URI from a wrapped string. Returns undefined if not wrapped. */
 function extractLinkUri(text: string): string | undefined {
@@ -46,27 +44,12 @@ function setHyperlinkMode(mode: "off" | "auto" | "always"): void {
 	applyHyperlinkSetting(mode);
 }
 
-beforeEach(() => {
-	delete Bun.env.PI_LINK_SCHEME;
-	delete Bun.env.PI_LINK_HOST;
-});
-
 afterEach(() => {
 	applyHyperlinkSetting("auto");
 	if (ORIGINAL_NO_COLOR === undefined) {
 		delete Bun.env.NO_COLOR;
 	} else {
 		Bun.env.NO_COLOR = ORIGINAL_NO_COLOR;
-	}
-	if (ORIGINAL_PI_LINK_SCHEME === undefined) {
-		delete Bun.env.PI_LINK_SCHEME;
-	} else {
-		Bun.env.PI_LINK_SCHEME = ORIGINAL_PI_LINK_SCHEME;
-	}
-	if (ORIGINAL_PI_LINK_HOST === undefined) {
-		delete Bun.env.PI_LINK_HOST;
-	} else {
-		Bun.env.PI_LINK_HOST = ORIGINAL_PI_LINK_HOST;
 	}
 });
 
