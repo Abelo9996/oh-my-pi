@@ -433,6 +433,7 @@ import { cfgStreamRedactPatterns } from "../stream/settings";
 import { cfgSttEnabled } from "../stt/settings";
 import { combine, type SettingValueOf } from "../config/registry";
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
+import { cfgExtensionAssistantTextRenderers } from "../extensibility/settings";
 import { cfgTierAdvisor } from "../session/settings";
 import {
 	cfgCompactionEnabled,
@@ -482,6 +483,7 @@ const cfgLiveUiSettings = combine({
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
+	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
 	"tui.autoGraph": cfgTuiAutoGraph,
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
@@ -4185,6 +4187,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (any("tui.renderSvg")) {
 			setSvgFigureRendering(cfgTuiRenderSvg.get(this.settings));
+			rebuildChat = true;
+		}
+		// Components take the extension text renderers when built; the rebuild keeps the live reply's
+		// component, so hand it the new set directly.
+		if (any("extensionRenderers.assistantText")) {
+			this.streamingComponent?.setTextRendering({
+				renderers: this.viewSession.extensionRunner?.getAssistantTextRenderers() ?? [],
+				contentOffset: 0,
+			});
 			rebuildChat = true;
 		}
 		if (any("tui.autoGraph")) {
