@@ -37,6 +37,7 @@ import {
 	encodeKittyDeleteImage,
 	encodeKittyDeletePlacement,
 	encodeKittyPlacementLine,
+	type CellDimensions,
 	getCellDimensions,
 	ImageProtocol,
 	isImageProtocolForced,
@@ -653,6 +654,17 @@ interface LiveImagePlacement {
 	line: string;
 }
 
+/** One iTerm2 placement crop: the source rows a cell row covers depend on the cell's aspect ratio. */
+interface ITerm2Crop {
+	hiddenRows: number;
+	cell: CellDimensions;
+}
+
+/** Cache key of an {@link ITerm2Crop} within one source line. */
+function iterm2CropKey(crop: ITerm2Crop): string {
+	return `${crop.hiddenRows}:${crop.cell.widthPx}x${crop.cell.heightPx}`;
+}
+
 /**
  * Re-encode an `Image` iTerm2 direct-placement line with its top
  * `hiddenRows` cell rows cut out of the PNG, anchored at its first visible row
@@ -660,10 +672,9 @@ interface LiveImagePlacement {
  * a placement. Resolves `null` when the line is not a PNG placement this can
  * crop; the caller then drops it rather than paint over foreign rows.
  */
-async function cropITerm2Placement(line: string, hiddenRows: number): Promise<string | null> {
+async function cropITerm2Placement(line: string, { hiddenRows, cell }: ITerm2Crop): Promise<string | null> {
 	const match = /^\x1b7\x1b\[(\d+)A\x1b\]1337;File=([^:\x07]*):([A-Za-z0-9+/=]+)\x07\x1b8$/.exec(line);
 	const columns = match ? Number(/(?:^|;)width=(\d+)(?:;|$)/.exec(match[2])?.[1]) : 0;
-	const cell = getCellDimensions();
 	if (!match || !(columns > 0) || cell.widthPx <= 0 || cell.heightPx <= 0) return null;
 	const png = Buffer.from(match[3], "base64");
 	const sourceWidth = png.byteLength >= 24 ? png.readUInt32BE(16) : 0;
@@ -1025,10 +1036,10 @@ export class TUI extends Container {
 	#screenImagePlacements = new Map<number, LiveImagePlacement>();
 	#altImagePlacements = new Map<number, LiveImagePlacement>();
 	#nextImagePlacementId = 1;
-	/** Cropped iTerm2 placement lines: source line, then hidden rows, to the crop (`null`: cannot crop). */
-	#iterm2Crops = new LRUCache<string, Map<number, string | null>>({ max: 16 });
-	/** Crops a frame asked for but has not got yet: source line to its latest hidden rows. */
-	#iterm2Wanted = new Map<string, number>();
+	/** Cropped iTerm2 placement lines: source line, then {@link iterm2CropKey}, to the crop (`null`: cannot crop). */
+	#iterm2Crops = new LRUCache<string, Map<string, string | null>>({ max: 16 });
+	/** Crops a frame asked for but has not got yet: source line to its latest request. */
+	#iterm2Wanted = new Map<string, ITerm2Crop>();
 	#iterm2Cropping = false;
 	#ghosttyInitialImageDelayDone = false;
 	#ghosttyInitialImageDelayTimer: RenderTimer | undefined;
@@ -3370,31 +3381,33 @@ export class TUI extends Container {
 
 	/**
 	 * The iTerm2 placement `line` with its top `hiddenRows` cell rows cropped
-	 * off, `null` when it cannot be cropped, or `undefined` while the crop runs
-	 * off the paint path. Decoding and re-encoding a large PNG per newly hidden
-	 * row would otherwise stall every frame of a scroll.
+	 * off at the current cell geometry, `null` when it cannot be cropped, or
+	 * `undefined` while the crop runs off the paint path. Decoding and
+	 * re-encoding a large PNG per newly hidden row would otherwise stall every
+	 * frame of a scroll.
 	 */
 	#croppedITerm2(line: string, hiddenRows: number): string | null | undefined {
-		const cached = this.#iterm2Crops.get(line)?.get(hiddenRows);
+		const crop = { hiddenRows, cell: { ...getCellDimensions() } };
+		const cached = this.#iterm2Crops.get(line)?.get(iterm2CropKey(crop));
 		if (cached !== undefined) return cached;
-		this.#iterm2Wanted.set(line, hiddenRows);
+		this.#iterm2Wanted.set(line, crop);
 		if (!this.#iterm2Cropping) void this.#runITerm2Crops();
 		return undefined;
 	}
 
-	/** Crop every wanted placement, latest hidden rows per line, then repaint the viewport once. */
+	/** Crop every wanted placement, the latest request per line, then repaint the viewport once. */
 	async #runITerm2Crops(): Promise<void> {
 		this.#iterm2Cropping = true;
 		try {
-			for (const [line, hiddenRows] of this.#iterm2Wanted) {
+			for (const [line, crop] of this.#iterm2Wanted) {
 				this.#iterm2Wanted.delete(line);
-				const cropped = await cropITerm2Placement(line, hiddenRows).catch(() => null);
+				const cropped = await cropITerm2Placement(line, crop).catch(() => null);
 				let crops = this.#iterm2Crops.get(line);
 				if (!crops) {
 					crops = new Map();
 					this.#iterm2Crops.set(line, crops);
 				}
-				crops.set(hiddenRows, cropped);
+				crops.set(iterm2CropKey(crop), cropped);
 			}
 		} finally {
 			this.#iterm2Cropping = false;

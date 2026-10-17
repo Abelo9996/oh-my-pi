@@ -194,7 +194,17 @@ describe("iTerm2 live placement", () => {
 		try {
 			tui.start();
 			await settle(term);
-			for (const nextHidden of [2, 3, 1]) {
+			const placementLine = () => renderForScrollback(() => image.render(40)).at(-1);
+			const original = placementLine();
+			// The last step narrows the cell: same placement bytes, more source rows per cell row.
+			for (const [nextHidden, cell] of [
+				[2, CELL],
+				[3, CELL],
+				[1, CELL],
+				[2, { widthPx: 9, heightPx: 20 }],
+			] as const) {
+				setCellDimensions(cell);
+				expect(placementLine()).toBe(original);
 				hidden = nextHidden;
 				writes.length = 0;
 				tui.requestRender(true);
@@ -209,9 +219,9 @@ describe("iTerm2 live placement", () => {
 				const [, lift, data] = placements[0]!;
 				// Anchored at the first visible row, never above the live region.
 				expect(Number(lift ?? 0)).toBe(3 - hidden);
-				expect(await pixels(Buffer.from(data!, "base64"))).toEqual(
-					await pixels(bottomRows(40, 80, rgb, hidden * CELL.heightPx)),
-				);
+				// One cell row shows `heightPx * 40 / (4 * widthPx)` source rows at `width=4`.
+				const skip = Math.ceil((hidden * cell.heightPx * 40) / (4 * cell.widthPx));
+				expect(await pixels(Buffer.from(data!, "base64"))).toEqual(await pixels(bottomRows(40, 80, rgb, skip)));
 				expect(
 					term
 						.getViewport()
