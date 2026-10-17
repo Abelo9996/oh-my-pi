@@ -88,9 +88,10 @@ describe("task wire schema", () => {
 		const enabled = getTaskSchema({ isolationEnabled: false, batchEnabled: false, perCallModel: true })(params);
 		expect(enabled instanceof type.errors).toBe(false);
 		if (!(enabled instanceof type.errors)) expect(enabled).toHaveProperty("model", "openai/gpt-5.4:high");
-		// Off (the default) hides the field, so the wire schema does not carry it.
+		// Off (the default) hides the field: the schema drops it and the call still parses.
 		const hidden = taskSchema(params);
-		if (!(hidden instanceof type.errors)) expect("model" in hidden).toBe(false);
+		expect(hidden instanceof type.errors).toBe(false);
+		expect(hidden).not.toHaveProperty("model");
 	});
 
 	it("keeps a per-call model selector on batch items", () => {
