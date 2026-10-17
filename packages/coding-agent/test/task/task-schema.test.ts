@@ -249,7 +249,7 @@ describe("per-call model schema boundaries", () => {
 				});
 				// `never` would serialize to `{not:{}}`, which Cloud Code Assist rejects; items carry `model`.
 				expect(result instanceof type.errors).toBe(false);
-				if (!(result instanceof type.errors)) expect("model" in result).toBe(false);
+				if (!(result instanceof type.errors)) expect(result).not.toHaveProperty("model");
 			});
 		}
 	}
@@ -263,7 +263,7 @@ describe("per-call model schema boundaries", () => {
 		});
 		expect(flat instanceof type.errors).toBe(false);
 		if (flat instanceof type.errors) throw new Error(flat.summary);
-		expect(flat.model).toEqual(models);
+		expect(flat).toHaveProperty("model", models);
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, perCallModel: true })({
 			context: "Shared context",
 			tasks: [{ task: "Do work", solutionSpace: "c", model: models }],

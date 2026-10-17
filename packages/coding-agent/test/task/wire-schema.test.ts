@@ -87,7 +87,7 @@ describe("task wire schema", () => {
 		const params = { agent: "task", task: "x", solutionSpace: "c", model: "openai/gpt-5.4:high" };
 		const enabled = getTaskSchema({ isolationEnabled: false, batchEnabled: false, perCallModel: true })(params);
 		expect(enabled instanceof type.errors).toBe(false);
-		if (!(enabled instanceof type.errors)) expect(enabled.model).toBe("openai/gpt-5.4:high");
+		if (!(enabled instanceof type.errors)) expect(enabled).toHaveProperty("model", "openai/gpt-5.4:high");
 		// Off (the default) hides the field, so the wire schema does not carry it.
 		const hidden = taskSchema(params);
 		if (!(hidden instanceof type.errors)) expect("model" in hidden).toBe(false);
