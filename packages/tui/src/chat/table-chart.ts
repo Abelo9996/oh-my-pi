@@ -250,13 +250,24 @@ export class TableChartFigure implements Component {
 		);
 	}
 
+	/** Size a chart and its separator without recording an image-budget observation. */
+	measureRows(width: number, maxRows?: number): number {
+		if (!this.#prepareRender(maxRows)) return 0;
+		const rows = this.#figure.measureRows(width);
+		return rows > 0 ? rows + 1 : 0;
+	}
+
 	render(width: number, maxRows?: number): readonly string[] {
-		this.#renderMaxRows = maxRows;
-		if (this.#resolveMaxRows() === 0) return [];
-		if (this.#chart === undefined && !this.#waiting) this.#resolve();
-		if (!this.#chart) return [];
+		if (!this.#prepareRender(maxRows)) return [];
 		const rows = this.#figure.render(width);
 		return rows.length ? ["", ...rows] : rows;
+	}
+
+	#prepareRender(maxRows?: number): boolean {
+		this.#renderMaxRows = maxRows;
+		if (this.#resolveMaxRows() === 0) return false;
+		if (this.#chart === undefined && !this.#waiting) this.#resolve();
+		return !!this.#chart;
 	}
 
 	invalidate(): void {

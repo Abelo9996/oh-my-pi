@@ -252,9 +252,10 @@ export interface Component {
 	 * component may (and should) return the same array reference it returned
 	 * last time. `maxRows`, when supplied, is the surface's available height;
 	 * height-aware components can use it to fit complete images inside it.
+	 * `verticalAnchor` is the edge to retain when the content exceeds that height.
 	 * Text-only components may still return more rows for the caller to clip.
 	 */
-	render(width: number, maxRows?: number): readonly string[];
+	render(width: number, maxRows?: number, verticalAnchor?: "top" | "bottom"): readonly string[];
 
 	/**
 	 * Describe the component semantically for a Tern Surface Protocol
@@ -3200,13 +3201,13 @@ export class TUI extends Container {
 			// Get layout with height=0 first to determine width and maxHeight
 			// (width and maxHeight don't depend on overlay height).
 			const { width, maxHeight } = this.#resolveOverlayLayout(options, 0, termWidth, termHeight);
-			let overlayLines = component.render(width, maxHeight);
+			const anchor = options?.anchor ?? "center";
+			const bottom = anchor === "bottom-left" || anchor === "bottom-center" || anchor === "bottom-right";
+			let overlayLines = component.render(width, maxHeight, bottom ? "bottom" : "top");
 			if (overlayLines.length > maxHeight) {
-				const anchor = options?.anchor ?? "center";
-				overlayLines =
-					anchor === "bottom-left" || anchor === "bottom-center" || anchor === "bottom-right"
-						? overlayLines.slice(overlayLines.length - maxHeight)
-						: overlayLines.slice(0, maxHeight);
+				overlayLines = bottom
+					? overlayLines.slice(overlayLines.length - maxHeight)
+					: overlayLines.slice(0, maxHeight);
 			}
 			const { row, col } = this.#resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
 			for (let i = 0; i < overlayLines.length; i++) {

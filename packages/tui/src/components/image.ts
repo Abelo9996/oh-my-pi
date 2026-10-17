@@ -1,6 +1,8 @@
 import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
 import { getKittyGraphics } from "../kitty-graphics";
 import {
+	calculateImageFit,
+	calculateSixelFit,
 	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
@@ -789,6 +791,26 @@ export class Image implements Component {
 		return this.renderWithPrevious(width);
 	}
 
+	/** Bound the next render's height without observing the budget or encoding graphics. */
+	measureRows(width: number, previous?: Image): number {
+		const fallbackRows = Math.max(1, this.#renderedGraphicRows);
+		if (TERMINAL.imageProtocol === null) return fallbackRows;
+		const cell = getCellDimensions();
+		const options = { maxWidthCells: this.#maxWidth(width), maxHeightCells: this.#options.maxHeightCells };
+		const fit = calculateImageFit(this.#dimensions, options, cell);
+		if (TERMINAL.imageProtocol !== ImageProtocol.Sixel) return Math.max(fallbackRows, fit.rows);
+		const rows = calculateSixelFit(fit, cell).rows;
+		const previousRows = previous
+			? calculateSixelFit(calculateImageFit(previous.#dimensions, options, cell), cell).rows
+			: 0;
+		return Math.max(fallbackRows, rows, previousRows);
+	}
+
+	#maxWidth(width: number): number {
+		const cap = this.#options.maxWidthCells;
+		return cap != null && cap > 0 ? Math.min(imageMaxColumns(width), cap) : imageMaxColumns(width);
+	}
+
 	/** Keep a previous raster visible while this image's SIXEL encode is pending. Both share one budget slot. */
 	renderWithPrevious(width: number, previous?: Image): readonly string[] {
 		const imageProtocol = TERMINAL.imageProtocol;
@@ -826,8 +848,7 @@ export class Image implements Component {
 			return this.#cachedLines;
 		}
 
-		const cap = this.#options.maxWidthCells;
-		const maxWidth = cap != null && cap > 0 ? Math.min(imageMaxColumns(width), cap) : imageMaxColumns(width);
+		const maxWidth = this.#maxWidth(width);
 
 		let lines: string[];
 

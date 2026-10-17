@@ -75,9 +75,9 @@ export class FenceFigure implements Component {
 	}
 
 	/** The drawing; no rows while an svg draws, or when it does not. */
-	render(width: number, maxRows?: number): readonly string[] {
+	render(width: number, maxRows?: number, verticalAnchor?: "top" | "bottom"): readonly string[] {
 		if (this.#svg) {
-			return this.#svg.render(width, maxRows);
+			return this.#svg.render(width, maxRows, verticalAnchor);
 		}
 		this.#diagram ??= new Markdown(fencedCode("mermaid", this.#source), 1, 0, getMarkdownTheme());
 		return this.#diagram.render(width);

@@ -1074,7 +1074,7 @@ export function calculateImageRows(
 	return Math.max(1, rows);
 }
 
-function calculateImageFit(
+export function calculateImageFit(
 	imageDimensions: ImageDimensions,
 	options: ImageRenderOptions,
 	cellDims: CellDimensions,
@@ -1100,6 +1100,21 @@ function calculateImageFit(
 	return {
 		columns: maxColumns !== undefined ? Math.min(columns, maxColumns) : columns,
 		rows: maxRows !== undefined ? Math.min(rows, maxRows) : rows,
+	};
+}
+
+/** SIXEL's whole six-pixel bands fitted inside an image's cell box. */
+export function calculateSixelFit(
+	fit: { columns: number; rows: number },
+	cellDims: CellDimensions,
+): ImageDimensions & { rows: number } {
+	const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
+	const heightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
+	const heightScale = heightPx / rawHeightPx;
+	return {
+		widthPx: Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale)),
+		heightPx,
+		rows: Math.max(1, Math.ceil(heightPx / cellDims.heightPx)),
 	};
 }
 
@@ -1321,14 +1336,8 @@ export function renderImage(
 		// padding and the reserved row count never exceeds fit.rows. Scale
 		// the width by the same ratio so resize_exact preserves the aspect
 		// ratio instead of squashing the image vertically.
-		const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
-		const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
-		const heightScale = targetHeightPx / rawHeightPx;
-		const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
-		const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
-		const sequence = options.sixel
-			? options.sixel(targetWidthPx, targetHeightPx)
-			: encodeSixelNow(base64Data, targetWidthPx, targetHeightPx);
+		const { widthPx, heightPx, rows } = calculateSixelFit(fit, cellDims);
+		const sequence = options.sixel ? options.sixel(widthPx, heightPx) : encodeSixelNow(base64Data, widthPx, heightPx);
 		if (sequence === null) return null;
 		// Undefined while the provider's encode is pending: the rows stay reserved.
 		return { sequence, rows };
