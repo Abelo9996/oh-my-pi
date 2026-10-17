@@ -291,6 +291,29 @@ export const cfgTaskEnableEffort = register({
 	},
 });
 
+export const cfgTaskPerCallModel = register({
+	id: "task.perCallModel",
+	type: "enum",
+	values: ["off", "unpinned", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model",
+		description:
+			"Whether task items, eval agent() and workpool() accept a per-call model. A requested model must be one the operator configured (roles, fallback chains, agent models, overrides) or the parent's live model.",
+		options: [
+			{ value: "off", label: "Off", description: "Hide `model`; calls that pass it are rejected" },
+			{
+				value: "unpinned",
+				label: "Unpinned",
+				description: "Accept `model` only for agents without a frontmatter model or task.agentModelOverrides entry",
+			},
+			{ value: "on", label: "On", description: "Accept `model` for every agent" },
+		],
+	},
+});
+
 export const cfgTaskMaxConcurrency = register({
 	id: "task.maxConcurrency",
 	protocolDefault: ["rpc", "acp"],

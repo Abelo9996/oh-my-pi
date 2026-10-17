@@ -83,6 +83,22 @@ describe("task wire schema", () => {
 		}
 	});
 
+	it("keeps a per-call model selector on the flat shape only while task.perCallModel allows it", () => {
+		const params = { agent: "task", task: "x", solutionSpace: "c", model: "openai/gpt-5.4:high" };
+		const enabled = getTaskSchema({ isolationEnabled: false, batchEnabled: false, perCallModel: true })(params);
+		expect(enabled instanceof type.errors).toBe(false);
+		if (!(enabled instanceof type.errors)) expect(enabled.model).toBe("openai/gpt-5.4:high");
+		// Off (the default) hides the field, so the wire schema does not carry it.
+		const hidden = taskSchema(params);
+		if (!(hidden instanceof type.errors)) expect("model" in hidden).toBe(false);
+	});
+
+	it("keeps a per-call model selector on batch items", () => {
+		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, perCallModel: true });
+		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", solutionSpace: "c", model: "@smol" }] }));
+		expect(items[0]?.model).toBe("@smol");
+	});
+
 	it("defaults batch item agents to 'task' on the fast path and keeps names", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
 		const items = parsedItems(

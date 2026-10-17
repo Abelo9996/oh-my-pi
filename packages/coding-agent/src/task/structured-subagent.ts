@@ -9,7 +9,14 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import {
+	modelSelectionInheritsSessionModel,
+	normalizeModelPatternList,
+	resolveAgentModelSelection,
+	resolveConfiguredModelPatterns,
+	resolveModelOverride,
+	splitRoleAliasThinkingSuffix,
+} from "../config/model-resolver";
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type CompactionThresholdPair,
@@ -48,6 +55,7 @@ import {
 import { generateTaskName, sanitizeAgentId } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
+import { assertPerCallModelApproved, type PerCallModelGrants, PerCallModelError } from "./model-approval";
 import { isBundledSeance, prepareSeance, type PreparedSeanceSession } from "./seance";
 import { SEANCE_AGENT_NAME } from "./seance-policy";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
@@ -73,6 +81,7 @@ import {
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
+	cfgTaskPerCallModel,
 } from "./settings";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
@@ -113,7 +122,17 @@ export interface StructuredSubagentRequest {
 	agent?: string;
 	/** Saved source session selected for the bundled seance agent. */
 	sourceSession?: string;
+	/**
+	 * Per-call selector from the model-facing surfaces (task items, `agent()`,
+	 * `workpool()`); gated by `task.perCallModel` and limited to operator-approved models.
+	 * The bundled seance agent reads it as its source-session model instead.
+	 */
 	model?: string | string[];
+	/**
+	 * Model chosen by host code (CLI flags, SDK callers such as `omp cleanse`).
+	 * Same precedence as `model`, but neither gated nor approval-checked.
+	 */
+	hostModel?: string | string[];
 
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
@@ -182,9 +201,17 @@ export interface EffectiveSubagentPolicy {
 	compactionThresholdOverride?: CompactionThresholdPair;
 	/** Exact-name `task.agentAccountPools` entry: the only OAuth accounts the child may use, per listed provider. */
 	oauthAccountPools?: OAuthAccountPools;
+	/**
+	 * Parent model the child falls back to when its own candidates have no
+	 * working credentials. Absent for an explicit per-call `model` (other than
+	 * `@default`): a requested model that cannot run fails instead of being
+	 * replaced by the parent's.
+	 */
 	parentActiveModelPattern?: string;
 	/** Whether the child gets the `yield` tool; see {@link StructuredSubagentRequest.structured}. */
 	structured: boolean;
+	/** Present for a per-call `model`: every model the child sends to must stay approved by these grants. */
+	perCallModelGrants?: PerCallModelGrants;
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
 	isIsolated: boolean;
@@ -308,6 +335,38 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 }
 
 /**
+ * Reason a per-spawn `model` selector cannot mean anything useful, or
+ * `undefined` when it is usable. The literal `"default"` (with or without a
+ * `:level` suffix) is singled out because it reads as "leave the agent's
+ * model alone" while resolving as the `default` role — the ambiguity that got
+ * the previous per-call override removed (#6438). `@default` states the
+ * inherit intent explicitly.
+ * Shared so task, eval `agent()` and `workpool()` reject malformed input
+ * identically before dispatch.
+ */
+export function invalidModelSelectorReason(model: unknown, label: string): string | undefined {
+	if (model === undefined) return undefined;
+	const values: unknown[] = Array.isArray(model) ? model : [model];
+	const patterns: string[] = [];
+	const invalid = `${label} has an invalid \`model\` value ${JSON.stringify(model)}. Use a selector or a non-empty array of selectors such as "openai/gpt-5.4:high" or "@smol".`;
+	for (const value of values) {
+		if (typeof value !== "string") return invalid;
+		const normalized = normalizeModelPatternList(value);
+		if (normalized.length === 0) return invalid;
+		patterns.push(...normalized);
+	}
+	if (patterns.length === 0) return invalid;
+	if (
+		patterns.some(pattern =>
+			["default", "inherit"].includes(splitRoleAliasThinkingSuffix(pattern).base.toLowerCase()),
+		)
+	) {
+		return `${label} has an ambiguous \`model\` value ${JSON.stringify(model)}. Use "@default" to inherit the parent session's model, or name a model explicitly.`;
+	}
+	return undefined;
+}
+
+/**
  * In-flight agent discovery, keyed by resolved cwd, the effective extension
  * roots and the provider/source toggles `discoverAgents` consults. Concurrent
  * preflights (task batch items, eval `agent()` fan-out) share one disk scan;
@@ -428,9 +487,38 @@ export async function resolveEffectiveSubagentPolicy(
 	const oauthAccountPools = Object.hasOwn(agentAccountPools, agentName) ? agentAccountPools[agentName] : undefined;
 	const hasPreparedSeance = preparedSeance !== undefined;
 	const parentActiveModelPattern = hasPreparedSeance ? undefined : request.session.getActiveModelString?.();
+	const configuredOverride = Object.hasOwn(agentModelOverrides, agentName)
+		? agentModelOverrides[agentName]
+		: undefined;
+	const perCallModel = hasPreparedSeance ? undefined : request.model;
+	if (perCallModel !== undefined) {
+		const mode = cfgTaskPerCallModel.get(request.session.settings);
+		if (mode === "off") {
+			throw new StructuredSubagentError(
+				"preflight",
+				"Per-call `model` is disabled (task.perCallModel: off). Omit `model` to use the agent's configured model.",
+			);
+		}
+		const pinned = normalizeModelPatternList(effectiveAgent.model).length > 0 || configuredOverride !== undefined;
+		if (mode === "unpinned" && pinned) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Agent "${agentName}" has its own configured model (${configuredOverride !== undefined ? "task.agentModelOverrides" : "frontmatter"}), so per-call \`model\` is rejected under task.perCallModel: unpinned. Omit \`model\`.`,
+			);
+		}
+	}
+	const perCallModelGrants: PerCallModelGrants | undefined =
+		perCallModel === undefined
+			? undefined
+			: {
+					settings: request.session.settings,
+					agentName,
+					agentModel: effectiveAgent.model,
+					parentModelPattern: parentActiveModelPattern,
+				};
 	const modelResolution = {
-		requestModel: preparedSeance?.modelPatterns ?? request.model,
-		settingsOverride: hasPreparedSeance ? undefined : agentModelOverrides[agentName],
+		requestModel: preparedSeance?.modelPatterns ?? perCallModel ?? request.hostModel,
+		settingsOverride: hasPreparedSeance ? undefined : configuredOverride,
 		agentModel: hasPreparedSeance ? undefined : effectiveAgent.model,
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
@@ -440,6 +528,74 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	// A per-call `model` is chosen by a model mid-turn, not read from a config
+	// file the user can re-check: reject an ambiguous or unmatchable selector
+	// here instead of letting the spawn die downstream on the generic
+	// "No model selected." credential error. Emptiness is decided by the
+	// resolver's own normalization, not a local predicate, so the set of
+	// values treated as "no selector" (internal callers pass one through the
+	// same slot) is exactly the set the resolver ignores — otherwise the
+	// checks below would validate whichever lower-precedence source won.
+	const requestPatterns = normalizeModelPatternList(perCallModel);
+	if (requestPatterns.length > 0) {
+		const { settings, modelRegistry } = request.session;
+		// A cold registry (discovery races startup) must never reject a valid
+		// selector; only syntax and empty expansions are judged without one.
+		const warmRegistry = modelRegistry && modelRegistry.getAvailable().length > 0 ? modelRegistry : undefined;
+		for (const pattern of requestPatterns) {
+			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
+			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
+			// `@default` asks for the parent's live model, not a pattern to look up.
+			if (!warmRegistry || modelSelectionInheritsSessionModel(pattern)) continue;
+			// Validate every concrete candidate, even beside @default or another
+			// usable candidate: a successful alternative must not hide a typo'd
+			// suffix that the resolver would otherwise recover from with a warning.
+			for (const candidate of resolveConfiguredModelPatterns(pattern, settings)) {
+				const strict = resolveModelOverride([candidate], warmRegistry, settings, {
+					allowInvalidThinkingSelectorFallback: false,
+				});
+				if (strict.model) {
+					if (perCallModelGrants) {
+						try {
+							assertPerCallModelApproved(strict.model, perCallModelGrants, warmRegistry);
+						} catch (error) {
+							if (!(error instanceof PerCallModelError)) throw error;
+							throw new StructuredSubagentError("preflight", error.message, { cause: error });
+						}
+					}
+					continue;
+				}
+				const recovered = resolveModelOverride([candidate], warmRegistry, settings);
+				if (recovered.model && recovered.warning) {
+					throw new StructuredSubagentError(
+						"preflight",
+						`Invalid thinking suffix in model selector ${JSON.stringify(candidate)}. Use a supported thinking level or a literal model ID.`,
+					);
+				}
+			}
+		}
+		// With `@default` in the selection the resolver already answered with the
+		// inherited model the parent is running; there is nothing left to match.
+		if (!modelSelectionInheritsSessionModel(request.model)) {
+			// Role-expand the request's own patterns: `modelOverride` may come
+			// from a lower-precedence source, and blaming `model` for its
+			// failure misleads. An empty expansion is a config/shape failure no
+			// amount of discovery can fix, so it is rejected even on a cold registry.
+			const resolvedRequest = resolveConfiguredModelPatterns(request.model, settings);
+			const unmatched =
+				resolvedRequest.length === 0 ||
+				(warmRegistry !== undefined &&
+					!resolveModelOverride(resolvedRequest, warmRegistry, settings, {
+						allowInvalidThinkingSelectorFallback: false,
+					}).model);
+			if (unmatched) {
+				throw new StructuredSubagentError(
+					"preflight",
+					`No available model matches \`model\`: ${JSON.stringify(request.model)}. \`omp models find <query> --json\` lists selectors, but only fix the spelling of the same model. Do NOT substitute a different model or drop \`model\` unless the user allowed it: stop and report that the requested model is unavailable.`,
+				);
+			}
+		}
+	}
 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {
@@ -459,7 +615,11 @@ export async function resolveEffectiveSubagentPolicy(
 		serviceTierOverride,
 		compactionThresholdOverride,
 		oauthAccountPools,
-		parentActiveModelPattern,
+		parentActiveModelPattern:
+			requestPatterns.length > 0 && !modelSelectionInheritsSessionModel(perCallModel)
+				? undefined
+				: parentActiveModelPattern,
+		perCallModelGrants,
 		structured,
 		schema,
 		planMode,
@@ -515,7 +675,11 @@ async function applySpawnHook(
 	if (spawnResult?.model === undefined) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
-	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
+	return {
+		...policy,
+		modelOverride: replacement,
+		modelRoute: spawnResult.note,
+	};
 }
 
 /** Reserve a session-global agent id only after preflight has succeeded. */
@@ -615,6 +779,7 @@ function buildExecutorOptions(
 		compactionThresholdOverride: policy.compactionThresholdOverride,
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
+		perCallModelGrants: policy.perCallModelGrants,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,

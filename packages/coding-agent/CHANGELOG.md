@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `task.perCallModel` (`off` by default, `unpinned`, `on`) so task items, eval `agent()` and `workpool()` can pick a model per call; only models you already configured (model roles, retry fallback chains, the agent's own model or `task.agentModelOverrides` entry, or the parent's model) are accepted, and a subagent that would reach any other model fails instead ([#7982](https://github.com/can1357/oh-my-pi/issues/7982), [#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix), [#15641](https://github.com/can1357/oh-my-pi/pull/15641) by [@andrebrait](https://github.com/andrebrait))
+
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
