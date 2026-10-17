@@ -1901,4 +1901,75 @@ describe("per-call model gate and approval", () => {
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	}, 30_000);
+
+	it("refuses a retry fallback to an unapproved model at dispatch instead of serving the turn there", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-per-call-fallback-"));
+		const cwd = path.join(root, "project");
+		await fs.mkdir(cwd, { recursive: true });
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("mock", "test-key");
+		authStorage.keys.setRuntime("mock-alt", "test-key");
+		const sourceId = "structured-subagent-per-call-fallback";
+		registerMockApi(sourceId);
+		// The approved model is rate limited for longer than the retry budget, so the session falls back.
+		const approved = createMockModel({
+			id: "per-call-limited",
+			responses: [{ throw: "rate limit exceeded retry-after-ms=60000" }],
+			handler: () => ({ content: ["approved answer"] }),
+		});
+		// A provider wildcard in the chain is a relative swap, not a model the operator approved.
+		const fallback = createMockModel({
+			provider: "mock-alt",
+			id: approved.id,
+			handler: () => ({ content: ["fallback answer"] }),
+		});
+		const models = [approved, fallback];
+		const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+		const find = modelRegistry.find.bind(modelRegistry);
+		const hasProvider = modelRegistry.hasProvider.bind(modelRegistry);
+		modelRegistry.find = (provider, id) =>
+			models.find(model => model.provider === provider && model.id === id) ?? find(provider, id);
+		modelRegistry.hasProvider = provider => provider === "mock-alt" || hasProvider(provider);
+		modelRegistry.getAvailable = () => models;
+		mockDiscovery({ ...AGENT, tools: ["read"], model: undefined });
+		const settings = Settings.isolated({
+			"task.maxRecursionDepth": 2,
+			"task.perCallModel": "on",
+			"task.isolation.enabled": false,
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			modelRoles: { review: `mock/${approved.id}` },
+			"retry.fallbackChains": { review: ["mock-alt/*"] },
+		});
+		const parentSession = Object.assign(session({ cwd, settings }), {
+			authStorage,
+			modelRegistry,
+			restrictToolNames: true,
+			enableMCP: false,
+			enableLsp: false,
+			enableIrc: false,
+		});
+		const agentId = "PerCallFallback";
+		try {
+			const run = await runStructuredSubagent(
+				request({
+					session: parentSession,
+					model: "@review",
+					structured: false,
+					identity: { id: agentId },
+					keepAlive: false,
+				}),
+			);
+			expect(approved.calls).toHaveLength(1);
+			expect(fallback.calls).toHaveLength(0);
+			expect(run.result.exitCode).not.toBe(0);
+			expect(`${run.result.error ?? ""}${run.result.stderr}`).toContain("not an approved model");
+		} finally {
+			await AgentRegistry.global().get(agentId)?.session?.dispose();
+			AgentRegistry.global().unregister(agentId);
+			unregisterCustomApis(sourceId);
+			authStorage.close();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	}, 30_000);
 });
