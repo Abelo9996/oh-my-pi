@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `task.perCallModel` (`off` by default, `unpinned`, `on`) so task items, eval `agent()` and `workpool()` can pick a model per call; only models you already configured (model roles, retry fallback chains, the agent's own model or `task.agentModelOverrides` entry, or the parent's model) are accepted, and a subagent that would reach any other model fails instead ([#7982](https://github.com/can1357/oh-my-pi/issues/7982), [#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix), [#15641](https://github.com/can1357/oh-my-pi/pull/15641) by [@andrebrait](https://github.com/andrebrait))
+- Added `task.perCallModel` (`off` by default, `unpinned`, `on`) so task items, eval `agent()` and `workpool()` can pick a model per call; only models you already configured (model roles, retry fallback chains, the agent's own model or `task.agentModelOverrides` entry, or the parent's model) are accepted, and a subagent that would reach any other model fails instead. `task.perCallModelAllow` narrows the allowed roles and models, and `task.perCallModelFallbacks` (`select`, `runtime`, `off`) decides whether fallback chain models can be requested directly or only used as runtime fallbacks ([#7982](https://github.com/can1357/oh-my-pi/issues/7982), [#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix), [#15641](https://github.com/can1357/oh-my-pi/pull/15641) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 

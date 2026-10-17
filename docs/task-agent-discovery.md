@@ -250,6 +250,19 @@ Catalog membership, credentials, enabled scope, and built-in role defaults are n
 aliases, fuzzy IDs, and globs in those grants match the same way as everywhere else, and an
 unconfigured role such as `@smol` borrows `modelRoles.default` as the resolver does.
 
+Two settings narrow those grants:
+
+- `task.perCallModelAllow`: a list of roles or model patterns (for example `["@smol", "@review", "anthropic/*"]`). When set, it replaces the derived grants; a listed role brings its values and its fallback chain. The parent's model is always allowed.
+- `task.perCallModelFallbacks` decides how concrete `retry.fallbackChains` models count:
+
+| Value | Requestable in `model` | Runtime fallback |
+| --- | --- | --- |
+| `select` (default) | yes | yes |
+| `runtime` | no | yes |
+| `off` | no | no; the subagent fails instead of switching |
+
+A model named directly in `task.perCallModelAllow` is a plain grant regardless of `task.perCallModelFallbacks`.
+
 Preflight rejects the ambiguous literals `default`/`inherit` (use `@default`), blank or comma-only
 selectors, invalid thinking suffixes, and selectors that match no available or no approved model.
 A requested model without working credentials fails rather than running on the parent's model,

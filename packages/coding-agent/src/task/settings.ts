@@ -314,6 +314,45 @@ export const cfgTaskPerCallModel = register({
 	},
 });
 
+export const cfgTaskPerCallModelAllow = register({
+	id: "task.perCallModelAllow",
+	type: "array",
+	default: [] as string[],
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model Allowlist",
+		description:
+			'Roles or model patterns a per-call model may use, e.g. ["@smol", "@review", "anthropic/*"]. A listed role includes its retry fallback chain (subject to task.perCallModelFallbacks); the parent\'s model is always allowed. Empty: every configured role, agent model and override.',
+	},
+});
+
+export const cfgTaskPerCallModelFallbacks = register({
+	id: "task.perCallModelFallbacks",
+	type: "enum",
+	values: ["select", "runtime", "off"] as const,
+	default: "select",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model Fallbacks",
+		description: "How retry fallback chain models (retry.fallbackChains) apply to per-call models.",
+		options: [
+			{
+				value: "select",
+				label: "Select",
+				description: "Chain models can be requested directly and used as runtime fallbacks",
+			},
+			{
+				value: "runtime",
+				label: "Runtime only",
+				description: "Chain models are used only when the requested model fails over",
+			},
+			{ value: "off", label: "Off", description: "No fallback: the subagent fails instead of switching models" },
+		],
+	},
+});
+
 export const cfgTaskMaxConcurrency = register({
 	id: "task.maxConcurrency",
 	protocolDefault: ["rpc", "acp"],

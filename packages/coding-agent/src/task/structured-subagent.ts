@@ -557,7 +557,7 @@ export async function resolveEffectiveSubagentPolicy(
 				if (strict.model) {
 					if (perCallModelGrants) {
 						try {
-							assertPerCallModelApproved(strict.model, perCallModelGrants, warmRegistry);
+							assertPerCallModelApproved(strict.model, perCallModelGrants, warmRegistry, "select");
 						} catch (error) {
 							if (!(error instanceof PerCallModelError)) throw error;
 							throw new StructuredSubagentError("preflight", error.message, { cause: error });

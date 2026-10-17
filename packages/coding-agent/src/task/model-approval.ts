@@ -15,11 +15,13 @@ import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
 	normalizeModelPatternList,
+	resolveConfiguredModelPatterns,
+	resolveExplicitModelRole,
 	splitRoleAliasThinkingSuffix,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { cfgRetryFallbackChains } from "../session/settings";
-import { cfgTaskAgentModelOverrides } from "./settings";
+import { cfgTaskAgentModelOverrides, cfgTaskPerCallModelAllow, cfgTaskPerCallModelFallbacks } from "./settings";
 
 /** A per-call model was rejected: not approved by the operator's configuration. */
 export class PerCallModelError extends Error {
@@ -44,19 +46,37 @@ function isSessionToken(pattern: string): boolean {
 	return base === "default" || base === "inherit";
 }
 
+/**
+ * `select`: a model the caller may name in `model`. `dispatch`: a model the
+ * running subagent may send to, which also covers retry fallbacks.
+ */
+export type PerCallModelUse = "select" | "dispatch";
+
 /** Operator-configured selectors that approve a per-call model. */
-export function perCallModelGrantPatterns(grants: PerCallModelGrants): string[] {
+export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCallModelUse): string[] {
 	const { settings, agentName } = grants;
+	const fallbackMode = cfgTaskPerCallModelFallbacks.get(settings);
+	const withFallbacks = fallbackMode === "select" || (fallbackMode === "runtime" && use === "dispatch");
+	const chains = withFallbacks ? cfgRetryFallbackChains.get(settings) : {};
+	// Wildcard chain entries are relative provider swaps, not models the operator named.
+	const concrete = (chain: readonly string[] | undefined) => (chain ?? []).filter(entry => !entry.includes("*"));
+	const allow = cfgTaskPerCallModelAllow.get(settings);
 	const overrides = cfgTaskAgentModelOverrides.get(settings);
-	const sources: Array<string | string[] | undefined> = [
-		// Values, not aliases: an alias resolves to one model, but every listed candidate is a grant.
-		...Object.values(settings.getModelRoles()),
-		// Wildcard chain entries are relative provider swaps, not models the operator named.
-		...Object.values(cfgRetryFallbackChains.get(settings)).map(chain => chain.filter(entry => !entry.includes("*"))),
-		grants.agentModel,
-		Object.hasOwn(overrides, agentName) ? overrides[agentName] : undefined,
-		grants.parentModelPattern,
-	];
+	const sources: Array<string | string[] | undefined> =
+		allow.length > 0
+			? // An explicit list replaces the derived grants; a listed role brings its values and fallback chain.
+				allow.flatMap(entry => {
+					const role = resolveExplicitModelRole(entry, settings);
+					return role ? [...resolveConfiguredModelPatterns(entry, settings), ...concrete(chains[role])] : [entry];
+				})
+			: [
+					// Values, not aliases: an alias resolves to one model, but every listed candidate is a grant.
+					...Object.values(settings.getModelRoles()),
+					...Object.values(chains).map(concrete),
+					grants.agentModel,
+					Object.hasOwn(overrides, agentName) ? overrides[agentName] : undefined,
+				];
+	sources.push(grants.parentModelPattern);
 	const patterns = new Set<string>();
 	for (const source of sources) {
 		for (const pattern of normalizeModelPatternList(source)) {
@@ -75,8 +95,9 @@ export function isPerCallModelApproved(
 	model: Pick<Model<Api>, "provider" | "id">,
 	grants: PerCallModelGrants,
 	registry: Pick<ModelRegistry, "getAvailable">,
+	use: PerCallModelUse,
 ): boolean {
-	const patterns = perCallModelGrantPatterns(grants);
+	const patterns = perCallModelGrantPatterns(grants, use);
 	// An empty list means "no restriction" to the resolver; here it means no grant.
 	if (patterns.length === 0) return false;
 	const target = identity(model);
@@ -90,9 +111,12 @@ export function assertPerCallModelApproved(
 	model: Pick<Model<Api>, "provider" | "id">,
 	grants: PerCallModelGrants,
 	registry: Pick<ModelRegistry, "getAvailable">,
+	use: PerCallModelUse,
 ): void {
-	if (isPerCallModelApproved(model, grants, registry)) return;
+	if (isPerCallModelApproved(model, grants, registry, use)) return;
 	throw new PerCallModelError(
-		`Per-call model ${identity(model)} is not configured for agent "${grants.agentName}": use a configured role, fallback, agent model, task.agentModelOverrides entry, or the parent's model. Catalog or credentials alone do not approve a model.`,
+		use === "select"
+			? `Per-call model ${identity(model)} is not configured for agent "${grants.agentName}": use a configured role, agent model, task.agentModelOverrides entry, or the parent's model (fallback chain models count only with task.perCallModelFallbacks: select; task.perCallModelAllow narrows the set). Catalog or credentials alone do not approve a model.`
+			: `Per-call subagent "${grants.agentName}" cannot switch to ${identity(model)}: it is not an approved model (task.perCallModelAllow / task.perCallModelFallbacks).`,
 	);
 }

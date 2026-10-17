@@ -1677,12 +1677,55 @@ describe("per-call model gate and approval", () => {
 	it("holds every dispatch to the grants, read from current settings", () => {
 		const settings = Settings.isolated({ modelRoles: { review: "anthropic/claude-sonnet-4-5" } });
 		const grants = { settings, agentName: "worker" };
-		expect(isPerCallModelApproved(MODEL, grants, registry)).toBe(true);
-		expect(() => assertPerCallModelApproved(OTHER, grants, registry)).toThrow(PerCallModelError);
+		expect(isPerCallModelApproved(MODEL, grants, registry, "dispatch")).toBe(true);
+		expect(() => assertPerCallModelApproved(OTHER, grants, registry, "dispatch")).toThrow(PerCallModelError);
 		// Revoking the role revokes the model for the next request.
 		settings.setModelRole("review", "anthropic/claude-opus-4-5");
-		expect(isPerCallModelApproved(MODEL, grants, registry)).toBe(false);
-		expect(isPerCallModelApproved(OTHER, grants, registry)).toBe(true);
+		expect(isPerCallModelApproved(MODEL, grants, registry, "dispatch")).toBe(false);
+		expect(isPerCallModelApproved(OTHER, grants, registry, "dispatch")).toBe(true);
+	});
+
+	it("limits grants to task.perCallModelAllow, with a listed role bringing its fallback chain", () => {
+		const roles = { review: "anthropic/claude-sonnet-4-5", commit: "anthropic/claude-opus-4-5" };
+		const allowReview = Settings.isolated({ modelRoles: roles, "task.perCallModelAllow": ["@review"] });
+		const grants = { settings: allowReview, agentName: "worker" };
+		expect(isPerCallModelApproved(MODEL, grants, registry, "select")).toBe(true);
+		// Configured, but not on the list.
+		expect(isPerCallModelApproved(OTHER, grants, registry, "select")).toBe(false);
+		// The parent's model stays allowed.
+		expect(
+			isPerCallModelApproved(
+				OTHER,
+				{ ...grants, parentModelPattern: "anthropic/claude-opus-4-5" },
+				registry,
+				"select",
+			),
+		).toBe(true);
+		const withChain = Settings.isolated({
+			modelRoles: roles,
+			"task.perCallModelAllow": ["@review"],
+			"retry.fallbackChains": { review: ["anthropic/claude-opus-4-5"] },
+		});
+		expect(isPerCallModelApproved(OTHER, { settings: withChain, agentName: "worker" }, registry, "select")).toBe(
+			true,
+		);
+	});
+
+	it("applies task.perCallModelFallbacks to retry chain models", () => {
+		const at = (mode: string) =>
+			Settings.isolated({
+				modelRoles: { review: "anthropic/claude-sonnet-4-5" },
+				"retry.fallbackChains": { review: ["anthropic/claude-opus-4-5"] },
+				"task.perCallModelFallbacks": mode,
+			});
+		const check = (mode: string, use: "select" | "dispatch") =>
+			isPerCallModelApproved(OTHER, { settings: at(mode), agentName: "worker" }, registry, use);
+		// Default: a chain model can be requested and used as a runtime fallback.
+		expect([check("select", "select"), check("select", "dispatch")]).toEqual([true, true]);
+		// Runtime only: not requestable, but the subagent may fail over to it.
+		expect([check("runtime", "select"), check("runtime", "dispatch")]).toEqual([false, true]);
+		// Off: the subagent fails instead of switching.
+		expect([check("off", "select"), check("off", "dispatch")]).toEqual([false, false]);
 	});
 
 	it("runs an approved per-call model and never sends to a model an extension swaps in", async () => {
@@ -1736,7 +1779,7 @@ describe("per-call model gate and approval", () => {
 			parentSession.emitBeforeSubagentSpawn = async () => ({ model: `mock/${swapped.id}` });
 			const refused = await run("PerCallSwapped");
 			expect(refused.result.exitCode).not.toBe(0);
-			expect(`${refused.result.error ?? ""}${refused.result.stderr}`).toContain("not configured");
+			expect(`${refused.result.error ?? ""}${refused.result.stderr}`).toContain("not an approved model");
 			expect(swapped.calls).toHaveLength(0);
 		} finally {
 			unregisterCustomApis(sourceId);

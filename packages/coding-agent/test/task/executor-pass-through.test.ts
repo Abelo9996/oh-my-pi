@@ -573,7 +573,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const assertDispatchModel = spy.mock.calls[0]?.[0]?.assertDispatchModel;
 		expect(assertDispatchModel).toBeDefined();
 		expect(() => assertDispatchModel?.(model)).not.toThrow();
-		expect(() => assertDispatchModel?.(other)).toThrow(/not configured/);
+		expect(() => assertDispatchModel?.(other)).toThrow(/not an approved model/);
 		expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({ perCallModel: true }));
 	});
 
