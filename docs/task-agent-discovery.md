@@ -240,7 +240,7 @@ to `modelRoles.default`, so a child asked for `@default` runs whatever its paren
 | Value | Behavior |
 | --- | --- |
 | `off` (default) | `model` is hidden from the task schema and prompts; calls that pass it fail preflight. |
-| `unpinned` | Accepted only for agents with no frontmatter `model` and no `task.agentModelOverrides` entry. |
+| `unpinned` | Accepted only for agents whose own model doesn't change routing: no `task.agentModelOverrides` entry, and a frontmatter `model` that resolves the same as inheriting the parent. The bundled `task` agent (`@task`) counts as unpinned until `modelRoles.task` is set; `scout` (`@smol`) and `reviewer` (`@slow`) are pinned whenever their role resolves to a different model than the parent. |
 | `on` | Accepted for every agent. |
 
 A supplied `model` is one selector or an ordered, non-empty array, and must name a model the

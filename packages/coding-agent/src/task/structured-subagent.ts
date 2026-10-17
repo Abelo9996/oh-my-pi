@@ -499,8 +499,18 @@ export async function resolveEffectiveSubagentPolicy(
 				"Per-call `model` is disabled (task.perCallModel: off). Omit `model` to use the agent's configured model.",
 			);
 		}
-		const pinned = normalizeModelPatternList(effectiveAgent.model).length > 0 || configuredOverride !== undefined;
-		if (mode === "unpinned" && pinned) {
+		// Pinned = the agent's own configuration changes which model it runs. The bundled `task`
+		// agent's `@task` inherits the parent until `modelRoles.task` is set, so it is unpinned by default.
+		const routing = {
+			settings: request.session.settings,
+			activeModelPattern: parentActiveModelPattern,
+			fallbackModelPattern: request.session.getModelString?.(),
+		};
+		const frontmatterPinned = !Bun.deepEquals(
+			resolveAgentModelSelection({ ...routing, agentModel: effectiveAgent.model }).patterns,
+			resolveAgentModelSelection(routing).patterns,
+		);
+		if (mode === "unpinned" && (configuredOverride !== undefined || frontmatterPinned)) {
 			throw new StructuredSubagentError(
 				"preflight",
 				`Agent "${agentName}" has its own configured model (${configuredOverride !== undefined ? "task.agentModelOverrides" : "frontmatter"}), so per-call \`model\` is rejected under task.perCallModel: unpinned. Omit \`model\`.`,

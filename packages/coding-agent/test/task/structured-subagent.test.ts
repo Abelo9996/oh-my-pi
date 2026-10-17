@@ -1642,6 +1642,24 @@ describe("per-call model gate and approval", () => {
 		expect(policy.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
 
+	it("under `unpinned` treats the bundled `@task` model as unpinned until modelRoles.task is set", async () => {
+		const settings = { "task.perCallModel": "unpinned", modelRoles: { review: "anthropic/claude-sonnet-4-5" } };
+		mockDiscovery({ ...AGENT, model: ["@task"] });
+		// `@task` with no modelRoles.task inherits the parent, so a per-call model is accepted.
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: gated(settings, "anthropic/claude-opus-4-5"), model: "@review" }),
+		);
+		expect(policy.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+		// Once the operator routes the task role, the agent is pinned.
+		const routed = gated(
+			{ ...settings, modelRoles: { ...settings.modelRoles, task: "anthropic/claude-opus-4-5" } },
+			"anthropic/claude-sonnet-4-5",
+		);
+		await expect(resolveEffectiveSubagentPolicy(request({ session: routed, model: "@review" }))).rejects.toThrow(
+			/own configured model \(frontmatter\)/,
+		);
+	});
+
 	it("accepts configured, inherited, glob and live-parent grants and rejects a catalog-only model", async () => {
 		mockDiscovery();
 		const on = { "task.perCallModel": "on" };
