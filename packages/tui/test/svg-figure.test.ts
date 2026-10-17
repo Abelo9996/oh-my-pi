@@ -160,6 +160,17 @@ describe("SvgFigure", () => {
 		expect(shown.box).toBe(shown.raster);
 	});
 
+	it("reuses settled rows when the image already fits its ceiling", async () => {
+		const { figure: svg, landed } = figure();
+		const raster = landed();
+		svg.render(200);
+		await raster;
+		const first = svg.render(200);
+		const second = svg.render(200);
+		expect(second).toBe(first);
+		svg.dispose();
+	});
+
 	it("fits an SVG fence's reserved rows and SIXEL payload within a smaller surface", async () => {
 		setTerminalImageProtocol(ImageProtocol.Sixel);
 		let changed = Promise.withResolvers<void>();
