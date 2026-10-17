@@ -81,6 +81,40 @@ describe("cropPngTop", () => {
 		expect(await pixels(cropPngTop(indexed, 1)!)).toEqual(await pixels(bottomRows(4, 4, rgb, 1)));
 	});
 
+	it("turns an animated PNG into a valid static crop of its default image", async () => {
+		const rgb = gradient(4, 4);
+		const still = Buffer.from(encodeRgbPng(4, 4, rgb));
+		const ihdrEnd = 8 + 25;
+		const idatEnd = still.byteLength - 12;
+		const frameControl = (sequence: number) => {
+			const data = Buffer.alloc(26);
+			data.writeUInt32BE(sequence, 0);
+			data.writeUInt32BE(4, 4);
+			data.writeUInt32BE(4, 8);
+			return pngChunk("fcTL", data);
+		};
+		const animationControl = Buffer.alloc(8);
+		animationControl.writeUInt32BE(2, 0);
+		const animated = Buffer.concat([
+			still.subarray(0, ihdrEnd),
+			pngChunk("acTL", animationControl),
+			frameControl(0),
+			still.subarray(ihdrEnd, idatEnd),
+			frameControl(1),
+			pngChunk("fdAT", Buffer.alloc(4)),
+			still.subarray(idatEnd),
+		]);
+
+		const cropped = Buffer.from(cropPngTop(animated, 1)!);
+		const types: string[] = [];
+		for (let offset = 8; offset < cropped.byteLength; offset += 12 + cropped.readUInt32BE(offset)) {
+			types.push(cropped.toString("latin1", offset + 4, offset + 8));
+		}
+		// A frame control would still claim the uncropped 4-row canvas.
+		expect(types).toEqual(["IHDR", "IDAT", "IEND"]);
+		expect(await pixels(cropped)).toEqual(await pixels(bottomRows(4, 4, rgb, 1)));
+	});
+
 	it("rejects input it cannot crop exactly", async () => {
 		const png = await pixels(encodeRgbPng(4, 4, gradient(4, 4)));
 		expect(cropPngTop(png, 4)).toBeNull();

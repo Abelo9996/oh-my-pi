@@ -57,7 +57,8 @@ function paeth(left: number, up: number, upLeft: number): number {
  * first kept scanline is re-emitted unfiltered and the rest keep their
  * original filters, since each only references the unchanged row above it.
  * Chunks before the image data (palette, transparency, color space) are kept;
- * chunks after it are dropped.
+ * chunks after it are dropped. An animated PNG becomes a static crop of its
+ * default image: its frame controls describe the uncropped canvas.
  *
  * Returns `null` for anything it cannot rewrite exactly: not a PNG, an
  * interlaced or malformed stream, or a crop that leaves no rows.
@@ -130,7 +131,10 @@ export function cropPngTop(png: Uint8Array, rows: number): Uint8Array | null {
 	return Buffer.concat([
 		PNG_SIGNATURE,
 		pngChunk("IHDR", cropped),
-		...chunks.slice(1, firstIdat).map(chunk => pngChunk(chunk.type, chunk.data)),
+		...chunks
+			.slice(1, firstIdat)
+			.filter(chunk => chunk.type !== "acTL" && chunk.type !== "fcTL")
+			.map(chunk => pngChunk(chunk.type, chunk.data)),
 		pngChunk("IDAT", zlib.deflateSync(scanlines)),
 		pngChunk("IEND", new Uint8Array(0)),
 	]);
