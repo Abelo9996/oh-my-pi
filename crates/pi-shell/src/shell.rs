@@ -2523,6 +2523,7 @@ mod tests {
 		(master, slave)
 	}
 
+	#[cfg(unix)]
 	async fn interactive_kill_test_context(
 		terminal_stdin: &fs::File,
 	) -> (ShellSessionCore, ExecutionParameters) {
@@ -6070,7 +6071,6 @@ mod tests {
 		}
 	}
 
-	#[cfg(unix)]
 	fn shell_test_lock() -> &'static TokioMutex<()> {
 		static LOCK: std::sync::OnceLock<TokioMutex<()>> = std::sync::OnceLock::new();
 		LOCK.get_or_init(|| TokioMutex::new(()))

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as tls from "node:tls";
 import { isAnthropicSigningProxyUrl, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
-import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/hosts";
+import { hostMatchesUrl, isVertexRawPredictUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -144,7 +144,7 @@ import {
 	wrapFetchForCopilotFallback,
 } from "./github-copilot-headers";
 import { prepareAnthropicImageContext } from "./anthropic-images";
-import { servedModelFromAnthropicSignature } from "./anthropic-signature";
+import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { isAnthropicMessagesModel, redactSensitiveCredentials, transformMessages } from "./transform-messages";
@@ -952,15 +952,11 @@ function getUmansWebSearchProvider(headers: Record<string, string> | undefined):
 	return normalizeUmansWebSearchProvider($env.UMANS_WEBSEARCH_PROVIDER);
 }
 
-function isUmansAnthropicModel(model: Model<"anthropic-messages">): boolean {
-	return model.provider === "umans" || model.baseUrl.toLowerCase().includes("api.code.umans.ai");
-}
-
 function getUmansWebSearchHeader(
 	model: Model<"anthropic-messages">,
 	headers: Record<string, string> | undefined,
 ): Record<string, string> | undefined {
-	if (!isUmansAnthropicModel(model)) return undefined;
+	if (!modelMatchesHost(model, "umans")) return undefined;
 	const provider = getUmansWebSearchProvider(headers);
 	return provider ? { [UMANS_WEBSEARCH_PROVIDER_HEADER]: provider } : undefined;
 }
@@ -1217,7 +1213,7 @@ function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: st
 	if (model.provider === "github-copilot") {
 		return normalizeAnthropicBaseUrl(resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl);
 	}
-	if (model.provider === "anthropic") return resolveDirectAnthropicBaseUrl(model);
+	if (model.compat.firstPartyProvider) return resolveDirectAnthropicBaseUrl(model);
 	return normalizeAnthropicBaseUrl(model.baseUrl);
 }
 
@@ -1280,7 +1276,7 @@ function resolveAnthropicCustomHeaders(
 	model: Model<"anthropic-messages">,
 	baseUrl: string | undefined,
 ): Record<string, string> | undefined {
-	if (model.provider !== "anthropic") return undefined;
+	if (!model.compat.firstPartyProvider) return undefined;
 	return resolveAnthropicCustomHeadersForBaseUrl(baseUrl);
 }
 
@@ -1312,7 +1308,7 @@ function resolvePemValue(value: string | undefined, name: string): string | unde
 }
 
 function resolveFoundryTlsOptions(model: Model<"anthropic-messages">): FoundryTlsOptions | undefined {
-	if (model.provider !== "anthropic") return undefined;
+	if (!model.compat.firstPartyProvider) return undefined;
 	if (!isFoundryEnabled()) return undefined;
 
 	const cacheKey = foundryTlsOptionsCacheKey();
@@ -1341,7 +1337,7 @@ function buildClaudeCodeTlsFetchOptions(
 	model: Model<"anthropic-messages">,
 	baseUrl: string | undefined,
 ): AnthropicFetchOptions | undefined {
-	if (model.provider !== "anthropic") return undefined;
+	if (!model.compat.firstPartyProvider) return undefined;
 	if (!baseUrl) return undefined;
 
 	let serverName: string;
@@ -2615,11 +2611,14 @@ const streamAnthropicOnce = (
 					if (unwrappedThinking !== undefined) {
 						block.thinking = unwrappedThinking;
 						block.thinkingSignature = undefined;
-					} else if (!output.upstreamModel && block.thinkingSignature) {
+					} else if (block.thinkingSignature) {
 						// The signature names the model that actually produced the
 						// block; a gateway serving a different model than requested
 						// cannot mint one that says otherwise.
-						output.upstreamModel = servedModelFromAnthropicSignature(block.thinkingSignature);
+						if (!output.upstreamModel) {
+							output.upstreamModel = servedModelFromAnthropicSignature(block.thinkingSignature);
+						}
+						if (isAnthropicNarrationSignature(block.thinkingSignature)) block.narration = true;
 					}
 					stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
 				} else if (block.type === "anthropicServerTool" && block.block.type === "server_tool_use") {
@@ -2704,7 +2703,7 @@ const streamAnthropicOnce = (
 			// max-wait budget covers the whole wait, not one attempt.
 			const slowMode =
 				options?.anthropicSlowMode !== undefined &&
-				model.provider === "anthropic" &&
+				model.compat.firstPartyProvider &&
 				isOAuthToken &&
 				!options.client &&
 				isOfficialAnthropicApiUrl(baseUrl)
@@ -3847,7 +3846,7 @@ const streamAnthropicOnce = (
 			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			if (dropFastMode && model.provider === "anthropic" && options?.serviceTier === "priority") {
+			if (dropFastMode && model.compat.firstPartyProvider && options?.serviceTier === "priority") {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "priority"];
 			}
 			if (forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking) {
@@ -5165,7 +5164,7 @@ type AnthropicParamBuildOptions = {
  * priority-tier request to first-party Anthropic.
  */
 function wantsAnthropicFastMode(model: Model<"anthropic-messages">, options: AnthropicOptions | undefined): boolean {
-	return model.compat.fastMode === true || (model.provider === "anthropic" && options?.serviceTier === "priority");
+	return model.compat.fastMode === true || (model.compat.firstPartyProvider && options?.serviceTier === "priority");
 }
 
 /**
