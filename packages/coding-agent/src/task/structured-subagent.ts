@@ -211,9 +211,9 @@ export interface EffectiveSubagentPolicy {
 	oauthAccountPools?: OAuthAccountPools;
 	/**
 	 * Parent model the child falls back to when its own candidates have no
-	 * working credentials. Absent for an explicit per-call `model` (other than
-	 * `@default`): a requested model that cannot run fails instead of being
-	 * replaced by the parent's.
+	 * working credentials. Absent for a per-call `model`: a requested model that
+	 * cannot run fails instead of being replaced by the parent's, and `@default`
+	 * already lists the parent's model as one of the requested candidates.
 	 */
 	parentActiveModelPattern?: string;
 	/** Whether the child gets the `yield` tool; see {@link StructuredSubagentRequest.structured}. */
@@ -658,10 +658,7 @@ export async function resolveEffectiveSubagentPolicy(
 		serviceTierOverride,
 		compactionThresholdOverride,
 		oauthAccountPools,
-		parentActiveModelPattern:
-			requestPatterns.length > 0 && !modelSelectionInheritsSessionModel(perCallModel)
-				? undefined
-				: parentActiveModelPattern,
+		parentActiveModelPattern: requestPatterns.length > 0 ? undefined : parentActiveModelPattern,
 		perCallModelGrants,
 		structured,
 		schema,

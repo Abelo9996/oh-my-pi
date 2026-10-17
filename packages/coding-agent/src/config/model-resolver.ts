@@ -1800,25 +1800,29 @@ export async function resolveModelOverrideWithAuthFallback(
 		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
 		lookupRegistry = { getAvailable: () => enabledModels };
 	}
-	// Expand first: a role (or comma-separated item) may contain several
-	// requested alternatives that must be tried before the parent model.
-	const patterns = resolveConfiguredModelPatterns(modelPatterns, settings);
-	const primary = resolveModelOverride(patterns, lookupRegistry, settings);
-	// Without an alternative there is no routing decision to make. Let the
-	// child session resolve credentials through its normal execution path.
-	if (!primary.model || (!parentActiveModelPattern && patterns.length === 1)) {
+	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
+	if (!primary.model) {
+		return { ...primary, authFallbackUsed: false };
+	}
+	if (!parentActiveModelPattern) {
+		// No parent fallback (a per-call `model`, whose `@default` lists the parent's
+		// model itself): try the requested candidates in order for working credentials.
+		const patterns = resolveConfiguredModelPatterns(modelPatterns, settings);
+		if (patterns.length > 1) {
+			for (const pattern of patterns) {
+				const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
+				if (!candidate.model) continue;
+				const key = await modelRegistry.getApiKey(candidate.model, sessionId);
+				if (key === kNoAuth || isAuthenticated(key)) return { ...candidate, authFallbackUsed: false };
+			}
+		}
 		return { ...primary, authFallbackUsed: false };
 	}
 
-	for (const pattern of patterns) {
-		const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
-		if (!candidate.model) continue;
-		const key = await modelRegistry.getApiKey(candidate.model, sessionId);
-		if (key === kNoAuth || isAuthenticated(key)) {
-			return { ...candidate, authFallbackUsed: false };
-		}
+	const primaryKey = await modelRegistry.getApiKey(primary.model, sessionId);
+	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
+		return { ...primary, authFallbackUsed: false };
 	}
-	if (!parentActiveModelPattern) return { ...primary, authFallbackUsed: false };
 
 	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
 	if (!fallback.model) {
@@ -1828,7 +1832,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		return { ...primary, authFallbackUsed: false };
 	}
 	const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
-	if (fallbackKey !== kNoAuth && !isAuthenticated(fallbackKey)) {
+	if (!isAuthenticated(fallbackKey)) {
 		return { ...primary, authFallbackUsed: false };
 	}
 

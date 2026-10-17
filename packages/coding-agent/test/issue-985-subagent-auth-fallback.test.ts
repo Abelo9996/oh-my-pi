@@ -283,51 +283,58 @@ describe("issue #11709: disabled provider subagent model resolution", () => {
 });
 
 describe("requested candidate authentication order", () => {
-	for (const parent of ["deepseek/deepseek-v4-pro", undefined]) {
-		test(`uses a later authenticated candidate with parent ${parent ?? "omitted"}`, async () => {
-			const registry = createMockRegistry({
-				models: [parentModel, unauthedTaskModel, sharedModel],
-				authedProviders: new Set(["deepseek"]),
-			});
-			const resolved = await resolveModelOverrideWithAuthFallback(
-				["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id:high"],
-				parent,
-				registry,
-			);
-			expect(resolved.model?.id).toBe("shared-id");
-			expect(resolved.authFallbackUsed).toBe(false);
-			expect(resolved.explicitThinkingLevel).toBe(true);
-		});
-	}
-
-	test("exhausts candidates inside a configured role before using the parent", async () => {
-		const settings = Settings.isolated({ modelRoles: { qa: "opencode-zen/qwen3.6-plus-free,deepseek/shared-id" } });
+	test("uses a later authenticated candidate when there is no parent fallback", async () => {
 		const registry = createMockRegistry({
 			models: [parentModel, unauthedTaskModel, sharedModel],
 			authedProviders: new Set(["deepseek"]),
 		});
 		const resolved = await resolveModelOverrideWithAuthFallback(
-			["@qa"],
-			"deepseek/deepseek-v4-pro",
+			["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id:high"],
+			undefined,
 			registry,
-			settings,
 		);
 		expect(resolved.model?.id).toBe("shared-id");
 		expect(resolved.authFallbackUsed).toBe(false);
+		expect(resolved.explicitThinkingLevel).toBe(true);
 	});
-});
 
-test("accepts a keyless parent after requested credentials fail", async () => {
-	const local = { ...parentModel, provider: "ollama", id: "local-model" };
-	const registry = {
-		getAvailable: () => [unauthedTaskModel, local],
-		getApiKey: async (model: Model<Api>) => (model.provider === "ollama" ? kNoAuth : undefined),
-	};
-	const resolved = await resolveModelOverrideWithAuthFallback(
-		["opencode-zen/qwen3.6-plus-free"],
-		"ollama/local-model",
-		registry,
-	);
-	expect(resolved.model?.id).toBe("local-model");
-	expect(resolved.authFallbackUsed).toBe(true);
+	test("keeps the parent fallback ahead of later candidates for a spawn without `model`", async () => {
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel, sharedModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+		const resolved = await resolveModelOverrideWithAuthFallback(
+			["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+		expect(resolved.model?.id).toBe("deepseek-v4-pro");
+		expect(resolved.authFallbackUsed).toBe(true);
+	});
+
+	test("exhausts candidates inside a configured role", async () => {
+		const settings = Settings.isolated({ modelRoles: { qa: "opencode-zen/qwen3.6-plus-free,deepseek/shared-id" } });
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel, sharedModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+		const resolved = await resolveModelOverrideWithAuthFallback(["@qa"], undefined, registry, settings);
+		expect(resolved.model?.id).toBe("shared-id");
+		expect(resolved.authFallbackUsed).toBe(false);
+	});
+
+	test("accepts a keyless `@default` candidate after requested credentials fail", async () => {
+		const local = { ...parentModel, provider: "ollama", id: "local-model" };
+		const registry = {
+			getAvailable: () => [unauthedTaskModel, local],
+			getApiKey: async (model: Model<Api>) => (model.provider === "ollama" ? kNoAuth : undefined),
+		};
+		const resolved = await resolveModelOverrideWithAuthFallback(
+			["opencode-zen/qwen3.6-plus-free", "ollama/local-model"],
+			undefined,
+			registry,
+		);
+		expect(resolved.model?.id).toBe("local-model");
+		expect(resolved.authFallbackUsed).toBe(false);
+	});
 });

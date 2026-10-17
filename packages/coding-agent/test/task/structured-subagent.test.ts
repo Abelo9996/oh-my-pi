@@ -662,7 +662,7 @@ describe("structured subagent primitive", () => {
 		expect(policy.modelRole).toBeUndefined();
 	});
 
-	it("withholds the parent credential fallback from an explicit per-call model", async () => {
+	it("withholds the parent credential fallback from every per-call model", async () => {
 		mockDiscovery();
 		const parent = "anthropic/claude-sonnet-4-5";
 		const childSession = { ...session(), getActiveModelString: () => parent } as ToolSession;
@@ -686,9 +686,9 @@ describe("structured subagent primitive", () => {
 			// A requested model that cannot authenticate fails rather than running on the parent's.
 			undefined,
 			undefined,
-			// `@default` names the parent, so its fallback is the parent itself.
-			parent,
-			parent,
+			// `@default` lists the parent's model among the requested candidates instead.
+			undefined,
+			undefined,
 			// No selector: the agent inherits the session model and the #985 fallback stays.
 			parent,
 		]);
