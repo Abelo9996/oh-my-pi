@@ -286,15 +286,23 @@ describe("structured subagent primitive", () => {
 			expect(saved.enableLsp).toBe(false);
 			expect(saved.enableIrc).toBe(false);
 
-			const overridden = await resolveEffectiveSubagentPolicy(
-				request({
-					session: caller,
-					agent: "seance",
-					sourceSession: sourceFile,
-					model: "anthropic/claude-sonnet-4-5",
-				}),
-			);
-			expect(overridden.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+			// Seance's `model` picks the source's model; `task.perCallModel` neither gates nor grants it.
+			for (const perCallModel of ["off", "unpinned", "on"]) {
+				const gated = Object.assign(
+					session({ cwd, settings: Settings.isolated({ "task.perCallModel": perCallModel }) }),
+					{ modelRegistry },
+				);
+				const overridden = await resolveEffectiveSubagentPolicy(
+					request({
+						session: gated,
+						agent: "seance",
+						sourceSession: sourceFile,
+						model: "anthropic/claude-sonnet-4-5",
+					}),
+				);
+				expect(overridden.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+				expect(overridden.perCallModelGrants).toBeUndefined();
+			}
 		} finally {
 			authStorage.close();
 			await fs.rm(tempDir, { recursive: true, force: true });
@@ -639,6 +647,10 @@ describe("structured subagent primitive", () => {
 
 		await expect(
 			resolveEffectiveSubagentPolicy(request({ session: withRegistry, model: "openai/does-not-exist" })),
+		).rejects.toThrow(/No available model matches `model`/);
+		// A role with two effort suffixes names no model rather than the role at one of them.
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: withRegistry, model: "@review:high:low" })),
 		).rejects.toThrow(/No available model matches `model`/);
 
 		const policy = await resolveEffectiveSubagentPolicy(
