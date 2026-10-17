@@ -23,7 +23,12 @@ import {
 import { KIND_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { cfgRetryFallbackChains } from "../session/settings";
-import { cfgTaskAgentModelOverrides, cfgTaskPerCallModelAllow, cfgTaskPerCallModelFallbacks } from "./settings";
+import {
+	cfgTaskAgentModelOverrides,
+	cfgTaskDisabledAgents,
+	cfgTaskPerCallModelAllow,
+	cfgTaskPerCallModelFallbacks,
+} from "./settings";
 
 /** A per-call model was rejected: not approved by the operator's configuration. */
 export class PerCallModelError extends Error {
@@ -78,6 +83,8 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 	const allow = cfgTaskPerCallModelAllow.get(settings);
 	const overrides = cfgTaskAgentModelOverrides.get(settings);
 	const parentAllowed = perCallModelAllowsParent(settings);
+	// A disabled agent's own model and override stop granting, like a removed one.
+	const agentEnabled = !cfgTaskDisabledAgents.get(settings).includes(agentName);
 	const sources: Array<string | string[] | undefined> =
 		allow.length > 0
 			? // An explicit list replaces the derived grants; a listed role brings its values and fallback chain.
@@ -97,8 +104,8 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 						.filter(([role]) => !isNonChatRole(role))
 						.map(([, value]) => value),
 					...chains.map(([, chain]) => concrete(chain)),
-					grants.agentModel,
-					Object.hasOwn(overrides, agentName) ? overrides[agentName] : undefined,
+					agentEnabled ? grants.agentModel : undefined,
+					agentEnabled && Object.hasOwn(overrides, agentName) ? overrides[agentName] : undefined,
 				];
 	if (parentAllowed) sources.push(grants.parentModelPattern);
 	const patterns = new Set<string>();

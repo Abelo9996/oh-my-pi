@@ -270,8 +270,10 @@ selectors, invalid thinking suffixes, and selectors that match no available or n
 A requested model without working credentials fails rather than running on the parent's model,
 unless the selection includes `@default`. Once the child runs, every main-loop request is checked
 against the same grants, read from current settings, so a retry fallback, prewalk, extension
-replacement, or settings change cannot move it to an unapproved model; cold revival applies the
-same check. `hostModel` keeps `model`'s precedence but is neither gated nor checked.
+replacement, or settings change cannot move it to an unapproved model; disabling the agent revokes
+its own model and override as grants. Cold revival applies the same check, granting the agent's
+frontmatter model only while that agent is still discovered. `hostModel` keeps `model`'s precedence
+but is neither gated nor checked.
 
 After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
 
