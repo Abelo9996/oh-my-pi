@@ -17,6 +17,7 @@ import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { antigravityUsageProvider } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -193,6 +194,52 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		}
 
 		expect(counts.get("api-acct-gemini-exhausted") ?? 0).toBeGreaterThan(counts.get("api-acct-gemini-healthy") ?? 0);
+	});
+
+	test("routes Gemini 3.8 Flash to the paid account when only its Argon bucket is exhausted", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const accounts = ["free-a", "free-b", "paid"];
+		await authStorage.credentials.set(
+			"google-antigravity",
+			accounts.map(accountId => ({
+				type: "oauth" as const,
+				...createCredential(accountId, `proj-${accountId}`, `${accountId}@example.com`),
+			})),
+		);
+		for (const accountId of accounts) {
+			const free = accountId !== "paid";
+			const summary = {
+				groups: [
+					{
+						displayName: "Gemini Models",
+						buckets: [
+							{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: free ? 0 : 0.944 },
+							{ bucketId: "gemini-5h", window: "5h", remainingFraction: free ? 0 : 0.949 },
+							{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: free ? 1 : 0 },
+						],
+					},
+				],
+			};
+			const report = await antigravityUsageProvider.fetchUsage!(
+				{
+					provider: "google-antigravity",
+					credential: {
+						type: "oauth",
+						accessToken: "token",
+						projectId: `proj-${accountId}`,
+						accountId,
+					},
+				},
+				{ fetch: async () => new Response(JSON.stringify(summary), { status: 200 }) },
+			);
+			if (!report) throw new Error("expected usage report");
+			usageByAccount.set(accountId, report);
+		}
+
+		const key = await authStorage.keys.get("google-antigravity", "session-flash-with-argon-exhausted", {
+			modelId: "gemini-3.8-flash",
+		});
+		expect(key).toBe("api-paid");
 	});
 
 	test("ranks by bottleneck counter instead of healthier secondary counter", async () => {

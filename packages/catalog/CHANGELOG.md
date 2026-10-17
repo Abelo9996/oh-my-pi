@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Google Antigravity Gemini 4 Argon models sharing the general Gemini quota scope instead of their dedicated weekly bucket ([#16104](https://github.com/can1357/oh-my-pi/issues/16104)).
+
 ## [18.12.0] - 2026-10-17
 
 ### Added

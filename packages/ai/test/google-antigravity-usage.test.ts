@@ -161,6 +161,47 @@ describe("antigravity usage provider", () => {
 		);
 	});
 
+	it("keeps an exhausted Argon weekly bucket out of Gemini 3.8 Flash selection and healing", async () => {
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential(), signal: undefined },
+			makeCtx(
+				fakeFetch({
+					groups: [
+						{
+							displayName: "Gemini Models",
+							buckets: [
+								{ bucketId: "gemini-5h", window: "5h", remainingFraction: 0.949 },
+								{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.944 },
+								{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: 0 },
+							],
+						},
+					],
+				}),
+			),
+		);
+		if (!report) throw new Error("expected usage report");
+		const flash = { modelId: "gemini-3.8-flash" };
+		const argon = { modelId: "gemini-4-argon-high" };
+		const flashLimits = scopeAntigravityLimitsForModel(report, flash);
+		expect(flashLimits.map(limit => limit.id).sort()).toEqual([
+			"google-antigravity:google:default:gemini-5h",
+			"google-antigravity:google:default:gemini-weekly",
+		]);
+		expect(antigravityRankingStrategy.findWindowLimits(report, flash).primary?.status).toBe("ok");
+		expect(antigravityRankingStrategy.blockScope?.(flash)).toBe("counter:google");
+		expect(scopeAntigravityLimitsForModel(report, argon).map(limit => limit.status)).toEqual(["exhausted"]);
+		expect(antigravityRankingStrategy.blockScope?.(argon)).toBe("counter:google-argon");
+		expect(
+			antigravityRankingStrategy.healableBlockScopes?.(report)?.map(scope => ({
+				blockScope: scope.blockScope,
+				statuses: scope.limits.map(limit => limit.status),
+			})),
+		).toEqual([
+			{ blockScope: "counter:google-argon", statuses: ["exhausted"] },
+			{ blockScope: "counter:google", statuses: ["ok", "ok"] },
+		]);
+	});
+
 	it("keeps the worst remainingFraction when merging same tier", async () => {
 		const payload = {
 			models: {

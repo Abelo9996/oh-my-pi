@@ -288,6 +288,7 @@ function getQuotaSummaryCounterKeys(
 ): string[] {
 	const bucketId = bucket.bucketId?.toLowerCase() ?? "";
 	const groupName = group?.displayName?.toLowerCase() ?? "";
+	if (bucketId.startsWith("gemini-argon-")) return ["google-argon"];
 	if (bucketId.startsWith("gemini-") || groupName.includes("gemini")) return ["google"];
 	if (
 		bucketId.startsWith("3p-") ||
@@ -307,6 +308,8 @@ function getQuotaSummaryCounterName(counterKey: string): string | undefined {
 	switch (counterKey) {
 		case "google":
 			return "Google";
+		case "google-argon":
+			return "Gemini 4 Argon";
 		case "anthropic":
 			return "Anthropic";
 		case "openai":
@@ -649,7 +652,7 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 export const antigravityUsageProvider: UsageProvider = {
 	id: "google-antigravity",
-	cacheVersion: 2,
+	cacheVersion: 3,
 	fetchUsage: fetchAntigravityUsage,
 	supports: params => params.provider === "google-antigravity",
 };
@@ -666,8 +669,8 @@ function getAntigravityCounterLimits(report: UsageReport, counterKey: string): U
 
 /**
  * Scope an Antigravity report to the active model's backend counter, falling
- * back to legacy default counters only when that backend has no limits.
- *
+ * back to the general Gemini counter for Argon when its dedicated bucket is
+ * absent, then to legacy default counters only when the backend has no limits.
  * Exhaustion checks are only safe with a concrete backend counter. A no-model
  * credential lookup (for example image-provider discovery) must not turn one
  * exhausted family into a provider-wide block.
@@ -680,6 +683,10 @@ export function scopeAntigravityLimitsForModel(
 	if (!counterKey) return [];
 	const backendLimits = getAntigravityCounterLimits(report, counterKey);
 	if (backendLimits.length > 0) return backendLimits;
+	if (counterKey === "google-argon") {
+		const googleLimits = getAntigravityCounterLimits(report, "google");
+		if (googleLimits.length > 0) return googleLimits;
+	}
 	return getAntigravityCounterLimits(report, "default");
 }
 
