@@ -1811,6 +1811,20 @@ describe("per-call model gate and approval", () => {
 		expect([check("off", "select"), check("off", "dispatch")]).toEqual([false, false]);
 	});
 
+	it("never treats a `*` default-role alias as a catalog-wide grant", () => {
+		const review = { review: "anthropic/claude-sonnet-4-5" };
+		for (const { roles, agentModel } of [
+			{ roles: review, agentModel: "*" },
+			{ roles: review, agentModel: "*:high" },
+			{ roles: { ...review, smol: "*" }, agentModel: undefined },
+		]) {
+			const grants = { settings: Settings.isolated({ modelRoles: roles }), agentName: "worker", agentModel };
+			// `*` names the session's model, as `@default` does; only the configured role approves.
+			expect(isPerCallModelApproved(MODEL, grants, registry, "dispatch")).toBe(true);
+			expect(isPerCallModelApproved(OTHER, grants, registry, "dispatch")).toBe(false);
+		}
+	});
+
 	it("runs an approved per-call model and never sends to a model an extension swaps in", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-per-call-dispatch-"));
 		const cwd = path.join(root, "project");

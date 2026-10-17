@@ -15,6 +15,7 @@ import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
+	modelSelectionInheritsSessionModel,
 	normalizeModelPatternList,
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
@@ -48,9 +49,10 @@ export interface PerCallModelGrants {
 	parentModelPattern?: string;
 }
 
+/** `@default` in any spelling (`*`, `pi/default`, `:level`) names the session's model, never a grant; a bare `*` would otherwise match every model as a glob. */
 function isSessionToken(pattern: string): boolean {
 	const base = splitRoleAliasThinkingSuffix(pattern).base.toLowerCase();
-	return base === "default" || base === "inherit";
+	return base === "default" || base === "inherit" || modelSelectionInheritsSessionModel(pattern);
 }
 
 /**
