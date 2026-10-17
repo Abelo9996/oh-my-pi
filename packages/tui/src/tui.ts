@@ -16,6 +16,7 @@ import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import { getDebugLogPath } from "@oh-my-pi/pi-utils/dirs";
 import { $flag } from "@oh-my-pi/pi-utils/env";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
@@ -49,6 +50,7 @@ import {
 } from "./terminal-capabilities";
 import { compositeLineAt } from "./render/composite";
 import { clipSixel } from "./render/sixel";
+import { cropPngTop } from "./render/png";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import {
 	Ellipsis,
@@ -999,6 +1001,8 @@ export class TUI extends Container {
 	#screenImagePlacements = new Map<number, LiveImagePlacement>();
 	#altImagePlacements = new Map<number, LiveImagePlacement>();
 	#nextImagePlacementId = 1;
+	/** Top-cropped iTerm2 placement lines by hidden rows and source line; a moving figure re-clips every frame. */
+	#iterm2Crops = new LRUCache<string, string | null>({ max: 16 });
 	#ghosttyInitialImageDelayDone = false;
 	#ghosttyInitialImageDelayTimer: RenderTimer | undefined;
 	#ghosttyImageReadyAtMs = 0;
@@ -3309,6 +3313,10 @@ export class TUI extends Container {
 						? `\x1b7\x1b[?80h${sequence}\x1b[?80l\x1b8`
 						: `\x1b7${lift + extraLift > 0 ? `\x1b[${lift + extraLift}A` : ""}${sequence}\x1b8`;
 				}
+			} else if (lift < requestedLift && TERMINAL.imageProtocol === ImageProtocol.Iterm2) {
+				const cropped = this.#cropITerm2(line, requestedLift - lift);
+				if (cropped === null) return "";
+				line = cropped;
 			} else if (lift < requestedLift && TERMINAL.imageProtocol !== ImageProtocol.Kitty) {
 				// An unknown non-Kitty raster cannot be re-anchored safely.
 				return "";
@@ -3330,6 +3338,35 @@ export class TUI extends Container {
 				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
 			})
 		);
+	}
+
+	/**
+	 * An iTerm2 placement line with its top `hiddenRows` cell rows cut out of
+	 * the PNG, so the rest lands on its own rows at the original scale. iTerm2
+	 * cannot clip a placement. `null` when the line is not a PNG placement this
+	 * can crop; the caller then drops it rather than paint over foreign rows.
+	 */
+	#cropITerm2(line: string, hiddenRows: number): string | null {
+		const key = `${hiddenRows};${line}`;
+		const cached = this.#iterm2Crops.get(key);
+		if (cached !== undefined) return cached;
+		let cropped: string | null = null;
+		const match = /^\x1b7\x1b\[(\d+)A\x1b\]1337;File=([^:\x07]*):([A-Za-z0-9+/=]+)\x07\x1b8$/.exec(line);
+		const columns = match ? Number(/(?:^|;)width=(\d+)(?:;|$)/.exec(match[2])?.[1]) : 0;
+		const cell = getCellDimensions();
+		if (match && columns > 0 && cell.widthPx > 0 && cell.heightPx > 0) {
+			const png = Buffer.from(match[3], "base64");
+			const sourceWidth = png.byteLength >= 24 ? png.readUInt32BE(16) : 0;
+			// Source pixel rows one cell row shows at `width=columns`, rounded
+			// up so the kept slice never reaches past the placement row.
+			const skip = Math.ceil((hiddenRows * cell.heightPx * sourceWidth) / (columns * cell.widthPx));
+			const data = sourceWidth > 0 ? cropPngTop(png, skip) : null;
+			const lift = Number(match[1]) - hiddenRows;
+			if (data)
+				cropped = `\x1b7${lift > 0 ? `\x1b[${lift}A` : ""}\x1b]1337;File=${match[2]}:${data.toBase64()}\x07\x1b8`;
+		}
+		this.#iterm2Crops.set(key, cropped);
+		return cropped;
 	}
 
 	#terminalLine(line: PreparedLine): string {

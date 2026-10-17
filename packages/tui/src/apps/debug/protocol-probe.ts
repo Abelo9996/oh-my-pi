@@ -25,18 +25,7 @@ import { DynamicBorder } from "../../chrome/dynamic-border";
 import { theme } from "../../theme/theme";
 import { ansi } from "../../native/describe";
 import type { NativeNode } from "../../native/node";
-
-const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
-
-/** Frame a PNG chunk: 4-byte big-endian length, type+data, then the CRC-32 of type+data. */
-function pngChunk(type: string, data: Uint8Array): Uint8Array {
-	const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
-	const out = Buffer.alloc(body.length + 8);
-	out.writeUInt32BE(data.length, 0);
-	body.copy(out, 4);
-	out.writeUInt32BE(Bun.hash.crc32(body) >>> 0, out.length - 4);
-	return out;
-}
+import { PNG_SIGNATURE, pngChunk } from "../../render/png";
 
 /**
  * Encode raw 8-bit RGB pixels (`width * height * 3` bytes, row-major) as a PNG
