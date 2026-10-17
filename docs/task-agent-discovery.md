@@ -241,7 +241,7 @@ there is `modelRoles.default` at `high`; an agent whose whole frontmatter `model
 
 | Value | Behavior |
 | --- | --- |
-| `off` (default) | `model` is hidden from the task schema and prompts; calls that pass it fail preflight. |
+| `off` (default) | `model` is hidden from the task schema and prompts. A task call that still passes it has it dropped by the schema and runs on the agent's own model, unless the bundled `seance` is advertised (its own `model` field stays in the schema), in which case the call fails preflight. Eval `agent()`/`workpool()` reject it. |
 | `unpinned` | Accepted only for agents whose own model doesn't change routing: no `task.agentModelOverrides` entry, and a frontmatter `model` that resolves the same as inheriting the parent. The bundled `task` agent (`@task`) counts as unpinned until `modelRoles.task` is set; `scout` (`@smol`) and `reviewer` (`@slow`) are pinned whenever their role resolves to a different model than the parent. |
 | `on` | Accepted for every agent. |
 
