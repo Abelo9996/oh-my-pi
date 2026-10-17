@@ -594,8 +594,11 @@ export class UsageService implements UsageApi {
 			const providerImpl = this.providerFor(provider);
 			if (!providerImpl) continue;
 			const baseUrl = options?.baseUrlResolver?.(provider);
+			const runtimeKey = this.#deps.overrides.runtimeKey(providerId);
+			const configKey = this.#deps.overrides.configKey(providerId);
+			const oauthTokenEnv = authPolicyFor(providerId)?.oauthTokenEnv;
 			let entries = this.#deps.pool.entries(providerId);
-			if (entries.length > 0) {
+			if (entries.length > 0 && !runtimeKey && configKey === undefined) {
 				const dedupedEntries = await this.#deps.pool.pruneDuplicates(providerId, entries);
 				if (dedupedEntries.length !== entries.length) {
 					this.#deps.pool.replace(providerId, dedupedEntries);
@@ -603,10 +606,28 @@ export class UsageService implements UsageApi {
 				entries = dedupedEntries;
 			}
 
+			// Explicit keys replace pooled credentials; an unresolved config key
+			// must not fall through to stored credentials or environment keys.
+			if (runtimeKey || configKey !== undefined || (!oauthTokenEnv && entries.length === 0)) {
+				let apiKey: string | undefined;
+				if (runtimeKey) {
+					apiKey = runtimeKey;
+				} else if (configKey !== undefined) {
+					apiKey = await this.#deps.overrides.resolve(configKey);
+				} else {
+					const extensionKey = this.#runtimeUsageProviderOverrides.get(provider)?.apiKey;
+					apiKey = extensionKey ? await this.#deps.overrides.resolve(extensionKey) : getEnvApiKey(providerId);
+				}
+				if (!apiKey) continue;
+				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+				if (providerImpl.supports && !providerImpl.supports(request)) continue;
+				requests.push(request);
+				continue;
+			}
+
 			// A declared OAuth bearer env list means usage probes must ignore stored
 			// API keys and borrowed API-key env aliases. Even when an API-key row
 			// exists, fall back to the provider's own OAuth env bearer.
-			const oauthTokenEnv = authPolicyFor(providerId)?.oauthTokenEnv;
 			if (oauthTokenEnv) {
 				let hasUsableStoredOAuthCredential = false;
 				for (const entry of entries) {
@@ -621,21 +642,6 @@ export class UsageService implements UsageApi {
 					const request = usageRequest(provider, { type: "oauth", accessToken: oauthToken }, baseUrl);
 					if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
 				}
-				continue;
-			}
-
-			if (entries.length === 0) {
-				const runtimeKey = this.#deps.overrides.runtimeKey(providerId);
-				const extensionUsageKeyConfig = this.#runtimeUsageProviderOverrides.get(provider)?.apiKey,
-					extensionUsageKey = extensionUsageKeyConfig
-						? await this.#deps.overrides.resolve(extensionUsageKeyConfig)
-						: undefined,
-					envKey = getEnvApiKey(providerId);
-				const apiKey = runtimeKey ?? extensionUsageKey ?? envKey;
-				if (!apiKey) continue;
-				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
-				if (providerImpl.supports && !providerImpl.supports(request)) continue;
-				requests.push(request);
 				continue;
 			}
 

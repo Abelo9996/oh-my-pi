@@ -19,7 +19,10 @@ describe("AuthStorage config-override apiKey", () => {
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-config-override-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		authStorage = new AuthStorage(store);
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: () => undefined,
+			configValueResolver: async value => (value.startsWith("!") ? undefined : value),
+		});
 	});
 
 	afterEach(async () => {
@@ -121,6 +124,59 @@ describe("AuthStorage config-override apiKey", () => {
 			await seedOAuth("anthropic", "oauth-from-broker");
 			authStorage.keys.setConfig("anthropic", "gateway-bearer");
 			expect(authStorage.keys.describe("anthropic")).toBe("config override (models.yml)");
+		});
+	});
+
+	test("usage probes only the configured account when a stale login key is stored", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "configured-usage";
+		const probedKeys: string[] = [];
+		await authStorage.credentials.set(provider, { type: "api_key", key: "sk-stale", source: "login" });
+		authStorage.keys.setConfig(provider, "sk-configured");
+		authStorage.usage.setProvider(provider, {
+			id: provider,
+			async fetchUsage({ credential }) {
+				probedKeys.push(credential.apiKey ?? "");
+				if (credential.apiKey !== "sk-configured") return null;
+				return {
+					provider,
+					fetchedAt: Date.now(),
+					limits: [
+						{
+							id: "quota",
+							label: "Quota",
+							scope: { provider },
+							amount: { usedFraction: 0.4, unit: "percent" },
+						},
+					],
+				};
+			},
+		});
+
+		const reports = await authStorage.usage.reports();
+		expect(
+			reports?.filter(report => report.provider === provider).map(report => report.limits[0]?.amount.usedFraction),
+		).toEqual([0.4]);
+		expect(probedKeys).toEqual(["sk-configured"]);
+	});
+
+	test("an unresolved configured key cannot expose an ambient provider key to usage", async () => {
+		await withEnv({ OPENAI_API_KEY: "sk-ambient" }, async () => {
+			if (!authStorage) throw new Error("test setup failed");
+			const provider = "openai";
+			const probedKeys: string[] = [];
+			authStorage.keys.setConfig(provider, "!failed-command");
+			authStorage.usage.setProvider(provider, {
+				id: provider,
+				async fetchUsage({ credential }) {
+					probedKeys.push(credential.apiKey ?? "");
+					return { provider, fetchedAt: Date.now(), limits: [] };
+				},
+			});
+
+			expect(await authStorage.keys.get(provider)).toBeUndefined();
+			expect((await authStorage.usage.reports())?.some(report => report.provider === provider)).toBe(false);
+			expect(probedKeys).toEqual([]);
 		});
 	});
 });
