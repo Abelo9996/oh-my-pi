@@ -229,10 +229,6 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
  * `schema` remains an eval-only alias and is rejected.
  */
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
-	if (params.tasks !== undefined && Object.hasOwn(params, "model")) {
-		return "Put each model selector on its tasks[] item, not on the batch container.";
-	}
-
 	if (Object.hasOwn(params, "schema")) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
 	}
@@ -919,7 +915,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			model: params.model,
 			...this.#resultParams(params),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
-			...(params.model !== undefined ? { model: params.model } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
@@ -1730,7 +1725,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...this.#resultParams(params),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
 				solutionSpace: params.solutionSpace,
-				...(params.model !== undefined ? { model: params.model } : {}),
 				...(params.tools?.length
 					? {
 							customTools: createEvalCustomTools(
