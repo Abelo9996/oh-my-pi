@@ -785,8 +785,12 @@ export class Image implements Component {
 		return node;
 	}
 
+	render(width: number): readonly string[] {
+		return this.renderWithPrevious(width);
+	}
+
 	/** Keep a previous raster visible while this image's SIXEL encode is pending. Both share one budget slot. */
-	render(width: number, previous?: Image): readonly string[] {
+	renderWithPrevious(width: number, previous?: Image): readonly string[] {
 		const imageProtocol = TERMINAL.imageProtocol;
 		const hasProtocol = imageProtocol != null;
 		const cellDimensions = getCellDimensions();

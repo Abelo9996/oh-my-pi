@@ -62,10 +62,24 @@ export class FigureMarkdown extends Container {
 		}
 	}
 
-	/** Render with an optional row ceiling overriding the configuration for this pass. */
+	/** Fit figures into a surface's row ceiling after reserving prose and spacing. */
 	override render(width: number, maxRows?: number): readonly string[] {
 		this.#renderMaxRows = maxRows;
-		return super.render(width);
+		if (maxRows === undefined || !Number.isFinite(maxRows)) return super.render(width);
+		const measured = this.children.map(child => ({
+			child,
+			rows: child instanceof SvgFigure || child instanceof TableChartFigure ? undefined : child.render(width),
+		}));
+		let remainingRows = Math.max(
+			0,
+			Math.floor(maxRows) - measured.reduce((total, { rows }) => total + (rows?.length ?? 0), 0),
+		);
+		return measured.flatMap(({ child, rows }) => {
+			if (rows !== undefined) return rows;
+			const rendered = child.render(width, remainingRows);
+			remainingRows = Math.max(0, remainingRows - rendered.length);
+			return rendered;
+		});
 	}
 
 	/** Replace the source; returns whether it changed. */

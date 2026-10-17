@@ -55,6 +55,14 @@ function placement(svg: SvgFigure, width: number): { raster: string; box: string
 	};
 }
 
+function sixelRowCounts(output: string): number[] {
+	return [...output.matchAll(/\x1bP[\d;]*q[\s\S]*?\x1b\\/g)].map(([payload]) => {
+		const raster = /"\d+;\d+;\d+;(\d+)/.exec(payload);
+		if (!raster) throw new Error("SIXEL payload omitted its raster dimensions");
+		return Math.ceil(Number(raster[1]) / CELL.heightPx);
+	});
+}
+
 describe("SvgFigure", () => {
 	const originalProtocol = TERMINAL.imageProtocol;
 	const originalCell = { ...getCellDimensions() };
@@ -173,6 +181,92 @@ describe("SvgFigure", () => {
 			expect(drawn.at(-1)).toMatch(/\x1bP[\d;]*q/);
 		} finally {
 			block.dispose();
+		}
+	});
+
+	it.each([
+		["top-left", "", "", 4],
+		["bottom-left", "", "", 4],
+		["top-left", "Before the figure\n\n", "", 2],
+		["bottom-left", "", "\n\nAfter the figure", 2],
+	] as const)(
+		"keeps a complete SIXEL figure inside a %s overlay with prefix %j and suffix %j",
+		async (anchor, prefix, suffix, figureRows) => {
+			setTerminalImageProtocol(ImageProtocol.Sixel);
+			const term = new VirtualTerminal(80, 12);
+			const writes = spyOn(term, "write");
+			const encoded = spyOn(natives, "encodeSixelAsync");
+			const scheduler = new VirtualRenderScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const landed = Promise.withResolvers<void>();
+			const block = new FigureMarkdown(`${prefix}${fencedCode("svg", LANDSCAPE_SVG)}${suffix}`, {
+				markdown: text => new Markdown(text, 0, 0, getMarkdownTheme()),
+				charts: false,
+				budget: tui.imageBudget,
+				onChange: () => {
+					landed.resolve();
+					tui.requestRender();
+				},
+			});
+			tui.showOverlay(block, { anchor, width: 76, maxHeight: 4 });
+			try {
+				tui.start();
+				await scheduler.settle(term);
+				await landed.promise;
+				await scheduler.settle(term);
+				await encoded.mock.results.at(-1)?.value;
+				await scheduler.advance(term, 400);
+
+				const output = writes.mock.calls.map(([data]) => data).join("");
+				expect(new Set(sixelRowCounts(output))).toEqual(new Set([figureRows]));
+				if (prefix || suffix) expect(term.getViewport().join("\n")).toContain((prefix || suffix).trim());
+			} finally {
+				block.dispose();
+				tui.stop();
+			}
+		},
+	);
+
+	it("shrinks a visible overlay figure to the rows left by margins after a terminal resize", async () => {
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const term = new VirtualTerminal(80, 12);
+		const writes = spyOn(term, "write");
+		const encoded = spyOn(natives, "encodeSixelAsync");
+		const scheduler = new VirtualRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		let landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({
+			budget: tui.imageBudget,
+			onChange: () => {
+				landed.resolve();
+				tui.requestRender();
+			},
+		});
+		svg.update(LANDSCAPE_SVG, true);
+		tui.showOverlay(svg, { anchor: "top-left", width: 76, margin: { top: 2, bottom: 2 } });
+		const drawnRows = () => new Set(sixelRowCounts(writes.mock.calls.map(([data]) => data).join("")));
+		try {
+			tui.start();
+			await scheduler.settle(term);
+			await landed.promise;
+			await scheduler.settle(term);
+			await encoded.mock.results.at(-1)?.value;
+			await scheduler.advance(term, 400);
+			expect(drawnRows()).toEqual(new Set([8]));
+
+			writes.mockClear();
+			landed = Promise.withResolvers<void>();
+			term.resize(80, 8);
+			await scheduler.advance(term, 160);
+			expect(drawnRows()).toEqual(new Set([4]));
+			await landed.promise;
+			await scheduler.settle(term);
+			await encoded.mock.results.at(-1)?.value;
+			await scheduler.advance(term, 400);
+			expect(drawnRows()).toEqual(new Set([4]));
+		} finally {
+			svg.dispose();
+			tui.stop();
 		}
 	});
 

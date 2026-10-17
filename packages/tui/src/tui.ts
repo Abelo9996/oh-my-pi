@@ -250,9 +250,11 @@ export interface Component {
 	 * Render the component to an array of physical rows at the given width.
 	 * The result is component-owned and `readonly` to the caller; an unchanged
 	 * component may (and should) return the same array reference it returned
-	 * last time.
+	 * last time. `maxRows`, when supplied, is the surface's available height;
+	 * height-aware components can use it to fit complete images inside it.
+	 * Text-only components may still return more rows for the caller to clip.
 	 */
-	render(width: number): readonly string[];
+	render(width: number, maxRows?: number): readonly string[];
 
 	/**
 	 * Describe the component semantically for a Tern Surface Protocol
@@ -3198,7 +3200,7 @@ export class TUI extends Container {
 			// Get layout with height=0 first to determine width and maxHeight
 			// (width and maxHeight don't depend on overlay height).
 			const { width, maxHeight } = this.#resolveOverlayLayout(options, 0, termWidth, termHeight);
-			let overlayLines = component.render(width);
+			let overlayLines = component.render(width, maxHeight);
 			if (overlayLines.length > maxHeight) {
 				const anchor = options?.anchor ?? "center";
 				overlayLines =

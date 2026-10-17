@@ -255,7 +255,7 @@ export class SvgFigure implements Component {
 			return this.#placeholder;
 		}
 		const image = this.#imageFor(raster, limits.rows);
-		const rows = image.render(width, this.#previousImage);
+		const rows = image.renderWithPrevious(width, this.#previousImage);
 		if (!image.pending) this.#previousImage = undefined;
 		return rows.slice(0, limits.rows);
 	}
