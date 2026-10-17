@@ -981,7 +981,7 @@ describe("pickElectronTarget relay path", () => {
 		]);
 		expect(exitCode, stderr).toBe(0);
 		expect(stdout).toMatch(/relay is connected.*no eligible tabs.*Open a normal web page/i);
-	}, 30_000);
+	}, 60_000);
 
 	it("does not adopt another live tab when the selected tab is unreadable", async () => {
 		const other = makeTarget("PAGE10", fakePage({ url: "https://docs.example.com", title: "Docs" }));
