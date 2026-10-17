@@ -828,19 +828,34 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		expect(events).toEqual(["start", "end"]);
 	});
 
-	it("keeps recording when starting it stalls the event loop past the release window", () => {
+	it("keeps recording when starting it blocks the loop just past the release window", () => {
 		const { editor, events } = makeEditor();
-		// Opening the microphone blocks the loop synchronously: the clock jumps while the repeats
-		// the held bar emits during the block sit unread in stdin.
-		const fakeNow = performance.now.bind(performance);
-		let stalledMs = 0;
-		vi.spyOn(performance, "now").mockImplementation(() => fakeNow() + stalledMs);
+		// Opening the microphone blocks the loop synchronously for longer than the release window
+		// but by less than the stall slack (#16121). Once the block ends, the loop runs due timers
+		// before reading the repeats the held bar emitted meanwhile; model that by moving the shared
+		// clock inside onStart, which fires anything already due before the queued repeats arrive.
 		editor.spaceHold.handler!.onStart = () => {
 			events.push("start");
-			stalledMs += SPACE_HOLD_RELEASE_MS + SPACE_HOLD_STALL_SLACK_MS + 300;
+			vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + SPACE_HOLD_STALL_SLACK_MS / 2);
 		};
 		feedSpaces(editor, SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
 		expect(events).toEqual(["start"]);
+		// The queued repeats arrive and keep the hold alive; a real idle gap then releases.
+		feedSpaces(editor, 5, REPEAT_GAP_MS);
+		expect(events).toEqual(["start"]);
+		vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + 1);
+		expect(events).toEqual(["start", "end"]);
+	});
+
+	it("keeps recording when the loop stalls mid-hold past the release window", () => {
+		const { editor, events } = makeEditor();
+		feedSpaces(editor, SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+		expect(events).toEqual(["start"]);
+		// A long block (GC, heavy render) after the last read repeat: the clock jumps while the
+		// repeats the held bar emits sit unread in stdin.
+		const fakeNow = performance.now.bind(performance);
+		const stalledMs = SPACE_HOLD_RELEASE_MS + SPACE_HOLD_STALL_SLACK_MS + 300;
+		vi.spyOn(performance, "now").mockImplementation(() => fakeNow() + stalledMs);
 		// The overdue release timer fires before the queued repeats are read; it must not stop.
 		vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + 1);
 		expect(events).toEqual(["start"]);

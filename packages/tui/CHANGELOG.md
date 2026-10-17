@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed hold-Space push-to-talk stopping right after it starts when opening the microphone blocks for 250-350 ms ([#16121](https://github.com/can1357/oh-my-pi/issues/16121))
+
 ## [18.12.1] - 2026-10-17
 
 ### Breaking Changes

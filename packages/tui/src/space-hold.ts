@@ -29,9 +29,9 @@ export const SPACE_HOLD_MECHANICAL_RUN = 2;
 /** Idle gap (ms) after the last repeated configured-key press that counts as release and ends
  *  push-to-talk. Must comfortably exceed the OS key-repeat interval. */
 export const SPACE_HOLD_RELEASE_MS = 250;
-/** A release timer firing more than this (ms) past its deadline means the event loop stalled (a
- *  synchronous microphone open, GC, a heavy render) while the bar may still be held: the repeats
- *  emitted during the stall are queued but unread, so the stall must not read as a release. */
+/** A release timer firing more than this (ms) past its deadline means the event loop stalled (GC,
+ *  a heavy render) while the key may still be held: the repeats emitted during the stall are queued
+ *  but unread, so the stall must not read as a release. */
 export const SPACE_HOLD_STALL_SLACK_MS = 100;
 
 /** Whether two consecutive inter-key gaps look machine-driven: both within the auto-repeat band
@@ -195,8 +195,13 @@ export class SpaceHoldGesture {
 			this.#resetRun();
 			this.#active = true;
 			this.#activeKey = candidateKey;
-			this.#armReleaseTimer();
-			handler.onStart();
+			try {
+				handler.onStart();
+			} finally {
+				// Arm only once onStart returns: a synchronous start (opening the microphone) can block
+				// the loop past the release window, and that block is not an idle gap between repeats.
+				if (this.#active) this.#armReleaseTimer();
+			}
 		}
 		return "swallow";
 	}
