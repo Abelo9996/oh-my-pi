@@ -1757,6 +1757,95 @@ describe("per-call model gate and approval", () => {
 		);
 	});
 
+	for (const { role, roles } of [
+		{ role: "review", roles: { review: "anthropic/claude-sonnet-4-5" } },
+		{ role: "smol", roles: { default: "anthropic/claude-sonnet-4-5" } },
+	]) {
+		it.each([
+			{ mode: "select", select: true, dispatch: true },
+			{ mode: "runtime", select: false, dispatch: true },
+			{ mode: "off", select: false, dispatch: false },
+		])(`applies $mode to the default fallback inherited by an allowed @${role}`, ({ mode, select, dispatch }) => {
+			const settings = Settings.isolated({
+				modelRoles: roles,
+				"task.perCallModelAllow": [`@${role}`],
+				"task.perCallModelFallbacks": mode,
+				"retry.fallbackChains": { default: ["anthropic/claude-opus-4-5"] },
+			});
+			const grants = { settings, agentName: "worker" };
+			expect(isPerCallModelApproved(MODEL, grants, registry, "select")).toBe(true);
+			expect(isPerCallModelApproved(MODEL, grants, registry, "dispatch")).toBe(true);
+			expect(isPerCallModelApproved(OTHER, grants, registry, "select")).toBe(select);
+			expect(isPerCallModelApproved(OTHER, grants, registry, "dispatch")).toBe(dispatch);
+		});
+	}
+
+	it.each([
+		{ label: "an explicitly empty chain", chain: [], ownFallback: false },
+		{ label: "its own chain", chain: ["anthropic/own-fallback"], ownFallback: true },
+	])("does not inherit default when an allowed role has $label", ({ chain, ownFallback }) => {
+		const own = buildModel({ ...MODEL, id: "own-fallback", name: "Own Fallback" });
+		const available = { getAvailable: () => [MODEL, OTHER, own] };
+		const settings = Settings.isolated({
+			modelRoles: { review: "anthropic/claude-sonnet-4-5" },
+			"task.perCallModelAllow": ["@review"],
+			"retry.fallbackChains": { default: ["anthropic/claude-opus-4-5"], review: chain },
+		});
+		const grants = { settings, agentName: "worker" };
+		for (const use of ["select", "dispatch"] as const) {
+			expect(isPerCallModelApproved(MODEL, grants, available, use)).toBe(true);
+			expect(isPerCallModelApproved(OTHER, grants, available, use)).toBe(false);
+			expect(isPerCallModelApproved(own, grants, available, use)).toBe(ownFallback);
+		}
+	});
+
+	it("inherits only the allowed role's fallback entries without granting the default primary or parent", () => {
+		const configuredDefault = buildModel({ ...MODEL, id: "configured-default", name: "Configured Default" });
+		const parent = buildModel({ ...MODEL, id: "parent-model", name: "Parent Model" });
+		const available = { getAvailable: () => [MODEL, OTHER, configuredDefault, parent] };
+		const settings = Settings.isolated({
+			modelRoles: {
+				review: "anthropic/claude-sonnet-4-5",
+				default: "anthropic/configured-default",
+			},
+			"task.perCallModelAllow": ["@review"],
+			"retry.fallbackChains": { default: ["anthropic/claude-opus-4-5"] },
+		});
+		const grants = { settings, agentName: "worker", parentModelPattern: "anthropic/parent-model" };
+		for (const use of ["select", "dispatch"] as const) {
+			expect(isPerCallModelApproved(MODEL, grants, available, use)).toBe(true);
+			expect(isPerCallModelApproved(OTHER, grants, available, use)).toBe(true);
+			expect(isPerCallModelApproved(configuredDefault, grants, available, use)).toBe(false);
+			expect(isPerCallModelApproved(parent, grants, available, use)).toBe(false);
+		}
+	});
+
+	it.each(["@default", "*:high", "@web", "@not-a-role", "anthropic/claude-sonnet-4-5"])(
+		"does not grant a default fallback through the allowlist entry %s",
+		entry => {
+			const settings = Settings.isolated({
+				modelRoles: { default: "anthropic/claude-sonnet-4-5", web: "anthropic/claude-sonnet-4-5" },
+				"task.perCallModelAllow": [entry],
+				"retry.fallbackChains": { default: ["anthropic/claude-opus-4-5"] },
+			});
+			const grants = { settings, agentName: "worker", parentModelPattern: "anthropic/claude-sonnet-4-5" };
+			expect(isPerCallModelApproved(OTHER, grants, registry, "select")).toBe(false);
+			expect(isPerCallModelApproved(OTHER, grants, registry, "dispatch")).toBe(false);
+		},
+	);
+
+	it("does not grant wildcard entries from an allowed role's inherited default chain", () => {
+		const settings = Settings.isolated({
+			modelRoles: { review: "anthropic/claude-sonnet-4-5" },
+			"task.perCallModelAllow": ["@review"],
+			"retry.fallbackChains": { default: ["anthropic/*"] },
+		});
+		const grants = { settings, agentName: "worker" };
+		expect(isPerCallModelApproved(MODEL, grants, registry, "dispatch")).toBe(true);
+		expect(isPerCallModelApproved(OTHER, grants, registry, "select")).toBe(false);
+		expect(isPerCallModelApproved(OTHER, grants, registry, "dispatch")).toBe(false);
+	});
+
 	it("rejects `@default` at preflight when the allowlist leaves out the parent", async () => {
 		mockDiscovery();
 		const settings = {

@@ -23,6 +23,7 @@ import {
 } from "../config/model-resolver";
 import { KIND_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
+import { expandDefaultRetryFallbackChains } from "../session/retry-fallback-chains";
 import { cfgRetryFallbackChains } from "../session/settings";
 import {
 	cfgTaskAgentModelOverrides,
@@ -77,12 +78,17 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 	const { settings, agentName } = grants;
 	const fallbackMode = cfgTaskPerCallModelFallbacks.get(settings);
 	const withFallbacks = fallbackMode === "select" || (fallbackMode === "runtime" && use === "dispatch");
-	const chains = Object.entries(withFallbacks ? cfgRetryFallbackChains.get(settings) : {}).filter(
-		([key]) => !isNonChatRole(key),
-	);
+	const allow = cfgTaskPerCallModelAllow.get(settings);
+	const chains = Object.entries(
+		withFallbacks
+			? expandDefaultRetryFallbackChains(
+					cfgRetryFallbackChains.get(settings),
+					allow.flatMap(entry => resolveExplicitModelRole(entry, settings) ?? []),
+				)
+			: {},
+	).filter(([key]) => !isNonChatRole(key));
 	// Wildcard chain entries are relative provider swaps, not models the operator named.
 	const concrete = (chain: readonly string[] | undefined) => (chain ?? []).filter(entry => !entry.includes("*"));
-	const allow = cfgTaskPerCallModelAllow.get(settings);
 	const overrides = cfgTaskAgentModelOverrides.get(settings);
 	const parentAllowed = perCallModelAllowsParent(settings);
 	// A disabled agent's own model and override stop granting, like a removed one.
