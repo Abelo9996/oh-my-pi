@@ -286,15 +286,23 @@ describe("structured subagent primitive", () => {
 			expect(saved.enableLsp).toBe(false);
 			expect(saved.enableIrc).toBe(false);
 
-			const overridden = await resolveEffectiveSubagentPolicy(
-				request({
-					session: caller,
-					agent: "seance",
-					sourceSession: sourceFile,
-					model: "anthropic/claude-sonnet-4-5",
-				}),
-			);
-			expect(overridden.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+			// Seance's `model` picks the source's model; `task.perCallModel` neither gates nor grants it.
+			for (const perCallModel of ["off", "unpinned", "on"]) {
+				const gated = Object.assign(
+					session({ cwd, settings: Settings.isolated({ "task.perCallModel": perCallModel }) }),
+					{ modelRegistry },
+				);
+				const overridden = await resolveEffectiveSubagentPolicy(
+					request({
+						session: gated,
+						agent: "seance",
+						sourceSession: sourceFile,
+						model: "anthropic/claude-sonnet-4-5",
+					}),
+				);
+				expect(overridden.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+				expect(overridden.perCallModelGrants).toBeUndefined();
+			}
 		} finally {
 			authStorage.close();
 			await fs.rm(tempDir, { recursive: true, force: true });
@@ -640,6 +648,10 @@ describe("structured subagent primitive", () => {
 		await expect(
 			resolveEffectiveSubagentPolicy(request({ session: withRegistry, model: "openai/does-not-exist" })),
 		).rejects.toThrow(/No available model matches `model`/);
+		// A role with two effort suffixes names no model rather than the role at one of them.
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: withRegistry, model: "@review:high:low" })),
+		).rejects.toThrow(/No available model matches `model`/);
 
 		const policy = await resolveEffectiveSubagentPolicy(
 			request({ session: withRegistry, model: "anthropic/claude-sonnet-4-5" }),
@@ -662,7 +674,7 @@ describe("structured subagent primitive", () => {
 		expect(policy.modelRole).toBeUndefined();
 	});
 
-	it("withholds the parent credential fallback from an explicit per-call model", async () => {
+	it("withholds the parent credential fallback from every per-call model", async () => {
 		mockDiscovery();
 		const parent = "anthropic/claude-sonnet-4-5";
 		const childSession = { ...session(), getActiveModelString: () => parent } as ToolSession;
@@ -686,9 +698,9 @@ describe("structured subagent primitive", () => {
 			// A requested model that cannot authenticate fails rather than running on the parent's.
 			undefined,
 			undefined,
-			// `@default` names the parent, so its fallback is the parent itself.
-			parent,
-			parent,
+			// `@default` lists the parent's model among the requested candidates instead.
+			undefined,
+			undefined,
 			// No selector: the agent inherits the session model and the #985 fallback stays.
 			parent,
 		]);
@@ -1625,6 +1637,23 @@ describe("per-call model gate and approval", () => {
 		expect(policy.perCallModelGrants).toBeUndefined();
 	});
 
+	it("keeps `@default:level` on modelRoles.default for frontmatter and `hostModel`; a per-call `model` inherits the parent", async () => {
+		mockDiscovery({ ...AGENT, model: ["@default:high"] });
+		const childSession = gated(
+			{ "task.perCallModel": "on", modelRoles: { default: "anthropic/claude-sonnet-4-5" } },
+			"anthropic/claude-opus-4-5",
+		);
+		// The parent switched to another model; calls without `model` still use the default role and its fallbacks.
+		for (const host of [{}, { hostModel: "@default:high" }]) {
+			const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, ...host }));
+			expect(policy.modelOverride).toEqual(["anthropic/claude-sonnet-4-5:high"]);
+			expect(policy.modelRole).toBe("default");
+		}
+		const perCall = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@default:high" }));
+		expect(perCall.modelOverride).toEqual(["anthropic/claude-opus-4-5:high"]);
+		expect(perCall.modelRole).toBeUndefined();
+	});
+
 	it("under `unpinned` rejects agents with their own model and accepts the rest", async () => {
 		const settings = { "task.perCallModel": "unpinned", modelRoles: { review: "anthropic/claude-sonnet-4-5" } };
 		mockDiscovery({ ...AGENT, model: ["anthropic/claude-opus-4-5"] });
@@ -1799,6 +1828,20 @@ describe("per-call model gate and approval", () => {
 		expect([check("off", "select"), check("off", "dispatch")]).toEqual([false, false]);
 	});
 
+	it("never treats a `*` default-role alias as a catalog-wide grant", () => {
+		const review = { review: "anthropic/claude-sonnet-4-5" };
+		for (const { roles, agentModel } of [
+			{ roles: review, agentModel: "*" },
+			{ roles: review, agentModel: "*:high" },
+			{ roles: { ...review, smol: "*" }, agentModel: undefined },
+		]) {
+			const grants = { settings: Settings.isolated({ modelRoles: roles }), agentName: "worker", agentModel };
+			// `*` names the session's model, as `@default` does; only the configured role approves.
+			expect(isPerCallModelApproved(MODEL, grants, registry, "dispatch")).toBe(true);
+			expect(isPerCallModelApproved(OTHER, grants, registry, "dispatch")).toBe(false);
+		}
+	});
+
 	it("runs an approved per-call model and never sends to a model an extension swaps in", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-per-call-dispatch-"));
 		const cwd = path.join(root, "project");
@@ -1853,6 +1896,77 @@ describe("per-call model gate and approval", () => {
 			expect(`${refused.result.error ?? ""}${refused.result.stderr}`).toContain("not an approved model");
 			expect(swapped.calls).toHaveLength(0);
 		} finally {
+			unregisterCustomApis(sourceId);
+			authStorage.close();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("refuses a retry fallback to an unapproved model at dispatch instead of serving the turn there", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-per-call-fallback-"));
+		const cwd = path.join(root, "project");
+		await fs.mkdir(cwd, { recursive: true });
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("mock", "test-key");
+		authStorage.keys.setRuntime("mock-alt", "test-key");
+		const sourceId = "structured-subagent-per-call-fallback";
+		registerMockApi(sourceId);
+		// The approved model is rate limited for longer than the retry budget, so the session falls back.
+		const approved = createMockModel({
+			id: "per-call-limited",
+			responses: [{ throw: "rate limit exceeded retry-after-ms=60000" }],
+			handler: () => ({ content: ["approved answer"] }),
+		});
+		// A provider wildcard in the chain is a relative swap, not a model the operator approved.
+		const fallback = createMockModel({
+			provider: "mock-alt",
+			id: approved.id,
+			handler: () => ({ content: ["fallback answer"] }),
+		});
+		const models = [approved, fallback];
+		const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+		const find = modelRegistry.find.bind(modelRegistry);
+		const hasProvider = modelRegistry.hasProvider.bind(modelRegistry);
+		modelRegistry.find = (provider, id) =>
+			models.find(model => model.provider === provider && model.id === id) ?? find(provider, id);
+		modelRegistry.hasProvider = provider => provider === "mock-alt" || hasProvider(provider);
+		modelRegistry.getAvailable = () => models;
+		mockDiscovery({ ...AGENT, tools: ["read"], model: undefined });
+		const settings = Settings.isolated({
+			"task.maxRecursionDepth": 2,
+			"task.perCallModel": "on",
+			"task.isolation.enabled": false,
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			modelRoles: { review: `mock/${approved.id}` },
+			"retry.fallbackChains": { review: ["mock-alt/*"] },
+		});
+		const parentSession = Object.assign(session({ cwd, settings }), {
+			authStorage,
+			modelRegistry,
+			restrictToolNames: true,
+			enableMCP: false,
+			enableLsp: false,
+			enableIrc: false,
+		});
+		const agentId = "PerCallFallback";
+		try {
+			const run = await runStructuredSubagent(
+				request({
+					session: parentSession,
+					model: "@review",
+					structured: false,
+					identity: { id: agentId },
+					keepAlive: false,
+				}),
+			);
+			expect(approved.calls).toHaveLength(1);
+			expect(fallback.calls).toHaveLength(0);
+			expect(run.result.exitCode).not.toBe(0);
+			expect(`${run.result.error ?? ""}${run.result.stderr}`).toContain("not an approved model");
+		} finally {
+			await AgentRegistry.global().get(agentId)?.session?.dispose();
+			AgentRegistry.global().unregister(agentId);
 			unregisterCustomApis(sourceId);
 			authStorage.close();
 			await fs.rm(root, { recursive: true, force: true });

@@ -303,7 +303,12 @@ export const cfgTaskPerCallModel = register({
 		description:
 			"Whether task items, eval agent() and workpool() accept a per-call model. A requested model must be one the operator configured (roles, fallback chains, agent models, overrides) or the parent's live model.",
 		options: [
-			{ value: "off", label: "Off", description: "Hide `model`; calls that pass it are rejected" },
+			{
+				value: "off",
+				label: "Off",
+				description:
+					"Hide `model`; task calls that still pass it have it dropped or rejected, eval calls are rejected",
+			},
 			{
 				value: "unpinned",
 				label: "Unpinned",

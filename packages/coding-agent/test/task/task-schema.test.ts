@@ -235,6 +235,22 @@ describe("task spawn validation", () => {
 		const scout = loadBundledAgents().find(agent => agent.name === "scout")!;
 		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
 	});
+
+	it("leaves a bundled seance's own `model` to seance resolution instead of the per-call selector rules", async () => {
+		// A catalog id such as `cursor/default` can be selected as bare `default` for seance, as on main.
+		const text = await executeText(
+			{
+				agent: "seance",
+				task: "Read historical context.",
+				solutionSpace: "focused read-only inspection",
+				sourceSession: "/missing/source.jsonl",
+				model: "default",
+			},
+			[bundledSeance],
+		);
+		expect(text).not.toContain("ambiguous `model`");
+		expect(text).toContain("selected session file was not found");
+	});
 });
 
 describe("per-call model schema boundaries", () => {
@@ -249,7 +265,7 @@ describe("per-call model schema boundaries", () => {
 				});
 				// `never` would serialize to `{not:{}}`, which Cloud Code Assist rejects; items carry `model`.
 				expect(result instanceof type.errors).toBe(false);
-				if (!(result instanceof type.errors)) expect("model" in result).toBe(false);
+				if (!(result instanceof type.errors)) expect(result).not.toHaveProperty("model");
 			});
 		}
 	}
@@ -263,7 +279,7 @@ describe("per-call model schema boundaries", () => {
 		});
 		expect(flat instanceof type.errors).toBe(false);
 		if (flat instanceof type.errors) throw new Error(flat.summary);
-		expect(flat.model).toEqual(models);
+		expect(flat).toHaveProperty("model", models);
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, perCallModel: true })({
 			context: "Shared context",
 			tasks: [{ task: "Do work", solutionSpace: "c", model: models }],

@@ -595,6 +595,33 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[0]?.[0]?.assertDispatchModel).toBeUndefined();
 	});
 
+	it("starts a per-call worker on its first candidate with working credentials, a plain spawn on its first", async () => {
+		const unauthed = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const authed = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!unauthed || !authed) throw new Error("Expected bundled models to exist");
+		const spy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockImplementation(async () => createSessionResult(yieldEmittingSession()));
+		const registry = createModelRegistry([unauthed, authed], async model =>
+			model.provider === authed.provider ? "test-key" : undefined,
+		);
+		const settings = Settings.isolated();
+		const modelOverride = [`${unauthed.provider}/${unauthed.id}`, `${authed.provider}/${authed.id}`];
+
+		for (const perCallModelGrants of [{ settings, agentName: baseAgent.name }, undefined]) {
+			await runSubprocess({
+				...baseOptions,
+				id: `subagent-candidate-walk-${perCallModelGrants ? "per-call" : "plain"}`,
+				modelOverride,
+				perCallModelGrants,
+				settings,
+				modelRegistry: registry,
+			});
+		}
+
+		expect(spy.mock.calls.map(call => call[0]?.model?.id)).toEqual([authed.id, unauthed.id]);
+	});
+
 	it("persists an explicit role from a caller model override", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
