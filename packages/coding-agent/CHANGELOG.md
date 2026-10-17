@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `browser.open()` reporting a raw timeout when the connected browser relay has no adoptable tabs; it now explains how to open a normal web page and retry ([#16100](https://github.com/can1357/oh-my-pi/issues/16100)).
+
 ## [18.12.0] - 2026-10-17
 
 ### Added

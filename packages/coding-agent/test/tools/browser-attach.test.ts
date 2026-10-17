@@ -34,7 +34,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
-import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { TimeoutError, type Browser, type HTTPRequest, type Page, type Target } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -770,14 +771,18 @@ describe("pickElectronTarget relay path", () => {
 	let relayJson: string;
 	let available = true;
 	let relayEntries = RELAY_ENTRIES;
+	let versionStatus = 200;
 	beforeEach(() => {
 		available = true;
 		relayEntries = RELAY_ENTRIES;
+		versionStatus = 200;
 		relay = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
 			fetch(req) {
-				if (new URL(req.url).pathname !== "/json") return new Response("Not found", { status: 404 });
+				const endpoint = new URL(req.url).pathname;
+				if (endpoint === "/json/version") return new Response("", { status: versionStatus });
+				if (endpoint !== "/json") return new Response("Not found", { status: 404 });
 				return available ? Response.json(relayEntries) : new Response("unavailable", { status: 503 });
 			},
 		});
@@ -900,16 +905,16 @@ describe("pickElectronTarget relay path", () => {
 		expect(await pickElectronTarget(browser, { relayJson, matcher: "whole foods" })).toBe(cartPage);
 	});
 
-	it("tells the model to retry when Puppeteer never sees the selected tab", async () => {
+	it("recognizes a minified Puppeteer timeout when a selected relay tab never appears", async () => {
+		class Ag extends TimeoutError {}
 		const browser = Object.assign(makeBrowser([]), {
 			waitForTarget: async () => {
-				throw Object.assign(new Error("Waiting for target failed"), { name: "TimeoutError" });
+				throw new Ag("Timed out after waiting 10000ms");
 			},
 		});
 
 		const error = await rejectionOf(pickElectronTarget(browser, { relayJson, matcher: "whole foods" }));
 
-		expect(error).toBeInstanceOf(Error);
 		expect((error as Error).message).toMatch(/^Selected tab did not become available.*retry, or reopen it/);
 	});
 
@@ -927,6 +932,56 @@ describe("pickElectronTarget relay path", () => {
 		expect(await pickElectronTarget(makeBrowser([cart.target]), { relayJson, matcher: "cart" })).toBe(cartPage);
 		expect(served).toBe(1);
 	});
+
+	it("does not mistake a disconnected relay extension for an empty browser", async () => {
+		relayEntries = [];
+		versionStatus = 503;
+		const browser = Object.assign(makeBrowser([]), {
+			waitForTarget: async () => {
+				throw new TimeoutError("Timed out after waiting 10000ms");
+			},
+		});
+
+		const error = await rejectionOf(pickElectronTarget(browser, { relayJson }));
+
+		expect((error as Error).message).toMatch(/extension disconnected.*Reconnect it/i);
+	});
+
+	it("does not mistake an unreachable relay for an empty browser", async () => {
+		relayEntries = [];
+		versionStatus = 404;
+		const browser = Object.assign(makeBrowser([]), {
+			waitForTarget: async () => {
+				throw new TimeoutError("Timed out after waiting 10000ms");
+			},
+		});
+
+		const error = await rejectionOf(pickElectronTarget(browser, { relayJson }));
+
+		expect((error as Error).message).toMatch(/relay is unreachable.*Check its endpoint/i);
+	});
+
+	it("keeps the empty-relay diagnostic after bundling and minification", async () => {
+		using dir = TempDir.createSync("@omp-minified-relay-");
+		const result = await Bun.build({
+			entrypoints: [path.join(import.meta.dir, "../fixtures/browser-relay-empty-tabs.ts")],
+			outdir: dir.path(),
+			target: "bun",
+			minify: true,
+		});
+		expect(result.success, result.logs.map(log => log.message).join("\n")).toBe(true);
+		const child = Bun.spawn([process.execPath, dir.join("browser-relay-empty-tabs.js")], {
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(stdout).toMatch(/relay is connected.*no eligible tabs.*Open a normal web page/i);
+	}, 30_000);
 
 	it("does not adopt another live tab when the selected tab is unreadable", async () => {
 		const other = makeTarget("PAGE10", fakePage({ url: "https://docs.example.com", title: "Docs" }));
