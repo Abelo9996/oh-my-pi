@@ -6,6 +6,7 @@ import {
 	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
+	getTerminalBackgroundColor,
 	type ImageDimensions,
 	ImageProtocol,
 	imageFallback,
@@ -41,6 +42,13 @@ export interface ImageOptions {
 	 * or the image's reserved rows stay blank until an unrelated repaint.
 	 */
 	requestRender?: () => void;
+}
+
+interface SixelEncode {
+	widthPx: number;
+	heightPx: number;
+	backgroundRgb: number;
+	sequence?: string | null;
 }
 
 /** Renders in progress whose rows are bound for native scrollback. */
@@ -657,6 +665,7 @@ export class Image implements Component {
 	#cachedImageProtocol: typeof TERMINAL.imageProtocol = null;
 	#cachedCellWidthPx = 0;
 	#cachedCellHeightPx = 0;
+	#cachedSixelBackground: number | undefined;
 	#cachedKittyUnicodePlaceholders = false;
 	#cachedLinked = false;
 	// Tallest graphic placement this image has rendered. The text fallback
@@ -665,8 +674,8 @@ export class Image implements Component {
 	#renderedGraphicRows = 0;
 	/** Described node and the link policy it was built under (an `off` switch drops its `href`). */
 	#native?: { linked: boolean; node: NativeNode };
-	/** Newest SIXEL encode: its target size and, once settled, the sequence (`null` on failure). */
-	#sixel?: { widthPx: number; heightPx: number; sequence?: string | null };
+	/** Newest SIXEL encode: target size, compositing background, and settled sequence. */
+	#sixel?: SixelEncode;
 
 	constructor(
 		base64Data: string,
@@ -725,36 +734,45 @@ export class Image implements Component {
 	}
 
 	/**
-	 * SIXEL sequence for a target size. A new size starts the encode off the JS
+	 * SIXEL sequence for a target size and background. A change starts the encode off the JS
 	 * thread and answers `undefined` until it settles; the settled encode
 	 * invalidates the cached lines and requests a repaint. A render bound for
 	 * scrollback cannot wait, so it encodes synchronously. Shrinking a settled
 	 * graphic also encodes synchronously: the old payload no longer fits, and
 	 * reserving blank rows would erase an image that is already visible.
 	 */
-	#sixelSequence(widthPx: number, heightPx: number): string | null | undefined {
+	#sixelSequence(widthPx: number, heightPx: number, backgroundRgb: number): string | null | undefined {
 		const current = this.#sixel;
-		const sameSize = current !== undefined && current.widthPx === widthPx && current.heightPx === heightPx;
-		if (sameSize && current.sequence !== undefined) return current.sequence;
-		const shrinking = current?.sequence != null && widthPx <= current.widthPx && heightPx <= current.heightPx;
+		const sameInput =
+			current !== undefined &&
+			current.widthPx === widthPx &&
+			current.heightPx === heightPx &&
+			current.backgroundRgb === backgroundRgb;
+		if (sameInput && current.sequence !== undefined) return current.sequence;
+		const shrinking =
+			current?.sequence != null &&
+			widthPx <= current.widthPx &&
+			heightPx <= current.heightPx &&
+			(widthPx < current.widthPx || heightPx < current.heightPx);
 		if (scrollbackRenderDepth > 0 || shrinking) {
 			// Replacing the entry makes a still-pending async encode settle as stale.
-			const sequence = encodeSixelNow(this.#base64Data, widthPx, heightPx);
-			this.#sixel = { widthPx, heightPx, sequence };
+			const sequence = encodeSixelNow(this.#base64Data, widthPx, heightPx, backgroundRgb);
+			this.#sixel = { widthPx, heightPx, backgroundRgb, sequence };
 			return sequence;
 		}
-		if (sameSize) return undefined;
-		const request: { widthPx: number; heightPx: number; sequence?: string | null } = { widthPx, heightPx };
+		if (sameInput) return undefined;
+		const request: SixelEncode = { widthPx, heightPx, backgroundRgb };
 		this.#sixel = request;
 		const settle = (sequence: string | null): void => {
 			request.sequence = sequence;
-			if (this.#sixel !== request) return;
+			if (this.#sixel !== request || getTerminalBackgroundColor() !== backgroundRgb) return;
 			this.invalidate();
 			if (this.#options.requestRender) this.#options.requestRender();
 			else this.#budget?.requestRender();
 		};
-		encodeSixelAsync(new Uint8Array(Buffer.from(this.#base64Data, "base64")), widthPx, heightPx).then(settle, () =>
-			settle(null),
+		encodeSixelAsync(new Uint8Array(Buffer.from(this.#base64Data, "base64")), widthPx, heightPx, backgroundRgb).then(
+			settle,
+			() => settle(null),
 		);
 		return undefined;
 	}
@@ -817,6 +835,7 @@ export class Image implements Component {
 		const hasProtocol = imageProtocol != null;
 		const cellDimensions = getCellDimensions();
 		const kittyUnicodePlaceholders = getKittyGraphics().unicodePlaceholders;
+		const sixelBackground = imageProtocol === ImageProtocol.Sixel ? getTerminalBackgroundColor() : undefined;
 		// observe() must run on every pass — even a cache hit — so the image keeps
 		// its display-order slot in the budget. Only graphics-capable frames count
 		// toward (and are demoted by) the budget; without a protocol every image is
@@ -838,6 +857,7 @@ export class Image implements Component {
 			this.#cachedImageProtocol === imageProtocol &&
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
+			this.#cachedSixelBackground === sixelBackground &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
 			// The text fallback embeds a link only under an enabled hyperlink policy.
 			this.#cachedLinked === linked &&
@@ -861,13 +881,13 @@ export class Image implements Component {
 				maxHeightCells: this.#options.maxHeightCells,
 				imageId: this.#imageId,
 				includeTransmit: needsTransmit,
-				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx),
+				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
 			});
 			if (imageProtocol === ImageProtocol.Sixel && result?.sequence === undefined && previous && this.pending) {
 				result = renderImage(previous.#base64Data, previous.#dimensions, {
 					maxWidthCells: maxWidth,
 					maxHeightCells: this.#options.maxHeightCells,
-					sixel: (widthPx, heightPx) => previous.#sixelSequence(widthPx, heightPx),
+					sixel: (widthPx, heightPx) => previous.#sixelSequence(widthPx, heightPx, sixelBackground!),
 				});
 			}
 
@@ -916,6 +936,7 @@ export class Image implements Component {
 		this.#cachedImageProtocol = imageProtocol;
 		this.#cachedCellWidthPx = cellDimensions.widthPx;
 		this.#cachedCellHeightPx = cellDimensions.heightPx;
+		this.#cachedSixelBackground = sixelBackground;
 		this.#cachedKittyUnicodePlaceholders = kittyUnicodePlaceholders;
 		this.#cachedLinked = linked;
 
