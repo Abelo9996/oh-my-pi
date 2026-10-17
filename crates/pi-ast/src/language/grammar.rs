@@ -103,7 +103,8 @@ static GRAMMAR_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
 /// every thread needing the grammar would otherwise repeat.
 static LOAD_LOCK: Mutex<()> = Mutex::new(());
 
-/// Source bytes a thread's wasm store may parse before [`parse`] replaces it.
+/// Budget, in charged bytes, a thread's wasm store may parse before [`parse`]
+/// replaces it.
 ///
 /// tree-sitter 0.25 looks up the wasm function on every scanner call
 /// (`ts_wasm_store__call` → `wasmtime_table_get`), and wasmtime 29 registers
@@ -115,10 +116,16 @@ static LOAD_LOCK: Mutex<()> = Mutex::new(());
 /// to roughly 128 MiB plus the source of a single parse.
 const WASM_STORE_BYTE_BUDGET: usize = 4 << 20;
 
-/// A wasm-capable parser and the source bytes its store has parsed so far.
+/// Bytes charged to [`WASM_STORE_BYTE_BUDGET`] per parse on top of the source
+/// length. Even an empty source runs the scanner at EOF and grows the store
+/// (about 166 bytes per empty C# parse), so a byte-only charge would never
+/// retire a store that parses only empty files.
+const WASM_PARSE_OVERHEAD: usize = 1 << 10;
+
+/// A wasm-capable parser and the bytes charged to its store so far.
 struct WasmParser {
-	parser: Parser,
-	parsed: usize,
+	parser:  Parser,
+	charged: usize,
 }
 
 thread_local! {
@@ -225,18 +232,18 @@ pub fn parse(language: &Language, source: &str, old_tree: Option<&Tree>) -> Resu
 	}
 	WASM_PARSER.with_borrow_mut(|slot| {
 		let mut wasm = match slot.take() {
-			Some(wasm) if wasm.parsed < WASM_STORE_BYTE_BUDGET => wasm,
+			Some(wasm) if wasm.charged < WASM_STORE_BYTE_BUDGET => wasm,
 			_ => {
 				let mut parser = Parser::new();
 				parser.set_wasm_store(WasmStore::new(&ENGINE).context("creating a wasm store")?)?;
-				WasmParser { parser, parsed: 0 }
+				WasmParser { parser, charged: 0 }
 			},
 		};
 		let tree = wasm
 			.parser
 			.set_language(language)
 			.map(|()| wasm.parser.parse(source, old_tree));
-		wasm.parsed += source.len();
+		wasm.charged += source.len() + WASM_PARSE_OVERHEAD;
 		*slot = Some(wasm);
 		Ok(tree?)
 	})
@@ -313,15 +320,20 @@ mod tests {
 			.expect("create store")
 			.load_language(INI.symbol, INI_WASM)
 			.expect("module loads");
-		let tree = parse(&language, SOURCE, None).expect("parse runs").expect("tree");
-		assert!(!tree.root_node().has_error());
 
-		WASM_PARSER.with_borrow_mut(|slot| {
-			slot.as_mut().expect("parser kept").parsed = WASM_STORE_BYTE_BUDGET;
-		});
-		let tree = parse(&language, SOURCE, None).expect("parse runs").expect("tree");
+		// Empty sources still grow the store, so they alone must exhaust it.
+		for _ in 0..WASM_STORE_BYTE_BUDGET / WASM_PARSE_OVERHEAD {
+			parse(&language, "", None).expect("parse runs");
+		}
+		let tree = parse(&language, SOURCE, None)
+			.expect("parse runs")
+			.expect("tree");
 		assert!(!tree.root_node().has_error(), "the replacement store runs the wasm grammar");
-		let parsed = WASM_PARSER.with_borrow(|slot| slot.as_ref().expect("parser kept").parsed);
-		assert_eq!(parsed, SOURCE.len(), "the exhausted store was replaced, not reused");
+		let charged = WASM_PARSER.with_borrow(|slot| slot.as_ref().expect("parser kept").charged);
+		assert_eq!(
+			charged,
+			SOURCE.len() + WASM_PARSE_OVERHEAD,
+			"the store exhausted by empty parses was replaced, not reused"
+		);
 	}
 }
