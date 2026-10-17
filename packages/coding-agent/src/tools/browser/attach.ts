@@ -4,9 +4,10 @@ import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { getBrowserProfilesDir, isRecord, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Socket } from "bun";
-import { TimeoutError, type Browser, type Page, type Target } from "puppeteer-core";
+import type { Browser, Page, Target } from "puppeteer-core";
 import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isPuppeteerTimeout } from "./launch";
 
 const ATTACH_TARGET_SKIP_PATTERN =
 	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker/i;
@@ -692,7 +693,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 						);
 					} catch (error) {
 						throwIfAborted(options.signal);
-						if (error instanceof TimeoutError) {
+						if (isPuppeteerTimeout(error)) {
 							throw new ToolError(
 								"Selected tab did not become available before omp could attach; retry, or reopen it if it closed",
 							);
@@ -724,7 +725,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 			);
 		} catch (error) {
 			throwIfAborted(options.signal);
-			if (error instanceof TimeoutError) {
+			if (isPuppeteerTimeout(error)) {
 				if (options.relayJson && noRelayPages) {
 					const status = await probeCdpStatus(`${options.relayJson.replace(/\/$/, "")}/json/version`, {
 						timeoutMs: RELAY_JSON_TIMEOUT_MS,

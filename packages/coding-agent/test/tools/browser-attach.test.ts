@@ -25,7 +25,7 @@ import {
 	waitForCdp,
 	waitForMainFrame,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { ensureChromiumExecutable, loadPuppeteer } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -772,6 +772,9 @@ describe("pickElectronTarget relay path", () => {
 	let available = true;
 	let relayEntries = RELAY_ENTRIES;
 	let versionStatus = 200;
+	beforeAll(async () => {
+		await loadPuppeteer();
+	});
 	beforeEach(() => {
 		available = true;
 		relayEntries = RELAY_ENTRIES;

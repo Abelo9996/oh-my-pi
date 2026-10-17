@@ -21,6 +21,7 @@ import type {
 	NetworkConditions,
 	Page,
 	default as Puppeteer,
+	TimeoutError,
 	Target,
 } from "puppeteer-core";
 import stealthTamperingScript from "../puppeteer/00_stealth_tampering.txt" with { type: "text" };
@@ -102,12 +103,18 @@ const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
 let puppeteerCwdFailed = false;
 let puppeteerCwdFailure: unknown;
 let jsHandleConstructor: typeof JSHandle | undefined;
+let timeoutErrorConstructor: typeof TimeoutError | undefined;
 let knownDevices: Readonly<Record<string, Device>> | undefined;
 let predefinedNetworkConditions: Readonly<Record<string, NetworkConditions>> | undefined;
 
 /** Identify handles using the lazily loaded Puppeteer instance without triggering an early import. */
 export function isPuppeteerHandle(value: unknown): value is JSHandle {
 	return jsHandleConstructor !== undefined && value instanceof jsHandleConstructor;
+}
+
+/** Recognize a target wait timeout from the Puppeteer instance loaded under the safe cwd. */
+export function isPuppeteerTimeout(value: unknown): boolean {
+	return timeoutErrorConstructor !== undefined && value instanceof timeoutErrorConstructor;
 }
 async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppeteer> {
 	const cwdDescriptor = Object.getOwnPropertyDescriptor(process, "cwd");
@@ -133,6 +140,7 @@ async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppe
 			const module = await import("puppeteer-core");
 			loaded = module.default;
 			jsHandleConstructor = module.JSHandle;
+			timeoutErrorConstructor = module.TimeoutError;
 			knownDevices = module.KnownDevices;
 			predefinedNetworkConditions = module.PredefinedNetworkConditions;
 		} catch (error) {
