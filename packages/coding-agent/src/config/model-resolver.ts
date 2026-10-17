@@ -1790,6 +1790,10 @@ export function sessionModelDiscoveryProviders(
  * If neither the subagent nor the parent has working auth, returns the
  * primary resolution unchanged so the existing error path still surfaces
  * a meaningful failure downstream.
+ *
+ * A per-call `model` (`options.perCallModel`) never falls back to the parent:
+ * its requested candidates are tried in order for working credentials, and
+ * `@default` already lists the parent's model among them.
  */
 export async function resolveModelOverrideWithAuthFallback(
 	modelPatterns: string[],
@@ -1797,6 +1801,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
 	sessionId?: string,
+	options?: { perCallModel?: boolean },
 ): Promise<{
 	model?: Model<Api>;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1814,18 +1819,16 @@ export async function resolveModelOverrideWithAuthFallback(
 	if (!primary.model) {
 		return { ...primary, authFallbackUsed: false };
 	}
-	if (!parentActiveModelPattern) {
-		// No parent fallback (a per-call `model`, whose `@default` lists the parent's
-		// model itself): try the requested candidates in order for working credentials.
-		const patterns = resolveConfiguredModelPatterns(modelPatterns, settings);
-		if (patterns.length > 1) {
-			for (const pattern of patterns) {
-				const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
-				if (!candidate.model) continue;
-				const key = await modelRegistry.getApiKey(candidate.model, sessionId);
-				if (key === kNoAuth || isAuthenticated(key)) return { ...candidate, authFallbackUsed: false };
-			}
+	if (options?.perCallModel) {
+		for (const pattern of resolveConfiguredModelPatterns(modelPatterns, settings)) {
+			const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
+			if (!candidate.model) continue;
+			const key = await modelRegistry.getApiKey(candidate.model, sessionId);
+			if (key === kNoAuth || isAuthenticated(key)) return { ...candidate, authFallbackUsed: false };
 		}
+		return { ...primary, authFallbackUsed: false };
+	}
+	if (!parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}
 
