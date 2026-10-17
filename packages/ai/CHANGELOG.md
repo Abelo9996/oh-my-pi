@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Google Antigravity routing Gemini 3.x requests away from accounts whose only exhausted quota is Gemini 4 Argon's weekly bucket ([#16104](https://github.com/can1357/oh-my-pi/issues/16104)).
+- Fixed Google Antigravity routing Gemini 3.x requests away from accounts whose only exhausted quota is Gemini 4 Argon's weekly bucket, while Argon blocks still recover from general Gemini quota when no Argon bucket is reported ([#16104](https://github.com/can1357/oh-my-pi/issues/16104)).
 
 ## [18.12.0] - 2026-10-17
 

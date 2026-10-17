@@ -720,19 +720,25 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 		return `counter:${counterKey ?? "unknown"}`;
 	},
 	// One scope per backend counter the report covers, judged by that
-	// counter's own windows. A 429 can carry a retry-after at the weekly reset
-	// while Google restores the quota days earlier; the next `/usage` fetch
-	// then lifts the block instead of the account idling until the clock runs out.
+	// counter's own windows. When Argon has no dedicated bucket, it uses
+	// Google's limits; healing must use those same limits for its block scope.
+	// A 429 can carry a retry-after at the weekly reset while Google restores
+	// the quota days earlier.
 	healableBlockScopes(report) {
 		const counterKeys = new Set<string>();
 		for (const limit of report.limits) {
 			const counterKey = limit.id.split(":")[1];
 			if (counterKey) counterKeys.add(counterKey.toLowerCase());
 		}
-		return [...counterKeys].map(counterKey => ({
+		const scopes = [...counterKeys].map(counterKey => ({
 			blockScope: `counter:${counterKey}`,
 			limits: getAntigravityCounterLimits(report, counterKey),
 		}));
+		if (!counterKeys.has("google-argon")) {
+			const googleScope = scopes.find(scope => scope.blockScope === "counter:google");
+			if (googleScope) scopes.push({ blockScope: "counter:google-argon", limits: googleScope.limits });
+		}
+		return scopes;
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them
 	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo

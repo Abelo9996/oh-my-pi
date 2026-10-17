@@ -290,7 +290,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 
 		expect(counts.get("api-acct-balanced") ?? 0).toBeGreaterThan(counts.get("api-acct-gemini-hot") ?? 0);
 	});
-	test("a healthy Gemini counter report clears a stale counter block without touching a still-exhausted sibling counter", async () => {
+	test("heals a stale Argon block from general Gemini limits only when no Argon bucket is reported", async () => {
 		if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
 			throw new Error("test setup failed");
 		}
@@ -311,6 +311,12 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 			credentialId: row.id,
 			providerKey: "google-antigravity:oauth",
 			blockScope: "counter:google",
+			blockedUntilMs: weekAhead,
+		});
+		store.upsertCredentialBlock({
+			credentialId: row.id,
+			providerKey: "google-antigravity:oauth",
+			blockScope: "counter:google-argon",
 			blockedUntilMs: weekAhead,
 		});
 		store.upsertCredentialBlock({
@@ -341,12 +347,17 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		await authStorage.usage.reports();
 
 		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google")).toBeUndefined();
+		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google-argon")).toBeUndefined();
 		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:anthropic")).toBe(weekAhead);
 
 		const geminiKey = await authStorage.keys.get("google-antigravity", "session-antigravity-recovered", {
 			modelId: "gemini-3-flash",
 		});
 		expect(geminiKey).toBe("api-acct-recovered");
+		const argonKey = await authStorage.keys.get("google-antigravity", "session-antigravity-argon-recovered", {
+			modelId: "gemini-4-argon",
+		});
+		expect(argonKey).toBe("api-acct-recovered");
 	});
 
 	test("prefers less-pressured antigravity account when neither is exhausted", async () => {
