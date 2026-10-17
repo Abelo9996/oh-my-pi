@@ -653,6 +653,30 @@ interface LiveImagePlacement {
 	line: string;
 }
 
+/**
+ * Re-encode an `Image` iTerm2 direct-placement line with its top
+ * `hiddenRows` cell rows cut out of the PNG, anchored at its first visible row
+ * so the rest lands on its own rows at the original scale; iTerm2 cannot clip
+ * a placement. Resolves `null` when the line is not a PNG placement this can
+ * crop; the caller then drops it rather than paint over foreign rows.
+ */
+async function cropITerm2Placement(line: string, hiddenRows: number): Promise<string | null> {
+	const match = /^\x1b7\x1b\[(\d+)A\x1b\]1337;File=([^:\x07]*):([A-Za-z0-9+/=]+)\x07\x1b8$/.exec(line);
+	const columns = match ? Number(/(?:^|;)width=(\d+)(?:;|$)/.exec(match[2])?.[1]) : 0;
+	const cell = getCellDimensions();
+	if (!match || !(columns > 0) || cell.widthPx <= 0 || cell.heightPx <= 0) return null;
+	const png = Buffer.from(match[3], "base64");
+	const sourceWidth = png.byteLength >= 24 ? png.readUInt32BE(16) : 0;
+	if (sourceWidth <= 0) return null;
+	// Source pixel rows one cell row shows at `width=columns`, rounded up so
+	// the kept slice never reaches past the placement row.
+	const skip = Math.ceil((hiddenRows * cell.heightPx * sourceWidth) / (columns * cell.widthPx));
+	const data = await cropPngTop(png, skip);
+	if (!data) return null;
+	const lift = Number(match[1]) - hiddenRows;
+	return `\x1b7${lift > 0 ? `\x1b[${lift}A` : ""}\x1b]1337;File=${match[2]}:${data.toBase64()}\x07\x1b8`;
+}
+
 interface PreparedLine {
 	raw: string;
 	width: number;
@@ -1001,8 +1025,11 @@ export class TUI extends Container {
 	#screenImagePlacements = new Map<number, LiveImagePlacement>();
 	#altImagePlacements = new Map<number, LiveImagePlacement>();
 	#nextImagePlacementId = 1;
-	/** Top-cropped iTerm2 placement lines by hidden rows and source line; a moving figure re-clips every frame. */
-	#iterm2Crops = new LRUCache<string, string | null>({ max: 16 });
+	/** Cropped iTerm2 placement lines: source line, then hidden rows, to the crop (`null`: cannot crop). */
+	#iterm2Crops = new LRUCache<string, Map<number, string | null>>({ max: 16 });
+	/** Crops a frame asked for but has not got yet: source line to its latest hidden rows. */
+	#iterm2Wanted = new Map<string, number>();
+	#iterm2Cropping = false;
 	#ghosttyInitialImageDelayDone = false;
 	#ghosttyInitialImageDelayTimer: RenderTimer | undefined;
 	#ghosttyImageReadyAtMs = 0;
@@ -3314,8 +3341,9 @@ export class TUI extends Container {
 						: `\x1b7${lift + extraLift > 0 ? `\x1b[${lift + extraLift}A` : ""}${sequence}\x1b8`;
 				}
 			} else if (lift < requestedLift && TERMINAL.imageProtocol === ImageProtocol.Iterm2) {
-				const cropped = this.#cropITerm2(line, requestedLift - lift);
-				if (cropped === null) return "";
+				// Paint nothing until the crop lands; a forced frame then places it.
+				const cropped = this.#croppedITerm2(line, requestedLift - lift);
+				if (!cropped) return "";
 				line = cropped;
 			} else if (lift < requestedLift && TERMINAL.imageProtocol !== ImageProtocol.Kitty) {
 				// An unknown non-Kitty raster cannot be re-anchored safely.
@@ -3341,32 +3369,38 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * An iTerm2 placement line with its top `hiddenRows` cell rows cut out of
-	 * the PNG, so the rest lands on its own rows at the original scale. iTerm2
-	 * cannot clip a placement. `null` when the line is not a PNG placement this
-	 * can crop; the caller then drops it rather than paint over foreign rows.
+	 * The iTerm2 placement `line` with its top `hiddenRows` cell rows cropped
+	 * off, `null` when it cannot be cropped, or `undefined` while the crop runs
+	 * off the paint path. Decoding and re-encoding a large PNG per newly hidden
+	 * row would otherwise stall every frame of a scroll.
 	 */
-	#cropITerm2(line: string, hiddenRows: number): string | null {
-		const key = `${hiddenRows};${line}`;
-		const cached = this.#iterm2Crops.get(key);
+	#croppedITerm2(line: string, hiddenRows: number): string | null | undefined {
+		const cached = this.#iterm2Crops.get(line)?.get(hiddenRows);
 		if (cached !== undefined) return cached;
-		let cropped: string | null = null;
-		const match = /^\x1b7\x1b\[(\d+)A\x1b\]1337;File=([^:\x07]*):([A-Za-z0-9+/=]+)\x07\x1b8$/.exec(line);
-		const columns = match ? Number(/(?:^|;)width=(\d+)(?:;|$)/.exec(match[2])?.[1]) : 0;
-		const cell = getCellDimensions();
-		if (match && columns > 0 && cell.widthPx > 0 && cell.heightPx > 0) {
-			const png = Buffer.from(match[3], "base64");
-			const sourceWidth = png.byteLength >= 24 ? png.readUInt32BE(16) : 0;
-			// Source pixel rows one cell row shows at `width=columns`, rounded
-			// up so the kept slice never reaches past the placement row.
-			const skip = Math.ceil((hiddenRows * cell.heightPx * sourceWidth) / (columns * cell.widthPx));
-			const data = sourceWidth > 0 ? cropPngTop(png, skip) : null;
-			const lift = Number(match[1]) - hiddenRows;
-			if (data)
-				cropped = `\x1b7${lift > 0 ? `\x1b[${lift}A` : ""}\x1b]1337;File=${match[2]}:${data.toBase64()}\x07\x1b8`;
+		this.#iterm2Wanted.set(line, hiddenRows);
+		if (!this.#iterm2Cropping) void this.#runITerm2Crops();
+		return undefined;
+	}
+
+	/** Crop every wanted placement, latest hidden rows per line, then repaint the viewport once. */
+	async #runITerm2Crops(): Promise<void> {
+		this.#iterm2Cropping = true;
+		try {
+			for (const [line, hiddenRows] of this.#iterm2Wanted) {
+				this.#iterm2Wanted.delete(line);
+				const cropped = await cropITerm2Placement(line, hiddenRows).catch(() => null);
+				let crops = this.#iterm2Crops.get(line);
+				if (!crops) {
+					crops = new Map();
+					this.#iterm2Crops.set(line, crops);
+				}
+				crops.set(hiddenRows, cropped);
+			}
+		} finally {
+			this.#iterm2Cropping = false;
 		}
-		this.#iterm2Crops.set(key, cropped);
-		return cropped;
+		// The placement rows are byte-identical to the frame that skipped them.
+		if (!this.#stopped) this.requestRender(true);
 	}
 
 	#terminalLine(line: PreparedLine): string {

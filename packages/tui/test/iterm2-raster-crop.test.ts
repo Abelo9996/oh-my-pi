@@ -48,7 +48,7 @@ describe("cropPngTop", () => {
 		// Bun's encoder writes RGBA with adaptive filters, unlike encodeRgbPng's None rows.
 		const source = await pixels(encodeRgbPng(40, 80, rgb));
 		for (const top of [1, 7, 40, 79]) {
-			const cropped = cropPngTop(source, top);
+			const cropped = await cropPngTop(source, top);
 			expect(cropped).not.toBeNull();
 			expect(await pixels(cropped!)).toEqual(await pixels(bottomRows(40, 80, rgb, top)));
 		}
@@ -78,7 +78,7 @@ describe("cropPngTop", () => {
 		]);
 		const rgb = Uint8Array.from(indices.flatMap(index => colors[index]!));
 
-		expect(await pixels(cropPngTop(indexed, 1)!)).toEqual(await pixels(bottomRows(4, 4, rgb, 1)));
+		expect(await pixels((await cropPngTop(indexed, 1))!)).toEqual(await pixels(bottomRows(4, 4, rgb, 1)));
 	});
 
 	it("turns an animated PNG into a valid static crop of its default image", async () => {
@@ -105,7 +105,7 @@ describe("cropPngTop", () => {
 			still.subarray(idatEnd),
 		]);
 
-		const cropped = Buffer.from(cropPngTop(animated, 1)!);
+		const cropped = Buffer.from((await cropPngTop(animated, 1))!);
 		const types: string[] = [];
 		for (let offset = 8; offset < cropped.byteLength; offset += 12 + cropped.readUInt32BE(offset)) {
 			types.push(cropped.toString("latin1", offset + 4, offset + 8));
@@ -117,12 +117,12 @@ describe("cropPngTop", () => {
 
 	it("rejects input it cannot crop exactly", async () => {
 		const png = await pixels(encodeRgbPng(4, 4, gradient(4, 4)));
-		expect(cropPngTop(png, 4)).toBeNull();
-		expect(cropPngTop(png, -1)).toBeNull();
-		expect(cropPngTop(Buffer.from("not a png"), 1)).toBeNull();
+		expect(await cropPngTop(png, 4)).toBeNull();
+		expect(await cropPngTop(png, -1)).toBeNull();
+		expect(await cropPngTop(Buffer.from("not a png"), 1)).toBeNull();
 		const interlaced = Buffer.from(png);
 		interlaced[8 + 8 + 12] = 1;
-		expect(cropPngTop(interlaced, 1)).toBeNull();
+		expect(await cropPngTop(interlaced, 1)).toBeNull();
 	});
 });
 
@@ -147,14 +147,18 @@ describe("iTerm2 live placement", () => {
 		setTerminalImageProtocol(originalProtocol);
 	});
 
+	/** Run one `setImmediate` hop: the scheduled render, but not a zlib job it started. */
+	async function hop(term: VirtualTerminal): Promise<void> {
+		const turn = Promise.withResolvers<void>();
+		setImmediate(turn.resolve);
+		await turn.promise;
+		vi.advanceTimersByTime(40);
+		await term.flush();
+	}
+
 	async function settle(term: VirtualTerminal): Promise<void> {
-		for (let i = 0; i < 2; i++) {
-			const turn = Promise.withResolvers<void>();
-			setImmediate(turn.resolve);
-			await turn.promise;
-			vi.advanceTimersByTime(40);
-			await term.flush();
-		}
+		await hop(term);
+		await hop(term);
 	}
 
 	it("paints only the visible rows of a chart whose top went into committed history", async () => {
@@ -194,6 +198,11 @@ describe("iTerm2 live placement", () => {
 				hidden = nextHidden;
 				writes.length = 0;
 				tui.requestRender(true);
+				await hop(term);
+				// The crop runs off the paint path: the frame that needs it places nothing.
+				expect([...writes.join("").matchAll(ITERM2_PLACEMENT)]).toEqual([]);
+				// It lands on the zlib thread pool, then forces one repaint.
+				for (let turn = 0; turn < 200 && !writes.join("").includes("\x1b]1337;File="); turn++) await hop(term);
 				await settle(term);
 				const placements = [...writes.join("").matchAll(ITERM2_PLACEMENT)];
 				expect(placements).toHaveLength(1);

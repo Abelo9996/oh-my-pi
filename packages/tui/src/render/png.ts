@@ -6,7 +6,13 @@
  * placement writer). Only the scanline stream is touched: pixels are never
  * resampled, so the visible slice stays pixel-identical to the original.
  */
+import { promisify } from "node:util";
 import * as zlib from "node:zlib";
+
+const inflate = promisify(zlib.inflate);
+const deflate = promisify(zlib.deflate);
+/** Reconstructed bytes between event-loop yields, so a large crop never holds a frame. */
+const RECONSTRUCT_SLICE_BYTES = 1 << 20;
 
 export const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 
@@ -60,10 +66,13 @@ function paeth(left: number, up: number, upLeft: number): number {
  * chunks after it are dropped. An animated PNG becomes a static crop of its
  * default image: its frame controls describe the uncropped canvas.
  *
+ * Inflate and deflate run on the zlib thread pool and row reconstruction
+ * yields to the event loop, so a large image never blocks a frame.
+ *
  * Returns `null` for anything it cannot rewrite exactly: not a PNG, an
  * interlaced or malformed stream, or a crop that leaves no rows.
  */
-export function cropPngTop(png: Uint8Array, rows: number): Uint8Array | null {
+export async function cropPngTop(png: Uint8Array, rows: number): Promise<Uint8Array | null> {
 	const chunks = readChunks(png);
 	const header = chunks?.[0];
 	if (!chunks || header?.type !== "IHDR" || header.data.byteLength !== 13) return null;
@@ -82,17 +91,21 @@ export function cropPngTop(png: Uint8Array, rows: number): Uint8Array | null {
 	if (firstIdat < 0) return null;
 	let raw: Uint8Array;
 	try {
-		raw = zlib.inflateSync(Buffer.concat(chunks.filter(chunk => chunk.type === "IDAT").map(chunk => chunk.data)));
+		raw = await inflate(Buffer.concat(chunks.filter(chunk => chunk.type === "IDAT").map(chunk => chunk.data)));
 	} catch {
 		return null;
 	}
 	if (raw.byteLength < height * (stride + 1)) return null;
 
-	// Reconstruct rows 0..rows: the first kept row's filter references the
-	// reconstructed row above it, which the cropped stream no longer carries.
+	// The first kept row's filter references the reconstructed row above it,
+	// which the cropped stream no longer carries. None and Sub rows reference
+	// nothing above, so reconstruction starts at the nearest one.
+	let start = rows;
+	while (start > 0 && raw[start * (stride + 1)]! > 1) start--;
 	let previous = new Uint8Array(stride);
 	let current = new Uint8Array(stride);
-	for (let y = 0; y <= rows; y++) {
+	let sliced = 0;
+	for (let y = start; y <= rows; y++) {
 		const base = y * (stride + 1);
 		const filter = raw[base];
 		for (let x = 0; x < stride; x++) {
@@ -120,14 +133,22 @@ export function cropPngTop(png: Uint8Array, rows: number): Uint8Array | null {
 			}
 		}
 		[previous, current] = [current, previous];
+		sliced += stride;
+		if (sliced >= RECONSTRUCT_SLICE_BYTES) {
+			sliced = 0;
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+		}
 	}
 
-	const kept = height - rows;
-	const scanlines = new Uint8Array(kept * (stride + 1));
-	scanlines.set(previous, 1);
-	scanlines.set(raw.subarray((rows + 1) * (stride + 1), height * (stride + 1)), stride + 1);
+	// Rewrite the first kept row in place as an unfiltered scanline; the rows
+	// after it keep their filters, since the row above each is unchanged.
+	const first = rows * (stride + 1);
+	raw[first] = 0;
+	raw.set(previous, first + 1);
 	const cropped = new Uint8Array(header.data);
-	new DataView(cropped.buffer).setUint32(4, kept);
+	new DataView(cropped.buffer).setUint32(4, height - rows);
 	return Buffer.concat([
 		PNG_SIGNATURE,
 		pngChunk("IHDR", cropped),
@@ -135,7 +156,7 @@ export function cropPngTop(png: Uint8Array, rows: number): Uint8Array | null {
 			.slice(1, firstIdat)
 			.filter(chunk => chunk.type !== "acTL" && chunk.type !== "fcTL")
 			.map(chunk => pngChunk(chunk.type, chunk.data)),
-		pngChunk("IDAT", zlib.deflateSync(scanlines)),
+		pngChunk("IDAT", await deflate(raw.subarray(first, height * (stride + 1)))),
 		pngChunk("IEND", new Uint8Array(0)),
 	]);
 }
