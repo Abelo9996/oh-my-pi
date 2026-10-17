@@ -235,6 +235,22 @@ describe("task spawn validation", () => {
 		const scout = loadBundledAgents().find(agent => agent.name === "scout")!;
 		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
 	});
+
+	it("leaves a bundled seance's own `model` to seance resolution instead of the per-call selector rules", async () => {
+		// A catalog id such as `cursor/default` can be selected as bare `default` for seance, as on main.
+		const text = await executeText(
+			{
+				agent: "seance",
+				task: "Read historical context.",
+				solutionSpace: "focused read-only inspection",
+				sourceSession: "/missing/source.jsonl",
+				model: "default",
+			},
+			[bundledSeance],
+		);
+		expect(text).not.toContain("ambiguous `model`");
+		expect(text).toContain("selected session file was not found");
+	});
 });
 
 describe("per-call model schema boundaries", () => {

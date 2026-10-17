@@ -258,7 +258,15 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 
-function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
+/**
+ * `isSeanceItem` marks items for the advertised bundled seance, whose own
+ * `model` is checked by {@link validateSeanceParams}, not the per-call rules.
+ */
+function validateSpawnParams(
+	params: TaskParams,
+	batchEnabled: boolean,
+	isSeanceItem: (agent: string | undefined) => boolean,
+): string | undefined {
 	const hasTask = typeof params.task === "string" && params.task.trim() !== "";
 	const tasks = params.tasks;
 	if (batchEnabled && tasks !== undefined) {
@@ -276,7 +284,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			const label = `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
 			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
-			const modelError = invalidModelSelectorReason(item.model, label);
+			const modelError = isSeanceItem(item.agent) ? undefined : invalidModelSelectorReason(item.model, label);
 			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
@@ -300,7 +308,10 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call") ?? invalidModelSelectorReason(params.model, "The call");
+	return (
+		validateEffort(params.effort, "The call") ??
+		(isSeanceItem(params.agent) ? undefined : invalidModelSelectorReason(params.model, "The call"))
+	);
 }
 
 /**
@@ -375,7 +386,11 @@ function planSpawns(
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
-		validateSpawnParams(params, batchEnabled) ??
+		validateSpawnParams(
+			params,
+			batchEnabled,
+			agent => seanceAdvertised && (agent?.trim() || defaultAgent) === SEANCE_AGENT_NAME,
+		) ??
 		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
 	const items = resolveSpawnItems(params);
