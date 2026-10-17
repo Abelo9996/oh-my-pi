@@ -19,7 +19,7 @@ import {
 import { reapOrphanSharedTargets } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
-import { waitForRelayExtension } from "./relay/probe";
+import { relayOutcomeMessage, waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
 import { TernSocketClient } from "./tern/wire";
@@ -285,31 +285,8 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			await restartRelayDaemon({ cdpUrl, signal: opts.signal, idleOnly: true });
 			outcome = await waitForRelayExtension(cdpUrl, opts.signal);
 		}
-		if (outcome === "unreachable") {
-			throw new ToolError(
-				`omp browser relay is not reachable at ${cdpUrl}. Start it with \`omp browser-relay\` (or check the endpoint), and make sure the OMP Browser Relay extension is loaded in Chrome.`,
-			);
-		}
-		if (outcome === "no-extension") {
-			throw new ToolError(
-				`omp browser relay is serving at ${cdpUrl} but its extension never connected. Install it with \`omp browser-relay install\` and check the toolbar badge shows "on".`,
-			);
-		}
-		if (outcome === "extension-gone") {
-			throw new ToolError(
-				`omp browser relay is serving at ${cdpUrl} but its extension disconnected and has not come back. Open Chrome with the OMP Browser Relay extension and check the toolbar badge shows "on".`,
-			);
-		}
-		if (outcome === "outdated-relay") {
-			throw new ToolError(
-				`The browser relay at ${cdpUrl} is out of date. Restart the relay under this OMP version, then retry.`,
-			);
-		}
-		if (outcome === "outdated-extension") {
-			throw new ToolError(
-				"The OMP Browser Relay extension is out of date. Run `omp browser-relay install` and reload the extension in Chrome.",
-			);
-		}
+		const unavailable = relayOutcomeMessage(outcome, cdpUrl);
+		if (unavailable) throw new ToolError(unavailable);
 		const puppeteer = await loadPuppeteer();
 		const browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,

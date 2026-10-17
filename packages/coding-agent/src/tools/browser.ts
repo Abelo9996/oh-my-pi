@@ -17,6 +17,7 @@ import {
 import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
+import { probeRelayOutcome, relayOutcomeMessage } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
@@ -432,6 +433,7 @@ async function openOnKind(
 	const openSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	// The step in flight when the deadline fires; a timeout names it.
 	let stage = `launching or connecting to the browser (${describeKind(kind)})`;
+	let connecting = true;
 	try {
 		const browser = await untilAborted(openSignal, () =>
 			acquireBrowser(kind, {
@@ -446,6 +448,7 @@ async function openOnKind(
 				signal: openSignal,
 			}),
 		);
+		connecting = false;
 
 		// Hold one open-acquisition lease across the whole tab acquisition.
 		// A freshly-created browser sits in the registry at refCount 0 until a
@@ -537,7 +540,18 @@ async function openOnKind(
 		// becomes a timeout ToolError naming the stalled step; anything else
 		// passes through unchanged.
 		if (signal?.aborted) throw error instanceof ToolAbortError ? error : new ToolAbortError();
-		if (timeoutSignal.aborted) throw new ToolError(`Browser open timed out after ${timeoutMs}ms while ${stage}`);
+		if (timeoutSignal.aborted) {
+			const timedOut = `Browser open timed out after ${timeoutMs}ms while ${stage}`;
+			// The relay connect can outlast the open budget (relay auto-start, the
+			// extension dial window); say which piece is missing and how to fix it.
+			if (connecting && kind.kind === "relay") {
+				const outcome = await probeRelayOutcome(kind.cdpUrl, signal);
+				if (signal?.aborted) throw new ToolAbortError();
+				const missing = relayOutcomeMessage(outcome, kind.cdpUrl);
+				if (missing) throw new ToolError(`${timedOut}: ${missing}`);
+			}
+			throw new ToolError(timedOut);
+		}
 		throw error;
 	}
 }

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
@@ -8,6 +10,7 @@ import {
 	type RelayUnavailableInfo,
 	startRelayServer,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
 const EXTENSION_HELLO = {
 	t: "hello",
@@ -247,5 +250,64 @@ describe("waitForRelayExtension", () => {
 		extension = new WebSocket(`ws://127.0.0.1:${port}/ext`);
 		extension.addEventListener("open", () => extension?.send(JSON.stringify(EXTENSION_HELLO)), { once: true });
 		expect(await wait).toBe("ready");
+	});
+});
+
+describe("browser open through a relay that outlasts the open budget", () => {
+	let relay: RelayServer | undefined;
+
+	afterEach(() => {
+		relay?.stop();
+		relay = undefined;
+	});
+
+	async function openOnRelay(port: number): Promise<string> {
+		const session: ToolSession = {
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			settings: Settings.isolated({
+				"browser.enabled": true,
+				"browser.relay": true,
+				"browser.relayUrl": `http://127.0.0.1:${port}`,
+				"browser.cmux": false,
+				"browser.tern": false,
+				"tools.maxTimeout": 0,
+			}),
+		};
+		try {
+			await createBrowserPrelude(session).invoke(
+				{ action: "open", name: `relay-budget-${crypto.randomUUID()}`, url: "about:blank", timeout: 1 },
+				{ session, toolCallId: "relay-budget" },
+			);
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
+		}
+		throw new Error("open unexpectedly succeeded");
+	}
+
+	it("names the unconnected extension and its install command instead of a bare timeout", async () => {
+		const port = await findFreeCdpPort();
+		relay = startRelayServer({ port });
+		const message = await openOnRelay(port);
+		expect(message).toStartWith("Browser open timed out after 1000ms while launching or connecting to the browser");
+		expect(message).toContain("its extension never connected");
+		expect(message).toContain("`omp browser-relay install`");
+	});
+
+	it("says the extension went away when it disconnected inside the redial window", async () => {
+		const port = await findFreeCdpPort();
+		relay = startRelayServer({ port });
+		const extension = new WebSocket(`ws://127.0.0.1:${port}/ext`);
+		extension.addEventListener("open", () => extension.send(JSON.stringify(EXTENSION_HELLO)), { once: true });
+		expect(await waitForRelayExtension(`http://127.0.0.1:${port}`)).toBe("ready");
+		const closed = Promise.withResolvers<void>();
+		extension.addEventListener("close", () => closed.resolve(), { once: true });
+		extension.close();
+		await closed.promise;
+		const message = await openOnRelay(port);
+		expect(message).toStartWith("Browser open timed out after 1000ms");
+		expect(message).toContain("its extension disconnected and has not come back");
 	});
 });

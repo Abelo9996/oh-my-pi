@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed browser `open` in relay mode ending in a bare `Browser open timed out after 30000ms` when the relay extension was not connected or the relay could not be started; the timeout now says which piece is missing and the command that fixes it ([#16105](https://github.com/can1357/oh-my-pi/issues/16105))
+
 ## [18.12.0] - 2026-10-17
 
 ### Added

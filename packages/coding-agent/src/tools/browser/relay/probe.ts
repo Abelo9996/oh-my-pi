@@ -121,6 +121,44 @@ function readyOutcome(body: string): RelayWaitOutcome {
 }
 
 /**
+ * What the user must fix for a relay `outcome`, naming the command that fixes
+ * it; null for outcomes an open proceeds past (`ready`, `idle-older-relay`).
+ */
+export function relayOutcomeMessage(outcome: RelayWaitOutcome, cdpUrl: string): string | null {
+	switch (outcome) {
+		case "ready":
+		case "idle-older-relay":
+			return null;
+		case "unreachable":
+			return `omp browser relay is not reachable at ${cdpUrl}. Start it with \`omp browser-relay\` (or check the endpoint), and make sure the OMP Browser Relay extension is loaded in Chrome.`;
+		case "no-extension":
+			return `omp browser relay is serving at ${cdpUrl} but its extension never connected. Install it with \`omp browser-relay install\` and check the toolbar badge shows "on".`;
+		case "extension-gone":
+			return `omp browser relay is serving at ${cdpUrl} but its extension disconnected and has not come back. Open Chrome with the OMP Browser Relay extension and check the toolbar badge shows "on".`;
+		case "outdated-relay":
+			return `The browser relay at ${cdpUrl} is out of date. Restart the relay under this OMP version, then retry.`;
+		case "outdated-extension":
+			return "The OMP Browser Relay extension is out of date. Run `omp browser-relay install` and reload the extension in Chrome.";
+	}
+}
+
+/**
+ * Probe the relay at `cdpUrl` once and classify it as
+ * {@link waitForRelayExtension} would once its dial window closed. For an open
+ * whose budget ran out mid-connect (relay auto-start or the extension wait),
+ * so the timeout names what is missing instead of only the elapsed time.
+ */
+export async function probeRelayOutcome(cdpUrl: string, signal?: AbortSignal): Promise<RelayWaitOutcome> {
+	const response = await probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS, signal });
+	if (response === null) return "unreachable";
+	if (response.status >= 200 && response.status < 300) return readyOutcome(response.body);
+	if (response.status !== 503) return "unreachable";
+	const info = parseUnavailableInfo(response.body);
+	if (info !== null && info.ompRelayVersion !== VERSION) return "outdated-relay";
+	return info?.disconnectedMs === undefined ? "no-extension" : "extension-gone";
+}
+
+/**
  * Poll the relay at `cdpUrl` until its extension is connected. Gives up
  * immediately when nothing serves the endpoint, once one dial window has
  * passed since a previously connected extension went away (service-worker
