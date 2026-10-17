@@ -1115,41 +1115,30 @@ function isDefaultRolePattern(value: string): boolean {
 }
 
 /**
- * A selection that means "run whatever the parent session is running", carrying
- * the thinking level it asked for. Role aliases take `:level` suffixes
- * everywhere else, so `@default:high` is the session's model at `high` — not an
- * expansion of `modelRoles.default`.
+ * Whether a per-call pattern names the parent's live model rather than a
+ * configured list, and at which thinking level. `@default` (and its `*` /
+ * `pi/default` / bare spellings) in a per-call `model` must resolve through the
+ * parent's active model instead of expanding `modelRoles.default`: a parent that
+ * switched models mid-session would otherwise hand its child a different model
+ * than its own. `@default:high` is that model at `high`.
  */
-interface SessionModelInheritance {
-	level?: ConfiguredThinkingLevel;
-}
-
-/**
- * Whether a single pattern names the session's model rather than a configured
- * list. `@default` (and its `*` / `pi/default` / bare spellings) is the explicit
- * spelling of that intent, so it must resolve through the session's active model
- * instead of expanding `modelRoles.default` — a parent that switched models
- * mid-session would otherwise hand its child a different model than its own.
- * Agent definitions additionally inherit through `@task`.
- */
-function matchSessionInheritedPattern(
-	value: string,
-	options?: { includeTaskAlias?: boolean },
-): SessionModelInheritance | undefined {
+function matchSessionInheritedPattern(value: string): { level?: ConfiguredThinkingLevel } | undefined {
 	const { base, level } = splitRoleAliasThinkingSuffix(value);
-	if (isDefaultRolePattern(base)) return { level };
-	if (
-		options?.includeTaskAlias === true &&
-		(base === formatModelRoleAlias("task") || base === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`)
-	) {
-		return { level };
-	}
-	return undefined;
+	return isDefaultRolePattern(base) ? { level } : undefined;
 }
 
 /** {@link matchSessionInheritedPattern} for a whole selection, without the level. */
 export function modelSelectionInheritsSessionModel(value: string | string[] | undefined): boolean {
 	return normalizeModelPatternList(value).some(pattern => matchSessionInheritedPattern(pattern) !== undefined);
+}
+
+/** An agent definition whose whole `model` is one of these runs on the session's model. */
+function isSessionInheritedAgentPattern(value: string): boolean {
+	return (
+		isDefaultRolePattern(value) ||
+		value === formatModelRoleAlias("task") ||
+		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
+	);
 }
 
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
@@ -1307,6 +1296,11 @@ export function resolveConfiguredModelPatterns(
 export interface AgentModelPatternResolutionOptions {
 	/** Highest-priority request selector, when supplied by a caller. */
 	requestModel?: string | string[];
+	/**
+	 * `requestModel` is a per-call `model`, where `@default[:level]` names the
+	 * parent's live model. Elsewhere `@default` expands `modelRoles.default`.
+	 */
+	perCallRequest?: boolean;
 	settingsOverride?: string | string[];
 	agentModel?: string | string[];
 	settings?: Settings;
@@ -1322,26 +1316,40 @@ interface EffectiveAgentModelSelection {
 function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
 ): EffectiveAgentModelSelection {
-	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
-	const inheritSessionModel = (requested?: SessionModelInheritance): string[] => {
+	const {
+		requestModel,
+		perCallRequest,
+		settingsOverride,
+		agentModel,
+		settings,
+		activeModelPattern,
+		fallbackModelPattern,
+	} = options;
+	const inheritSessionModel = (level?: ConfiguredThinkingLevel): string[] => {
 		const fallback =
 			activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
 		const patterns = resolveConfiguredModelPatterns(fallback, settings);
-		const level = requested?.level;
 		return level ? patterns.map(pattern => `${pattern}:${level}`) : patterns;
 	};
 
-	let requestSource = requestModel;
-	let requestedInheritance = false;
-	const requestPatterns = normalizeModelPatternList(requestModel).flatMap((pattern, index, patterns) => {
-		const inheritance = matchSessionInheritedPattern(pattern);
-		if (!inheritance) return resolveConfiguredModelPatterns(pattern, settings);
-		if (!requestedInheritance) requestSource = index === 0 ? undefined : patterns.slice(0, index);
-		requestedInheritance = true;
-		return inheritSessionModel(inheritance);
-	});
-	if (requestPatterns.length > 0 || requestedInheritance) {
-		return { source: requestSource, patterns: requestPatterns };
+	if (perCallRequest) {
+		let requestSource = requestModel;
+		let requestedInheritance = false;
+		const requestPatterns = normalizeModelPatternList(requestModel).flatMap((pattern, index, patterns) => {
+			const inheritance = matchSessionInheritedPattern(pattern);
+			if (!inheritance) return resolveConfiguredModelPatterns(pattern, settings);
+			if (!requestedInheritance) requestSource = index === 0 ? undefined : patterns.slice(0, index);
+			requestedInheritance = true;
+			return inheritSessionModel(inheritance.level);
+		});
+		if (requestPatterns.length > 0 || requestedInheritance) {
+			return { source: requestSource, patterns: requestPatterns };
+		}
+	} else {
+		const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
+		if (requestPatterns.length > 0) {
+			return { source: requestModel, patterns: requestPatterns };
+		}
 	}
 
 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
@@ -1352,16 +1360,18 @@ function resolveEffectiveAgentModelSelection(
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
 	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
-	const agentInheritance = singleAgentPattern
-		? matchSessionInheritedPattern(singleAgentPattern, { includeTaskAlias: true })
-		: undefined;
+	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
 	if (configuredAgentPatterns.length > 0) {
-		if (!agentInheritance || resolveExplicitModelRole(singleAgentPattern, settings) === "task") {
+		if (
+			singleAgentPattern === formatModelRoleAlias("task") ||
+			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
+		) {
 			return { source: agentModel, patterns: configuredAgentPatterns };
 		}
+		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
 	}
 
-	return { patterns: inheritSessionModel(agentInheritance) };
+	return { patterns: inheritSessionModel() };
 }
 
 /** Effective agent model patterns paired with the pre-expansion role alias behind them. */

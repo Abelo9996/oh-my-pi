@@ -228,9 +228,11 @@ For task dispatch, model precedence is:
 3. the agent frontmatter's prioritized `model` list
 4. the parent's active model, then its configured/default model fallback
 
-Role aliases in any of the first three sources are expanded through `modelRoles`, except `@default`
-(equivalently `*`), which names step 4 itself: it resolves to the parent's active model rather than
-to `modelRoles.default`, so a child asked for `@default` runs whatever its parent is running.
+Role aliases in `hostModel` and steps 2 and 3 are expanded through `modelRoles`, so `@default:high`
+there is `modelRoles.default` at `high`; an agent whose whole frontmatter `model` is a bare
+`@default` (or `*`, or `@task` with no `task` role) uses step 4. In a per-call `model`, `@default`
+(equivalently `*`) names step 4 itself: it resolves to the parent's active model rather than to
+`modelRoles.default`, so a child asked for `@default` runs whatever its parent is running.
 `@default:<level>` also sets the effort; plain `@default` uses the agent's own thinking level.
 
 ### Per-call `model`

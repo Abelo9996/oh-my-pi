@@ -1637,6 +1637,23 @@ describe("per-call model gate and approval", () => {
 		expect(policy.perCallModelGrants).toBeUndefined();
 	});
 
+	it("keeps `@default:level` on modelRoles.default for frontmatter and `hostModel`; a per-call `model` inherits the parent", async () => {
+		mockDiscovery({ ...AGENT, model: ["@default:high"] });
+		const childSession = gated(
+			{ "task.perCallModel": "on", modelRoles: { default: "anthropic/claude-sonnet-4-5" } },
+			"anthropic/claude-opus-4-5",
+		);
+		// The parent switched to another model; calls without `model` still use the default role and its fallbacks.
+		for (const host of [{}, { hostModel: "@default:high" }]) {
+			const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, ...host }));
+			expect(policy.modelOverride).toEqual(["anthropic/claude-sonnet-4-5:high"]);
+			expect(policy.modelRole).toBe("default");
+		}
+		const perCall = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@default:high" }));
+		expect(perCall.modelOverride).toEqual(["anthropic/claude-opus-4-5:high"]);
+		expect(perCall.modelRole).toBeUndefined();
+	});
+
 	it("under `unpinned` rejects agents with their own model and accepts the rest", async () => {
 		const settings = { "task.perCallModel": "unpinned", modelRoles: { review: "anthropic/claude-sonnet-4-5" } };
 		mockDiscovery({ ...AGENT, model: ["anthropic/claude-opus-4-5"] });
