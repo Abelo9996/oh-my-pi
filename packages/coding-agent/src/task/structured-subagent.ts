@@ -14,9 +14,11 @@ import {
 	normalizeModelPatternList,
 	resolveAgentModelSelection,
 	resolveConfiguredModelPatterns,
+	resolveExplicitModelRole,
 	resolveModelOverride,
 	splitRoleAliasThinkingSuffix,
 } from "../config/model-resolver";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type CompactionThresholdPair,
@@ -55,7 +57,13 @@ import {
 import { generateTaskName, sanitizeAgentId } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
-import { assertPerCallModelApproved, type PerCallModelGrants, PerCallModelError } from "./model-approval";
+import {
+	assertPerCallModelApproved,
+	isNonChatRole,
+	perCallModelAllowsParent,
+	type PerCallModelGrants,
+	PerCallModelError,
+} from "./model-approval";
 import { isBundledSeance, prepareSeance, type PreparedSeanceSession } from "./seance";
 import { SEANCE_AGENT_NAME } from "./seance-policy";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
@@ -555,6 +563,19 @@ export async function resolveEffectiveSubagentPolicy(
 		for (const pattern of requestPatterns) {
 			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
 			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
+			const requestedRole = resolveExplicitModelRole(pattern, settings);
+			if (isNonChatRole(requestedRole)) {
+				throw new StructuredSubagentError(
+					"preflight",
+					`\`model\` ${JSON.stringify(pattern)} names the ${requestedRole} role, which selects non-chat models; a subagent needs a chat model role or model.`,
+				);
+			}
+			if (modelSelectionInheritsSessionModel(pattern) && !perCallModelAllowsParent(settings)) {
+				throw new StructuredSubagentError(
+					"preflight",
+					`\`model\` ${JSON.stringify(pattern)} asks for the parent's model, which task.perCallModelAllow does not include; add "@default" to the list or pick a listed role.`,
+				);
+			}
 			// `@default` asks for the parent's live model, not a pattern to look up.
 			if (!warmRegistry || modelSelectionInheritsSessionModel(pattern)) continue;
 			// Validate every concrete candidate, even beside @default or another
@@ -574,6 +595,18 @@ export async function resolveEffectiveSubagentPolicy(
 						}
 					}
 					continue;
+				}
+				const otherKind = resolveModelOverride(
+					[candidate],
+					{ getAvailable: () => warmRegistry.getAvailable("all") },
+					settings,
+					{ allowInvalidThinkingSelectorFallback: false },
+				).model;
+				if (otherKind && modelKind(otherKind) !== "chat") {
+					throw new StructuredSubagentError(
+						"preflight",
+						`\`model\` ${JSON.stringify(candidate)} is a non-chat model (${modelKind(otherKind)}); a subagent needs a chat model.`,
+					);
 				}
 				const recovered = resolveModelOverride([candidate], warmRegistry, settings);
 				if (recovered.model && recovered.warning) {

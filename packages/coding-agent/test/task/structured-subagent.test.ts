@@ -1710,15 +1710,14 @@ describe("per-call model gate and approval", () => {
 		expect(isPerCallModelApproved(MODEL, grants, registry, "select")).toBe(true);
 		// Configured, but not on the list.
 		expect(isPerCallModelApproved(OTHER, grants, registry, "select")).toBe(false);
-		// The parent's model stays allowed.
-		expect(
-			isPerCallModelApproved(
-				OTHER,
-				{ ...grants, parentModelPattern: "anthropic/claude-opus-4-5" },
-				registry,
-				"select",
-			),
-		).toBe(true);
+		// With a list set, the parent's model counts only when `@default` is listed.
+		const parent = { ...grants, parentModelPattern: "anthropic/claude-opus-4-5" };
+		expect(isPerCallModelApproved(OTHER, parent, registry, "select")).toBe(false);
+		const withParent = Settings.isolated({ modelRoles: roles, "task.perCallModelAllow": ["@review", "@default"] });
+		expect(isPerCallModelApproved(OTHER, { ...parent, settings: withParent }, registry, "select")).toBe(true);
+		// With no list, the parent's model is always a grant.
+		const noList = Settings.isolated({ modelRoles: { review: "anthropic/claude-sonnet-4-5" } });
+		expect(isPerCallModelApproved(OTHER, { ...parent, settings: noList }, registry, "select")).toBe(true);
 		const withChain = Settings.isolated({
 			modelRoles: roles,
 			"task.perCallModelAllow": ["@review"],
@@ -1727,6 +1726,60 @@ describe("per-call model gate and approval", () => {
 		expect(isPerCallModelApproved(OTHER, { settings: withChain, agentName: "worker" }, registry, "select")).toBe(
 			true,
 		);
+	});
+
+	it("rejects `@default` at preflight when the allowlist leaves out the parent", async () => {
+		mockDiscovery();
+		const settings = {
+			"task.perCallModel": "on",
+			modelRoles: { task: "anthropic/claude-sonnet-4-5" },
+			"task.perCallModelAllow": ["@task"],
+		};
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({ session: gated(settings, "anthropic/claude-opus-4-5"), model: "@default" }),
+			),
+		).rejects.toThrow(/task\.perCallModelAllow does not include/);
+		const listed = gated(
+			{ ...settings, "task.perCallModelAllow": ["@task", "@default"] },
+			"anthropic/claude-opus-4-5",
+		);
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: listed, model: "@default" })),
+		).resolves.toBeDefined();
+	});
+
+	it("only grants chat models and rejects non-chat roles and models before dispatch", async () => {
+		const IMAGE = buildModel({ ...MODEL, id: "image-maker", name: "Image Maker", kind: "image" });
+		const byKind = {
+			getAvailable: (kind: string = "chat") =>
+				[MODEL, OTHER, IMAGE].filter(model => kind === "all" || (model.kind ?? "chat") === kind),
+		};
+		// A chat model configured as a non-chat role (here web) is not a grant through that role.
+		const asWeb = Settings.isolated({ modelRoles: { web: "anthropic/claude-opus-4-5" } });
+		expect(isPerCallModelApproved(OTHER, { settings: asWeb, agentName: "worker" }, byKind, "select")).toBe(false);
+		// A non-chat model never matches, even through a chat role's value.
+		const imageAsReview = Settings.isolated({ modelRoles: { review: "anthropic/image-maker" } });
+		expect(isPerCallModelApproved(IMAGE, { settings: imageAsReview, agentName: "worker" }, byKind, "dispatch")).toBe(
+			false,
+		);
+
+		mockDiscovery();
+		const childSession = {
+			...session({
+				settings: Settings.isolated({
+					"task.perCallModel": "on",
+					modelRoles: { image: "anthropic/image-maker", review: "anthropic/claude-sonnet-4-5" },
+				}),
+			}),
+			modelRegistry: byKind,
+		} as ToolSession;
+		await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@image" }))).rejects.toThrow(
+			/names the image role, which selects non-chat models/,
+		);
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "anthropic/image-maker" })),
+		).rejects.toThrow(/is a non-chat model \(image\); a subagent needs a chat model/);
 	});
 
 	it("applies task.perCallModelFallbacks to retry chain models", () => {

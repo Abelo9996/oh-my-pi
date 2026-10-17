@@ -243,16 +243,18 @@ to `modelRoles.default`, so a child asked for `@default` runs whatever its paren
 | `unpinned` | Accepted only for agents whose own model doesn't change routing: no `task.agentModelOverrides` entry, and a frontmatter `model` that resolves the same as inheriting the parent. The bundled `task` agent (`@task`) counts as unpinned until `modelRoles.task` is set; `scout` (`@smol`) and `reviewer` (`@slow`) are pinned whenever their role resolves to a different model than the parent. |
 | `on` | Accepted for every agent. |
 
-A supplied `model` is one selector or an ordered, non-empty array, and must name a model the
-operator already routes to: a `modelRoles` value, a concrete `retry.fallbackChains` entry, the
-selected agent's frontmatter model or `task.agentModelOverrides` entry, or the parent's live model.
+A supplied `model` is one selector or an ordered, non-empty array, and must name a chat model the
+operator already routes to: a chat role's `modelRoles` value, a concrete `retry.fallbackChains` entry,
+the selected agent's frontmatter model or `task.agentModelOverrides` entry, or the parent's live model.
 Catalog membership, credentials, enabled scope, and built-in role defaults are not enough. Role
 aliases, fuzzy IDs, and globs in those grants match the same way as everywhere else, and an
-unconfigured role such as `@smol` borrows `modelRoles.default` as the resolver does.
+unconfigured role such as `@smol` borrows `modelRoles.default` as the resolver does. The non-chat
+roles (`image`, `web`, `speech`, `dictation`, `judge`) never grant a per-call model, and a request
+naming one of them, or a model of another kind, fails preflight with that reason.
 
 Two settings narrow those grants:
 
-- `task.perCallModelAllow`: a list of roles or model patterns (for example `["@smol", "@review", "anthropic/*"]`). When set, it replaces the derived grants; a listed role brings its values and its fallback chain. The parent's model is always allowed.
+- `task.perCallModelAllow`: a list of roles or model patterns (for example `["@smol", "@review", "anthropic/*"]`). When set, it replaces the derived grants; a listed role brings its values and its fallback chain. The parent's model counts only if `@default` is listed; with no list it is always allowed.
 - `task.perCallModelFallbacks` decides how concrete `retry.fallbackChains` models count:
 
 | Value | Requestable in `model` | Runtime fallback |
