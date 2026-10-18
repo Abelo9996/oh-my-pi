@@ -12,7 +12,12 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 let taskSchemaSessionIndex = 0;
 
 function createSession(
-	options: { parentSpawns?: string; disabledAgents?: string[]; planMode?: boolean } = {},
+	options: {
+		parentSpawns?: string;
+		disabledAgents?: string[];
+		planMode?: boolean;
+		settings?: Record<string, unknown>;
+	} = {},
 ): ToolSession {
 	return {
 		cwd: `/tmp/task-schema-${taskSchemaSessionIndex++}`,
@@ -21,6 +26,7 @@ function createSession(
 			"task.isolation.enabled": false,
 			"task.batch": false,
 			"task.disabledAgents": options.disabledAgents ?? [],
+			...options.settings,
 		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => options.parentSpawns ?? "*",
@@ -201,9 +207,13 @@ describe("task spawn validation", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function executeText(params: unknown, agents: AgentDefinition[] = []): Promise<string> {
+	async function executeText(
+		params: unknown,
+		agents: AgentDefinition[] = [],
+		settings?: Record<string, unknown>,
+	): Promise<string> {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
-		const tool = await TaskTool.create(createSession());
+		const tool = await TaskTool.create(createSession({ settings }));
 		const result = await tool.execute("tool-call", params);
 		return result.content.find(part => part.type === "text")?.text ?? "";
 	}
@@ -251,6 +261,27 @@ describe("task spawn validation", () => {
 		expect(text).not.toContain("ambiguous `model`");
 		expect(text).toContain("selected session file was not found");
 	});
+
+	it("leaves a batched bundled seance item's own `model` to seance resolution", async () => {
+		const text = await executeText(
+			{
+				context: "Historical consult.",
+				tasks: [
+					{
+						agent: "seance",
+						task: "Read historical context.",
+						solutionSpace: "focused read-only inspection",
+						sourceSession: "/missing/source.jsonl",
+						model: "default",
+					},
+				],
+			},
+			[bundledSeance],
+			{ "task.batch": true },
+		);
+		expect(text).not.toContain("ambiguous `model`");
+		expect(text).toContain("selected session file was not found");
+	});
 });
 
 describe("per-call model schema boundaries", () => {
@@ -285,5 +316,28 @@ describe("per-call model schema boundaries", () => {
 			tasks: [{ task: "Do work", solutionSpace: "c", model: models }],
 		});
 		expect(batch instanceof type.errors).toBe(false);
+	});
+
+	it("advertises `model` in the task schema and prompt only while task.perCallModel is not off", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const advertised = async (perCallModel: string) => {
+			const tool = await TaskTool.create(createSession({ settings: { "task.perCallModel": perCallModel } }));
+			return {
+				schema: JSON.stringify(tool.parameters.toJsonSchema()).includes('"model"'),
+				prompt: tool.description.includes("`model`:"),
+			};
+		};
+		expect(await advertised("off")).toEqual({ schema: false, prompt: false });
+		expect(await advertised("unpinned")).toEqual({ schema: true, prompt: true });
+		vi.restoreAllMocks();
+	});
+
+	it("drops `model` from a dynamically built schema while task.perCallModel is off", () => {
+		const params = { task: "Do work", solutionSpace: "c", model: "p/requested" };
+		const build = (perCallModel: boolean) =>
+			getTaskSchema({ isolationEnabled: false, batchEnabled: false, effortEnabled: true, perCallModel })(params);
+		// Build the enabled variant first so a cache keyed without the gate would hand it back.
+		expect(build(true)).toHaveProperty("model", "p/requested");
+		expect(build(false)).not.toHaveProperty("model");
 	});
 });
