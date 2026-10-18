@@ -364,6 +364,39 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.imageCount).toBe(1);
 	});
 
+	it("falls back to Factory Droid image models after every other default image provider", async () => {
+		const factory = factoryDroidRegistry()
+			.filter(({ spec }) => spec.id === "kimi-k3" || buildModel(spec).kind === "image")
+			.map(entry => buildModel(buildFactoryDroidModel(entry)));
+		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const urls: string[] = [];
+		const run = async (models: Model<Api>[]) => {
+			urls.length = 0;
+			const ctx = createContext({
+				models,
+				settings: Settings.isolated(),
+				fetch: async input => {
+					urls.push(input.toString());
+					return imageResponse();
+				},
+				activeModel: factory.find(model => model.id === "kimi-k3"),
+			});
+			const result = await imageGenTool.execute("default", { subject: "a lighthouse" }, undefined, ctx);
+			collectPaths(result);
+			return result;
+		};
+
+		// A Factory login alone now generates, starting from the CLI's preferred model.
+		const factoryOnly = await run(factory);
+		expect(urls).toEqual(["https://api.factory.ai/api/llm/o/v1/images/generations"]);
+		expect(factoryOnly.details?.model).toBe("gpt-image-2.5-sunburst");
+
+		// Any other default image provider keeps its turn ahead of Factory.
+		const withXai = await run([...factory, xai]);
+		expect(urls).toEqual(["https://xai.example/v1/images/generations"]);
+		expect(withXai.details?.provider).toBe("xai");
+	});
+
 	it("falls back to the selected Antigravity id when discovery advertises no image model", async () => {
 		const model = catalogModel("google-antigravity", "gemini-selected-image", "google-gemini-cli");
 		const requestBodies: Array<Record<string, unknown>> = [];

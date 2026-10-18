@@ -128,6 +128,7 @@
 
 ### Changed
 
+- Made Factory Droid's image models the last `image` role defaults, so `generate_image` works with only a Factory login; every other default image provider still runs first
 - Seeded TypeSafe `jev-1.14.0` and OpenRouter `typesafe/jev-1.14`, and made them the `judge` role defaults and TypeSafe's default model; TypeSafe discovery keeps seeded ids its alias-only `/v1/models` listing omits
 
 ## [18.12.1] - 2026-10-17

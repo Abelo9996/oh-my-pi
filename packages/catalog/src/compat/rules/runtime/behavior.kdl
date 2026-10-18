@@ -479,6 +479,11 @@ behavior {
 		model "openrouter/google/gemini-3-pro-image"
 		model "google/gemini-3-pro-image"
 		model "deepinfra/black-forest-labs/FLUX-2-pro"
+		// Factory Droid last, in the CLI's own preference order: a Factory
+		// login alone can generate, and no other provider's turn moves.
+		model "factory-droid/gpt-image-2.5-sunburst"
+		model "factory-droid/gpt-image-2.5-flare"
+		model "factory-droid/gemini-3-pro-image-preview"
 	}
 	role-defaults "web" {
 		model "web/parallel"
