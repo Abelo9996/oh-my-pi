@@ -4,6 +4,7 @@ import { Settings } from "../../src/config/settings";
 import { runEvalWorkpool } from "../../src/eval/workpool-bridge";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import * as discovery from "../../src/task/discovery";
+import * as structured from "../../src/task/structured-subagent";
 import type { AgentDefinition } from "../../src/task/types";
 import { WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
@@ -17,7 +18,7 @@ const SCOUT: AgentDefinition = {
 
 const managers = new Set<AsyncJobManager>();
 
-function makeSession(): ToolSession {
+function makeSession(settings: Record<string, unknown> = {}): ToolSession {
 	const manager = new AsyncJobManager({ retentionMs: 0 });
 	managers.add(manager);
 	return {
@@ -28,6 +29,7 @@ function makeSession(): ToolSession {
 			"task.maxRecursionDepth": 2,
 			"task.isolation.enabled": false,
 			"task.enableLsp": false,
+			...settings,
 		}),
 		asyncJobManager: manager,
 		getAgentId: () => "Main",
@@ -91,14 +93,34 @@ describe("runEvalWorkpool", () => {
 });
 
 describe("workpool model validation", () => {
-	for (const model of [" , ", [], ["p/valid", ""], [42], "default"]) {
+	for (const { model, reason } of [
+		{ model: " , ", reason: /invalid `model` value/ },
+		{ model: [], reason: /invalid `model` value/ },
+		{ model: ["p/valid", ""], reason: /invalid `model` value/ },
+		{ model: [42], reason: /invalid `model` value/ },
+		{ model: "default", reason: /ambiguous `model` value/ },
+	]) {
 		it(`rejects invalid selection ${JSON.stringify(model)} before registering a pool`, async () => {
 			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
-			const session = makeSession();
+			const session = makeSession({ "task.perCallModel": "on" });
 			await expect(
 				runEvalWorkpool({ op: "create", name: "invalid", agent: "scout", model }, { session }),
-			).rejects.toThrow(/model/);
+			).rejects.toThrow(reason);
 			expect(WorkPoolRegistry.global().get("Main", "invalid")).toBeUndefined();
 		});
 	}
+
+	it("hands the pool's selector to each worker's first turn", async () => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
+		const requested = Promise.withResolvers<unknown>();
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			requested.resolve(request.model);
+			throw new Error("stop after dispatch");
+		});
+		const session = makeSession({ "task.perCallModel": "on", modelRoles: { smol: "p/small" } });
+		const model = ["@smol", "@default"];
+		await runEvalWorkpool({ op: "create", name: "picked", agent: "scout", model }, { session });
+		await runEvalWorkpool({ op: "push", name: "picked", items: ["one"] }, { session });
+		expect(await requested.promise).toEqual(model);
+	});
 });
