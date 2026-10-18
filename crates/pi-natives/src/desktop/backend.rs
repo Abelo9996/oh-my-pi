@@ -9,9 +9,10 @@ use super::{
 	frame::FrameGeometry,
 	keys::KeyName,
 	menus::DesktopMenuItem,
+	text_range::TextSelectRequest,
 	types::{
-		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector,
-		ScreenState, Target,
+		AxTextSelection, CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow,
+		DisplaySelector, ScreenState, Target,
 	},
 };
 
@@ -216,6 +217,18 @@ pub trait AxBackend {
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()>;
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()>;
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()>;
+	/// Selects the text `request` names in the element's value, leaving the
+	/// value unchanged, and returns the selection read back.
+	fn select_text(
+		&mut self,
+		_h: &AxHandle,
+		_request: &TextSelectRequest,
+	) -> CoreResult<AxTextSelection> {
+		Err(DesktopError::new(
+			super::error::ErrorCode::Unsupported,
+			"selecting text by accessibility is available only on macOS",
+		))
+	}
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>>;
 	fn focused_element(&mut self) -> CoreResult<Option<AxHandle>>;
 	fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>>;
@@ -224,5 +237,11 @@ pub trait AxBackend {
 	/// it, so a ref is never renewed onto the newcomer.
 	fn alive(&mut self, _h: &AxHandle) -> bool {
 		true
+	}
+	/// Whether the app has provably destroyed the element `h` was read from,
+	/// rather than a request on it failing on another element. Only then does
+	/// a `StaleRef` name the one element left with its fields.
+	fn destroyed(&mut self, _h: &AxHandle) -> bool {
+		false
 	}
 }

@@ -91,6 +91,7 @@ import {
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskPerCallModel,
+	getPerCallModelMode,
 	cfgTaskPerCallModelAllow,
 } from "./settings";
 
@@ -502,11 +503,11 @@ export async function resolveEffectiveSubagentPolicy(
 		: undefined;
 	let perCallModel = hasPreparedSeance ? undefined : request.model;
 	if (perCallModel !== undefined) {
-		const mode = cfgTaskPerCallModel.get(request.session.settings);
+		const mode = getPerCallModelMode(request.session.settings, request.invocationKind);
 		if (mode === "off") {
 			throw new StructuredSubagentError(
 				"preflight",
-				"Per-call `model` is disabled (task.perCallModel: off). Omit `model` to use the agent's configured model.",
+				`Per-call model is disabled for ${request.invocationKind} calls (task.perCallModel: ${cfgTaskPerCallModel.get(request.session.settings)}). Omit model to use the agent's configured model.`,
 			);
 		}
 		// Pinned = the agent's own configuration names a model, whatever the parent runs right now.

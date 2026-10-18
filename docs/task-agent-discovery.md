@@ -244,6 +244,7 @@ there is `modelRoles.default` at `high`; an agent whose whole frontmatter `model
 | `off` (default) | `model` is hidden from the task schema and prompts. A task call that still passes it has it dropped by the schema and runs on the agent's own model, unless the bundled `seance` is advertised (its own `model` field stays in the schema), in which case the call fails preflight. Eval `agent()`/`workpool()` reject it. |
 | `unpinned` | Accepted only for agents with no model of their own: no `task.agentModelOverrides` entry, and a frontmatter `model` that is absent or a parent-inheriting spelling (a bare `@default`, `*`, or `pi/default`, or a selection that expands to nothing, such as `@task` while `modelRoles.task` is unset). This is decided from the configuration alone, not by comparing against the model the parent is running, so a frontmatter model that names the parent's current model is still pinned. The bundled `task` agent (`@task`) counts as unpinned until `modelRoles.task` is set; `scout` (`@smol`) and `reviewer` (`@slow`) are pinned. |
 | `on` | Accepted for every agent. |
+| `eval` | Accepted for every agent through eval `agent()` and `workpool()`, including pinned specialists. Ordinary task items behave as `off`; the bundled seance is unchanged. The same approval, allowlist, effort and dispatch checks apply. |
 
 A supplied `model` is one selector or an ordered, non-empty array, and must name a chat model the
 operator already routes to: a chat role's `modelRoles` value, a concrete `retry.fallbackChains` entry,

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
 import { runEvalWorkpool } from "../../src/eval/workpool-bridge";
@@ -93,6 +94,28 @@ describe("runEvalWorkpool", () => {
 });
 
 describe("workpool model validation", () => {
+	it("eval mode admits an approved pinned worker and rejects an unapproved model before creating a pool", async () => {
+		const approved = createMockModel();
+		const unapproved = createMockModel({ id: "unapproved" });
+		const agent = { ...SCOUT, model: ["mock/unapproved"] };
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		const session = Object.assign(
+			makeSession({
+				"task.perCallModel": "eval",
+				"task.perCallModelAllow": ["@review"],
+				modelRoles: { review: "mock/mock-model" },
+			}),
+			{ modelRegistry: { getAvailable: () => [approved, unapproved] } },
+		);
+		await expect(
+			runEvalWorkpool({ op: "create", name: "denied", agent: "scout", model: "mock/unapproved" }, { session }),
+		).rejects.toThrow(/not configured/);
+		expect(WorkPoolRegistry.global().get("Main", "denied")).toBeUndefined();
+		await expect(
+			runEvalWorkpool({ op: "create", name: "approved", agent: "scout", model: "@review" }, { session }),
+		).resolves.toEqual({ name: "approved", agent: "scout", limit: 2 });
+	});
+
 	for (const { model, reason } of [
 		{ model: " , ", reason: /invalid `model` value/ },
 		{ model: [], reason: /invalid `model` value/ },
@@ -110,14 +133,14 @@ describe("workpool model validation", () => {
 		});
 	}
 
-	it("hands the pool's selector to each worker's first turn", async () => {
+	it.each(["on", "eval"])("hands the pool selector to workers under %s", async perCallModel => {
 		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
 		const requested = Promise.withResolvers<unknown>();
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			requested.resolve(request.model);
 			throw new Error("stop after dispatch");
 		});
-		const session = makeSession({ "task.perCallModel": "on", modelRoles: { smol: "p/small" } });
+		const session = makeSession({ "task.perCallModel": perCallModel, modelRoles: { smol: "p/small" } });
 		const model = ["@smol", "@default"];
 		await runEvalWorkpool({ op: "create", name: "picked", agent: "scout", model }, { session });
 		await runEvalWorkpool({ op: "push", name: "picked", items: ["one"] }, { session });

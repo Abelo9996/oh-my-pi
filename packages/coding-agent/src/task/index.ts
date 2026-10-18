@@ -77,7 +77,7 @@ import {
 	cfgTaskMaxConcurrency,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
-	cfgTaskPerCallModel,
+	getPerCallModelMode,
 	cfgTaskSpeculativeLaunch,
 	cfgTaskStructured,
 } from "./settings";
@@ -737,7 +737,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			structured: this.#isStructured(),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
-			perCallModel: cfgTaskPerCallModel.get(this.session.settings) !== "off",
+			perCallModel: getPerCallModelMode(this.session.settings, "task") !== "off",
 		});
 	}
 
@@ -771,7 +771,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
-			perCallModel: cfgTaskPerCallModel.get(this.session.settings),
+			perCallModel: getPerCallModelMode(this.session.settings, "task"),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),

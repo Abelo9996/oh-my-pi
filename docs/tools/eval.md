@@ -217,6 +217,8 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 #### Per-call model selection
 
+Set `task.perCallModel: eval` to allow model overrides here for any specialist, including a pinned `reviewer`, while ordinary task delegation keeps its configured routing. The parent model can call eval too; this controls where selection is offered, not a security boundary. Approval, allowlist, effort and dispatch checks remain the same.
+
 With `task.perCallModel` enabled, `agent()` and `workpool()` accept a selector or an ordered, non-empty array:
 
 ```js

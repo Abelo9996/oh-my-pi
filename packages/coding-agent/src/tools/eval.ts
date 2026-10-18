@@ -56,7 +56,7 @@ import {
 	cfgEvalAutoProvision,
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
-import { cfgTaskMaxRecursionDepth, cfgTaskPerCallModel } from "../task/settings";
+import { cfgTaskMaxRecursionDepth, getPerCallModelMode } from "../task/settings";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
@@ -352,7 +352,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			preludes: this.#advertisedPreludes(session),
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
-			perCallModel: cfgTaskPerCallModel.get(session.settings) !== "off",
+			perCallModel: getPerCallModelMode(session.settings, "eval") !== "off",
 		};
 	}
 

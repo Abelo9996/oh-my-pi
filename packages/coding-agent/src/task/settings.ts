@@ -8,6 +8,7 @@ import {
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -294,7 +295,7 @@ export const cfgTaskEnableEffort = register({
 export const cfgTaskPerCallModel = register({
 	id: "task.perCallModel",
 	type: "enum",
-	values: ["off", "unpinned", "on"] as const,
+	values: ["off", "unpinned", "on", "eval"] as const,
 	default: "off",
 	ui: {
 		tab: "tasks",
@@ -316,9 +317,20 @@ export const cfgTaskPerCallModel = register({
 					"Accept `model` only for agents with no model of their own (no task.agentModelOverrides entry; frontmatter model absent or inheriting the parent, so bundled `task` counts until modelRoles.task is set)",
 			},
 			{ value: "on", label: "On", description: "Accept `model` for every agent" },
+			{
+				value: "eval",
+				label: "Eval only",
+				description:
+					"Accept `model` for every agent in eval agent() and workpool(); task items behave as off, with seance unchanged",
+			},
 		],
 	},
 });
+
+export function getPerCallModelMode(settings: Settings, invocationKind: "task" | "eval"): "off" | "unpinned" | "on" {
+	const mode = cfgTaskPerCallModel.get(settings);
+	return mode === "eval" ? (invocationKind === "eval" ? "on" : "off") : mode;
+}
 
 export const cfgTaskPerCallModelAllow = register({
 	id: "task.perCallModelAllow",

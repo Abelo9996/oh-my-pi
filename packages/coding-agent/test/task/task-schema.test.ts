@@ -330,7 +330,7 @@ describe("per-call model schema boundaries", () => {
 		expect(batch instanceof type.errors).toBe(false);
 	});
 
-	it("advertises `model` in the task schema and prompt only while task.perCallModel is not off", async () => {
+	it("advertises `model` in the task schema and prompt only for task-enabled modes", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const advertised = async (perCallModel: string) => {
 			const tool = await TaskTool.create(createSession({ settings: { "task.perCallModel": perCallModel } }));
@@ -341,7 +341,21 @@ describe("per-call model schema boundaries", () => {
 		};
 		expect(await advertised("off")).toEqual({ schema: false, prompt: false });
 		expect(await advertised("unpinned")).toEqual({ schema: true, prompt: true });
+		expect(await advertised("on")).toEqual({ schema: true, prompt: true });
+		expect(await advertised("eval")).toEqual({ schema: false, prompt: false });
 		vi.restoreAllMocks();
+	});
+
+	it.each([false, true])("eval mode drops ordinary task model input with batch=%s", async batch => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.perCallModel": "eval", "task.batch": batch } }),
+		);
+		const item = { task: "Do work", solutionSpace: "c", model: "p/requested" };
+		const parsed = tool.parameters(batch ? { context: "shared", tasks: [item] } : item);
+		expect(parsed instanceof type.errors).toBe(false);
+		expect(parsed).toHaveProperty(batch ? "tasks.0.task" : "task", "Do work");
+		expect(parsed).not.toHaveProperty(batch ? "tasks.0.model" : "model");
 	});
 
 	it("drops `model` from a dynamically built schema while task.perCallModel is off", () => {

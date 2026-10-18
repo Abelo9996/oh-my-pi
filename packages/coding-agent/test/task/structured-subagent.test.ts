@@ -287,7 +287,7 @@ describe("structured subagent primitive", () => {
 			expect(saved.enableIrc).toBe(false);
 
 			// Seance's `model` picks the source's model; `task.perCallModel` neither gates nor grants it.
-			for (const perCallModel of ["off", "unpinned", "on"]) {
+			for (const perCallModel of ["off", "unpinned", "on", "eval"]) {
 				const gated = Object.assign(
 					session({ cwd, settings: Settings.isolated({ "task.perCallModel": perCallModel }) }),
 					{ modelRegistry },
@@ -1652,6 +1652,45 @@ describe("per-call model gate and approval", () => {
 		const perCall = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@default:high" }));
 		expect(perCall.modelOverride).toEqual(["anthropic/claude-opus-4-5:high"]);
 		expect(perCall.modelRole).toBeUndefined();
+	});
+
+	it("eval mode overrides a pinned reviewer only in eval while preserving its prompt, tools and grants", async () => {
+		const reviewer = getBundledAgent("reviewer")!;
+		mockDiscovery(reviewer);
+		const childSession = gated({
+			"task.perCallModel": "eval",
+			"task.perCallModelAllow": ["@review"],
+			modelRoles: { slow: "anthropic/claude-opus-4-5", review: "anthropic/claude-sonnet-4-5" },
+		});
+		const input = request({ session: childSession, agent: "reviewer" });
+		const ordinary = await resolveEffectiveSubagentPolicy(input);
+		expect(ordinary.modelOverride).toEqual(["anthropic/claude-opus-4-5"]);
+		expect(ordinary.perCallModelGrants).toBeUndefined();
+		await expect(resolveEffectiveSubagentPolicy({ ...input, model: "@review" })).rejects.toThrow(
+			/task.perCallModel: eval/,
+		);
+		const overridden = await resolveEffectiveSubagentPolicy({ ...input, invocationKind: "eval", model: "@review" });
+		expect(overridden.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(overridden.effectiveAgent.systemPrompt).toBe(ordinary.effectiveAgent.systemPrompt);
+		expect(overridden.effectiveAgent.tools).toEqual(ordinary.effectiveAgent.tools);
+		const grants = overridden.perCallModelGrants;
+		if (!grants) throw new Error("Eval override lost its dispatch grants");
+		expect(isPerCallModelApproved(MODEL, grants, registry, "dispatch")).toBe(true);
+		expect(() => assertPerCallModelApproved(OTHER, grants, registry, "dispatch")).toThrow(PerCallModelError);
+		await expect(
+			resolveEffectiveSubagentPolicy({ ...input, invocationKind: "eval", model: "anthropic/claude-opus-4-5" }),
+		).rejects.toThrow(/not configured/);
+	});
+
+	it("eval mode rejects a per-call model on an unpinned task agent", async () => {
+		mockDiscovery();
+		const childSession = gated({
+			"task.perCallModel": "eval",
+			modelRoles: { review: "anthropic/claude-sonnet-4-5" },
+		});
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@review" })),
+		).rejects.toThrow(/task.perCallModel: eval/);
 	});
 
 	it("under `unpinned` rejects agents with their own model and accepts the rest", async () => {

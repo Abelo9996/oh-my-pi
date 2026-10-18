@@ -103,13 +103,14 @@ describe("eval tool description", () => {
 	});
 
 	it("advertises agent()/workpool() `model` only while task.perCallModel is not off", () => {
-		const agentsTopic = (perCallModel: "off" | "on") => {
+		const agentsTopic = (perCallModel: "off" | "on" | "eval") => {
 			const session = makeSession({});
 			cfgTaskPerCallModel.set(session.settings, perCallModel);
 			return new EvalTool(session).docTopics().agents ?? "";
 		};
 		expect(agentsTopic("off")).not.toContain("model?=None");
 		expect(agentsTopic("on")).toContain("model?=None");
+		expect(agentsTopic("eval")).toContain("model?=None");
 	});
 
 	it("renders helper syntax only for available runtimes", () => {

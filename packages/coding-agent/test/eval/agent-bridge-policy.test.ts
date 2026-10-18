@@ -345,13 +345,17 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("routes a per-call model on agent() above the selected agent's own model", async () => {
+	it.each(["on", "eval"])("routes an agent() model above a pinned agent under %s", async perCallModel => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
 		await runEvalAgentAndWait(
 			{ prompt: "work", agent: "reviewer", model: "p/requested:high" },
-			{ session: makeSession() },
+			{
+				session: makeSession({
+					settings: Settings.isolated({ "task.perCallModel": perCallModel, "task.isolation.enabled": false }),
+				}),
+			},
 		);
 
 		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
