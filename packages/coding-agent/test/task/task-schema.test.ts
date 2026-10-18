@@ -5,7 +5,7 @@ import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
-import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
+import { isBundledSeance, seanceTaskSchemaFields, validateSeanceParams } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -281,6 +281,18 @@ describe("task spawn validation", () => {
 		);
 		expect(text).not.toContain("ambiguous `model`");
 		expect(text).toContain("selected session file was not found");
+	});
+
+	it("names seance for a misplaced batch-container `sourceSession` and stays agent-neutral for `model` alone", () => {
+		const validate = (container: Record<string, unknown>) =>
+			validateSeanceParams({
+				params: { context: "Shared context", tasks: [{ task: "Do work" }], ...container },
+				batchEnabled: true,
+				defaultAgent: "task",
+				seanceAdvertised: true,
+			});
+		expect(validate({ model: "p/requested" })).toBe("Put `model` on the individual items inside `tasks[]`.");
+		expect(validate({ sourceSession: "abc", model: "p/requested" })).toContain("`seance` item");
 	});
 });
 
