@@ -58,6 +58,27 @@ function freeLoopbackPort(): number {
 	return port;
 }
 
+/** Reproduce Android/Termux, where `getifaddrs` is denied to apps (issue #16127). */
+function denyInterfaceEnumeration(): void {
+	vi.spyOn(os, "networkInterfaces").mockImplementation(() => {
+		throw Object.assign(new Error("getifaddrs returned an error"), {
+			code: "ERR_SYSTEM_ERROR",
+			errno: 13,
+			syscall: "getifaddrs",
+		});
+	});
+}
+
+/** Deliver a successful callback for `authUrl` through the given loopback address. */
+function sendCallback(flow: TestCallbackFlow, authUrl: string, address: "127.0.0.1" | "::1"): Promise<Response> {
+	const url = new URL(authUrl);
+	url.hostname = address === "::1" ? "[::1]" : address;
+	url.searchParams.delete("started");
+	url.searchParams.set("code", "termux");
+	url.searchParams.set("state", flow.lastState ?? "");
+	return fetch(url);
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -169,25 +190,36 @@ describe("OAuthCallbackFlow loopback address families", () => {
 		expect(progress.some(msg => msg.includes("unavailable"))).toBe(false);
 	});
 
-	it("serves an IPv4 callback when Android denies network interface enumeration", async () => {
-		vi.spyOn(os, "networkInterfaces").mockImplementation(() => {
-			throw Object.assign(new Error("getifaddrs returned an error"), {
-				code: "ERR_SYSTEM_ERROR",
-				errno: 13,
-				syscall: "getifaddrs",
-			});
-		});
+	it.skipIf(!ipv6Loopback)("keeps the ::1 listener when interface enumeration is denied", async () => {
+		denyInterfaceEnumeration();
+		const callback = Promise.withResolvers<Response>();
+		const flow = new TestCallbackFlow(
+			{ onAuth: info => void sendCallback(flow, info.url, "::1").then(callback.resolve, callback.reject) },
+			{ preferredPort: 0 },
+		);
 
+		// `localhost` can resolve to `::1`; denied enumeration alone must not
+		// strand such redirects without a listener.
+		const credentials = await flow.login();
+		expect((await callback.promise).status).toBe(200);
+		expect(credentials.access).toBe("access-termux");
+	});
+
+	it("serves IPv4 alone when interface enumeration is denied and ::1 cannot bind", async () => {
+		denyInterfaceEnumeration();
+		const realServe = Bun.serve.bind(Bun) as typeof Bun.serve;
+		vi.spyOn(Bun, "serve").mockImplementation(((options: { hostname?: string; port?: number }) => {
+			if (options.hostname === "::1") {
+				throw Object.assign(new Error(`Failed to start server. Is port ${options.port} in use?`), {
+					code: "EADDRINUSE",
+				});
+			}
+			return realServe(options as Parameters<typeof Bun.serve>[0]);
+		}) as typeof Bun.serve);
 		const callback = Promise.withResolvers<Response>();
 		const flow = new TestCallbackFlow(
 			{
-				onAuth: info => {
-					const url = new URL(info.url);
-					url.hostname = "127.0.0.1";
-					url.searchParams.set("code", "termux");
-					url.searchParams.set("state", flow.lastState ?? "");
-					void fetch(url).then(callback.resolve, callback.reject);
-				},
+				onAuth: info => void sendCallback(flow, info.url, "127.0.0.1").then(callback.resolve, callback.reject),
 			},
 			{ preferredPort: 0 },
 		);
