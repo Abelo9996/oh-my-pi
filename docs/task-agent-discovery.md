@@ -292,8 +292,10 @@ grants. `hostModel` keeps `model`'s precedence but is neither gated nor checked.
 
 A spawn with a per-call `model` runs under `task.maxEffort` as a hard ceiling, exactly like the
 `effort` hint: a `:level` on the selector or on an approved role's value above the ceiling is clamped
-to it, and retry-fallback recovery cannot raise it. Cold revival restores the ceiling from the live
-`task.maxEffort`. Spawns without `model` are unaffected.
+to it, and retry-fallback recovery cannot raise it. A model whose lowest supported effort is above the
+ceiling fails the spawn, as it does for the `effort` hint. Cold revival restores the ceiling from the
+live `task.maxEffort` and refuses to revive a per-call worker whose model no longer fits under it.
+Spawns without `model` are unaffected.
 
 After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
 

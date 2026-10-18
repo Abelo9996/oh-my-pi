@@ -515,6 +515,35 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy).not.toHaveBeenCalled();
 	});
 
+	it("rejects a per-call spawn when task.maxEffort is below the model floor", async () => {
+		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
+		const model = {
+			...baseModel,
+			id: "mock-high-only",
+			provider: "mock",
+			thinking: { mode: "effort", efforts: [Effort.High] },
+		} as Model;
+		const selector = `${model.provider}/${model.id}`;
+		const settings = Settings.isolated({ "task.maxEffort": "low", modelRoles: { review: selector } });
+		const spy = vi.spyOn(sdkModule, "createAgentSession");
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-per-call-ceiling-below-floor",
+			modelOverride: [selector],
+			perCallModelGrants: { settings, agentName: baseAgent.name },
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			"mock/mock-high-only has no supported thinking effort at or below task.maxEffort=low",
+		);
+		expect(spy).not.toHaveBeenCalled();
+	});
+
 	it("preserves the model's full effort range by default", async () => {
 		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");

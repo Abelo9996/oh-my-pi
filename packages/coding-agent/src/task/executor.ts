@@ -82,6 +82,7 @@ import { hasConversationalHistory, SessionManager } from "../session/session-man
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	AUTO_THINKING,
+	assertModelSupportsEffortCeiling,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
 	prewalkWouldBeNoop,
@@ -4360,9 +4361,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// The ceiling outlives initial resolution: it rides into the session so
 			// retry-fallback recovery can never clamp effort back up past it.
 			// A per-call `model` is caller-chosen too, so its `:level` (or an approved
-			// role's) is held to the same ceiling.
+			// role's) is held to the same ceiling, and a model whose lowest effort is
+			// above it fails the spawn exactly as an `effort` hint does.
 			const spawnEffortCeiling =
 				options.effort !== undefined || options.perCallModelGrants ? cfgTaskMaxEffort.get(settings) : undefined;
+			if (model && spawnEffortCeiling) assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
 			const effortLevel =
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)

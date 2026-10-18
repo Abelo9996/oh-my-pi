@@ -707,6 +707,52 @@ describe("persisted subagent revival", () => {
 		expect(ceilings).toEqual([Effort.Low, undefined]);
 	});
 
+	it("refuses to revive a per-call worker whose model cannot run at or below task.maxEffort", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const highOnly = buildModel({
+			id: "mock-high-only",
+			name: "High Only",
+			api: "anthropic-messages",
+			provider: "mock",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.High] },
+			baseUrl: "https://example.invalid",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		});
+		const disposed: boolean[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			const session = Object.assign(createRevivedSession([]).session, {
+				model: highOnly,
+				dispose: async () => {
+					disposed.push(true);
+				},
+			});
+			return { session } as CreateAgentSessionResult;
+		});
+		const revive = async (perCallModel: boolean) => {
+			const cwd = makeTempDir("@pi-revive-per-call-floor-");
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+				agent: "task",
+				perCallModel,
+			});
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd, undefined, {
+				settings: Settings.isolated({ "task.maxEffort": "low" }),
+			})(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			return reviver(ref);
+		};
+
+		await expect(revive(true)).rejects.toThrow(
+			"mock/mock-high-only has no supported thinking effort at or below task.maxEffort=low",
+		);
+		expect(disposed).toEqual([true]);
+		await expect(revive(false)).resolves.toBeDefined();
+	});
+
 	it("keeps a revived per-call worker from switching models under task.perCallModelFallbacks: off", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const modelFallback: boolean[] = [];

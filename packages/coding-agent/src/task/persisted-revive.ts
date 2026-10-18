@@ -4,6 +4,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
@@ -338,6 +339,17 @@ export function createPersistedSubagentReviverFactory(
 			} catch (error) {
 				mcpFollower?.dispose();
 				throw error;
+			}
+			// A per-call worker whose model cannot run at or below the live ceiling fails instead
+			// of running at the model's floor, as its spawn would.
+			if (init.perCallModel && session.model) {
+				try {
+					assertModelSupportsEffortCeiling(session.model, cfgTaskMaxEffort.get(ctx.settings));
+				} catch (error) {
+					mcpFollower?.dispose();
+					await session.dispose();
+					throw error;
+				}
 			}
 			mcpFollower?.bind(session);
 			// Clamp the active set to the persisted list: createAgentSession's
