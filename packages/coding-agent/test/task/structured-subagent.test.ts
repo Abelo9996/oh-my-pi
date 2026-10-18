@@ -1985,6 +1985,26 @@ describe("per-call model gate and approval", () => {
 		).rejects.toThrow(/is a non-chat model \(image\); a subagent needs a chat model/);
 	});
 
+	it("never grants a non-chat role's retry fallback chain", () => {
+		const settings = Settings.isolated({
+			modelRoles: { review: "anthropic/claude-sonnet-4-5" },
+			"retry.fallbackChains": { web: ["anthropic/claude-opus-4-5"] },
+		});
+		expect(isPerCallModelApproved(OTHER, { settings, agentName: "worker" }, registry, "dispatch")).toBe(false);
+	});
+
+	it("grants nothing from the configured value of an allowlisted `@default` or non-chat role", () => {
+		const opus = "anthropic/claude-opus-4-5";
+		const settings = Settings.isolated({
+			modelRoles: { review: "anthropic/claude-sonnet-4-5", default: opus, web: opus },
+			"task.perCallModelAllow": ["@review", "@default", "@web"],
+		});
+		// `@default` grants the parent's live model (here the review model), never modelRoles.default.
+		const grants = { settings, agentName: "worker", parentModelPattern: "anthropic/claude-sonnet-4-5" };
+		expect(isPerCallModelApproved(MODEL, grants, registry, "select")).toBe(true);
+		expect(isPerCallModelApproved(OTHER, grants, registry, "select")).toBe(false);
+	});
+
 	it("applies task.perCallModelFallbacks to retry chain models", () => {
 		const at = (mode: string) =>
 			Settings.isolated({
