@@ -148,6 +148,7 @@ import {
 	cfgTaskMaxRecursionDepth,
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentAccountPools,
+	cfgTaskPerCallModelFallbacks,
 } from "./settings";
 import {
 	cfgTierSubagent,
@@ -4076,6 +4077,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			...(advisorSelection ? { "advisor.enabled": true } : undefined),
 			...(advisorRolePattern
 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
+				: undefined),
+			// `task.perCallModelFallbacks: off` means the per-call child fails instead of switching,
+			// even to a model another grant would approve.
+			...(options.perCallModelGrants && cfgTaskPerCallModelFallbacks.get(settings) === "off"
+				? { "retry.modelFallback": false }
 				: undefined),
 		},
 		options.parentServiceTier,

@@ -695,6 +695,73 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		}
 	}, 30_000);
 
+	it("fails a per-call worker instead of switching models under task.perCallModelFallbacks: off", async () => {
+		const cwd = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-per-call-fallbacks-off-"));
+		const authStorage = await AuthStorage.create(":memory:");
+		const id = "subagent-per-call-fallbacks-off";
+		const sourceId = "executor-per-call-fallbacks-off";
+		try {
+			authStorage.keys.setRuntime("mock", "test-key");
+			registerMockApi(sourceId);
+			const primary = createMockModel({
+				id: "per-call-off-primary",
+				responses: [{ throw: "rate limit exceeded retry-after-ms=60000" }],
+				handler: () => ({ content: ["Unexpected primary retry."] }),
+			});
+			const fallback = createMockModel({
+				id: "per-call-off-fallback",
+				handler: () => ({ content: ["Switched to another approved model."] }),
+			});
+			const models = [primary, fallback];
+			const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+			const find = modelRegistry.find.bind(modelRegistry);
+			vi.spyOn(modelRegistry, "find").mockImplementation(
+				(provider, modelId) =>
+					models.find(model => model.provider === provider && model.id === modelId) ?? find(provider, modelId),
+			);
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue(models);
+			const primarySelector = `${primary.provider}/${primary.id}`;
+			const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+			const settings = Settings.isolated({
+				"task.perCallModel": "on",
+				"task.perCallModelFallbacks": "off",
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxDelayMs": 1_000,
+				// The chain entry is approved anyway, through another role.
+				modelRoles: { review: primarySelector, commit: fallbackSelector },
+				"retry.fallbackChains": { default: [fallbackSelector] },
+			});
+
+			const result = await runSubprocess({
+				...baseOptions,
+				cwd,
+				id,
+				agent: { ...baseAgent, tools: ["read"] },
+				modelOverride: [primarySelector],
+				modelRole: "review",
+				perCallModelGrants: { settings, agentName: baseAgent.name },
+				settings,
+				modelRegistry,
+				restrictToolNames: true,
+				enableMCP: false,
+				enableIrc: false,
+				structured: false,
+				keepAlive: false,
+			});
+
+			expect(primary.calls).toHaveLength(1);
+			expect(fallback.calls).toHaveLength(0);
+			expect(result.exitCode).not.toBe(0);
+		} finally {
+			await AgentRegistry.global().get(id)?.session?.dispose();
+			AgentRegistry.global().unregister(id);
+			unregisterCustomApis(sourceId);
+			authStorage.close();
+			await fs.promises.rm(cwd, { recursive: true, force: true });
+		}
+	}, 30_000);
+
 	it("starts a per-call worker on its first candidate with working credentials, a plain spawn on its first", async () => {
 		const unauthed = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const authed = getBundledModel("openai-codex", "gpt-5.6-sol");

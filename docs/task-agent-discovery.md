@@ -265,7 +265,7 @@ Two settings narrow those grants:
 | --- | --- | --- |
 | `select` (default) | yes | yes |
 | `runtime` | no | yes |
-| `off` | no | no; the subagent fails instead of switching |
+| `off` | no | no; the subagent fails instead of switching models, even to one another grant approves |
 
 A model named directly in `task.perCallModelAllow` is a plain grant regardless of `task.perCallModelFallbacks`.
 

@@ -12,6 +12,7 @@ import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capabili
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -704,6 +705,29 @@ describe("persisted subagent revival", () => {
 		}
 
 		expect(ceilings).toEqual([Effort.Low, undefined]);
+	});
+
+	it("keeps a revived per-call worker from switching models under task.perCallModelFallbacks: off", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const modelFallback: boolean[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options?.settings) modelFallback.push(cfgRetryModelFallback.get(options.settings));
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		for (const perCallModel of [true, false]) {
+			const cwd = makeTempDir("@pi-revive-per-call-fallbacks-off-");
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+				agent: "task",
+				perCallModel,
+			});
+			const ref = createRef(sessionFile);
+			const settings = Settings.isolated({ "task.perCallModelFallbacks": "off" });
+			const reviver = await createFactory(cwd, undefined, { settings })(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+		}
+
+		expect(modelFallback).toEqual([false, true]);
 	});
 
 	it("falls back to the ref display name reviving a legacy session file without a persisted agent name", async () => {

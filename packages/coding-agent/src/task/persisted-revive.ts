@@ -33,7 +33,7 @@ import {
 } from "./executor";
 import { discoverAgents, getAgent } from "./discovery";
 import { assertPerCallModelApproved } from "./model-approval";
-import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
+import { cfgTaskAgentAccountPools, cfgTaskMaxEffort, cfgTaskPerCallModelFallbacks } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
@@ -188,6 +188,10 @@ export function createPersistedSubagentReviverFactory(
 						}
 					: undefined),
 				...compactionThresholdSettings(init.compactionThreshold),
+				// Under `task.perCallModelFallbacks: off` a per-call worker fails instead of switching models.
+				...(init.perCallModel && cfgTaskPerCallModelFallbacks.get(ctx.settings) === "off"
+					? { "retry.modelFallback": false }
+					: undefined),
 			});
 			// Restore the `subagent:<id>` fallback chain the spawn installed; the
 			// transcript alone cannot rebuild it (multi-model agent patterns and
