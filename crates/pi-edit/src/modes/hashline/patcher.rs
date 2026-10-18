@@ -354,7 +354,13 @@ fn assert_seen_lines(
 	text: &str,
 ) -> Result<(), EditError> {
 	let Some(snapshot) = store.by_content(canonical, text) else {
-		return Ok(());
+		// A tag can still match after a process restart, but the displayed-line
+		// provenance is gone. Never treat missing provenance as a full read.
+		let anchors = section.collect_anchor_lines()?;
+		if anchors.is_empty() {
+			return Ok(());
+		}
+		return Err(EditError::matched(wide_unseen_lines_message(section.path.as_str(), &anchors)));
 	};
 	let Some(seen) = snapshot.seen_lines else {
 		return Ok(());
@@ -869,6 +875,10 @@ mod lifecycle {
 		}
 
 		async fn edit(&self, patch: &str) -> Result<(), String> {
+			self.edit_with_store(patch, self.store.clone()).await
+		}
+
+		async fn edit_with_store(&self, patch: &str, store: EditStore) -> Result<(), String> {
 			let mut session = Session::new(
 				SessionConfig {
 					mode:               EditMode::Hashline,
@@ -878,7 +888,7 @@ mod lifecycle {
 					enforce_seen_lines: true,
 					raw_input:          true,
 				},
-				self.store.clone(),
+				store,
 			);
 			session.push(patch);
 			session.finish();
@@ -1138,5 +1148,28 @@ mod lifecycle {
 			.await
 			.unwrap();
 		assert_eq!(ctx.text("wide.txt"), full);
+	}
+
+	#[tokio::test]
+	async fn resumed_edit_cannot_replace_a_column_cut_line() {
+		let ctx = Lifecycle::new("resumed.txt", 2);
+		let wide = format!("note: {} END-OF-LINE-TAIL", "abcdefghij".repeat(80));
+		let original = format!("first\n{wide}\n");
+		ctx.write_text("resumed.txt", &original);
+		let tag = ctx.read("resumed.txt", &[1]);
+		let patch = format!("[resumed.txt#{tag}]\nPUT 2.=2:\n+NOTE: {}\n", &wide[6..768]);
+		let resumed_store = EditStore::new();
+		let err = ctx
+			.edit_with_store(&patch, resumed_store.clone())
+			.await
+			.unwrap_err();
+		assert!(err.contains("resumed.txt:2:raw"), "unexpected error: {err}");
+		assert_eq!(ctx.text("resumed.txt"), original);
+
+		resumed_store.record(&ctx.canonical("resumed.txt"), &original, Some(&[2]));
+		let complete =
+			format!("[resumed.txt#{tag}]\nPUT 2.=2:\n+{}\n", wide.replacen("note:", "NOTE:", 1));
+		ctx.edit_with_store(&complete, resumed_store).await.unwrap();
+		assert_eq!(ctx.text("resumed.txt"), original.replacen("note:", "NOTE:", 1));
 	}
 }
