@@ -33,7 +33,7 @@ import {
 } from "./executor";
 import { discoverAgents, getAgent } from "./discovery";
 import { assertPerCallModelApproved } from "./model-approval";
-import { cfgTaskAgentAccountPools } from "./settings";
+import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
@@ -279,9 +279,11 @@ export function createPersistedSubagentReviverFactory(
 					asyncJobManager: ctx.session.asyncJobManager,
 					parentAgentId: ref.parentId,
 					oauthAccountPools,
-					// A per-call model is held to the operator's current grants, not the transcript's.
+					// A per-call model is held to the operator's current grants, not the transcript's,
+					// and to the live task.maxEffort ceiling the spawn ran under.
 					...(init.perCallModel
 						? {
+								thinkingLevelCeiling: cfgTaskMaxEffort.get(ctx.settings),
 								assertDispatchModel: (model: Model) =>
 									assertPerCallModelApproved(
 										model,

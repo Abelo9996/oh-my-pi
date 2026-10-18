@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponse, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
@@ -637,6 +638,29 @@ describe("persisted subagent revival", () => {
 		).rejects.toThrow(/not an approved model/);
 		discover.mockResolvedValue({ agents: [], projectAgentsDir: null });
 		await expect(revive(Settings.isolated()).then(check => check(own))).rejects.toThrow(/not an approved model/);
+	});
+
+	it("restores the task.maxEffort ceiling for a revived per-call worker only", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const ceilings: unknown[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			ceilings.push(options?.thinkingLevelCeiling);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		for (const perCallModel of [true, false]) {
+			const cwd = makeTempDir("@pi-revive-per-call-ceiling-");
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+				agent: "task",
+				perCallModel,
+			});
+			const ref = createRef(sessionFile);
+			const settings = Settings.isolated({ "task.maxEffort": "low" });
+			const reviver = await createFactory(cwd, undefined, { settings })(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+		}
+
+		expect(ceilings).toEqual([Effort.Low, undefined]);
 	});
 
 	it("falls back to the ref display name reviving a legacy session file without a persisted agent name", async () => {
