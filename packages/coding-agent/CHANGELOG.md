@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `read` omitting product details, FAQ answers, and other text inside collapsed page sections ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
+- Fixed `read` omitting product details and answers in clickable collapsed panels while leaving unrelated hidden page text out ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
 
 ## [18.12.2] - 2026-10-18
 

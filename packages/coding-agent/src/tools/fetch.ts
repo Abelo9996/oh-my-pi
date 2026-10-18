@@ -9,7 +9,7 @@ import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } fro
 import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { $which, ptree } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
-import type { Element } from "@oh-my-pi/pi-utils/dom";
+import { type Element, parseHTML, serializeNode } from "@oh-my-pi/pi-utils/dom";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
@@ -482,7 +482,6 @@ function feedField(parent: Element, selector: string): string {
  * Parse RSS/Atom feed to markdown
  */
 async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<string> {
-	const { parseHTML } = await import("@oh-my-pi/pi-utils/dom");
 	try {
 		const doc = parseHTML(content).document;
 
@@ -573,6 +572,65 @@ function stripDataUriImages(markdown: string): string {
 	return markdown.replace(DATA_URI_IMAGE_RE, (_match, alt: string) => (alt.trim() ? `![${alt}]` : ""));
 }
 
+const HIDDEN_MARKUP = /\bhidden(?:\s|=|>)|display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0/i;
+const DISCLOSURE_MARKUP = /aria-controls|role\s*=\s*["']?tab|(?:expander|accordion)-(?:content|panel)/i;
+const HIDDEN_DECLARATION =
+	/^(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:px|em|rem|%)?)(?:\s*!important)?\s*$/i;
+const DISCLOSURE_CLASS = /^([\w-]*(?:expander|accordion))-(?:content|panel)$/;
+
+function hasDisclosureControl(panel: Element, controls: ReadonlySet<string>): boolean {
+	if (panel.id && controls.has(panel.id)) return true;
+	// Expander links may be wrapped in a declarative span directly before their panel.
+	const preceding = panel.previousElementSibling;
+	if (!preceding) return false;
+	for (const name of panel.classList) {
+		const family = DISCLOSURE_CLASS.exec(name)?.[1];
+		if (!family) continue;
+		const header =
+			preceding.localName === "a" || preceding.localName === "button"
+				? preceding
+				: preceding.querySelector(`a.${family}-header, button.${family}-header`);
+		if (header?.classList.contains(`${family}-header`) && header.textContent?.trim()) return true;
+	}
+	return false;
+}
+
+/** Reveal only panels tied to an interactive disclosure; unrelated hidden nodes stay hidden. */
+function exposeDisclosurePanels(html: string): string {
+	if (!HIDDEN_MARKUP.test(html) || !DISCLOSURE_MARKUP.test(html)) return html;
+	const doc = parseHTML(html).document;
+	const controls = new Set<string>();
+	for (const control of doc.querySelectorAll("[aria-controls], [role=tab]")) {
+		if (!control.textContent?.trim()) continue;
+		const role = control.getAttribute("role");
+		if (control.localName !== "button" && role !== "tab" && !control.hasAttribute("aria-expanded")) {
+			continue;
+		}
+		for (const id of control.getAttribute("aria-controls")?.split(/\s+/) ?? []) {
+			if (id) controls.add(id);
+		}
+		const href = control.getAttribute("href");
+		if (role === "tab" && href?.startsWith("#") && href.length > 1) {
+			controls.add(href.slice(1));
+		}
+	}
+
+	let exposed = false;
+	for (const panel of doc.querySelectorAll("[hidden], [style]")) {
+		const hidden = panel.hasAttribute("hidden");
+		const style = panel.getAttribute("style");
+		if (!hidden && (!style || !HIDDEN_MARKUP.test(style))) continue;
+		if (!hasDisclosureControl(panel, controls)) continue;
+		const declarations = style?.split(";");
+		const visible = declarations?.filter(declaration => !HIDDEN_DECLARATION.test(declaration));
+		if (!hidden && visible?.length === declarations?.length) continue;
+		panel.removeAttribute("hidden");
+		if (visible && visible.length !== declarations?.length) panel.setAttribute("style", visible.join(";"));
+		exposed = true;
+	}
+	return exposed ? serializeNode(doc) : html;
+}
+
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */
 export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "firecrawl" | "jina";
 
@@ -626,7 +684,7 @@ export async function renderHtmlToText(
 	const runners: Record<FetchProvider, () => Promise<string | null>> = {
 		// Purely local, no network/subprocess: still works on already-loaded HTML
 		// even after remote/subprocess attempts are aborted by the budget.
-		native: () => htmlToMarkdown(html, { cleanContent: true, hiddenContent: "reachable" }),
+		native: () => htmlToMarkdown(exposeDisclosurePanels(html), { cleanContent: true }),
 		trafilatura: async () => {
 			if (overallSignal?.aborted) return null;
 			const trafilatura = await ensureTool("trafilatura", { signal: overallSignal, silent: true });
