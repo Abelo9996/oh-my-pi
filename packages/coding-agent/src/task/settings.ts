@@ -313,7 +313,7 @@ export const cfgTaskPerCallModel = register({
 				value: "unpinned",
 				label: "Unpinned",
 				description:
-					"Accept `model` only for agents whose own model doesn't change routing (no task.agentModelOverrides entry; bundled `task` counts until modelRoles.task is set)",
+					"Accept `model` only for agents with no model of their own (no task.agentModelOverrides entry; frontmatter model absent or inheriting the parent, so bundled `task` counts until modelRoles.task is set)",
 			},
 			{ value: "on", label: "On", description: "Accept `model` for every agent" },
 		],

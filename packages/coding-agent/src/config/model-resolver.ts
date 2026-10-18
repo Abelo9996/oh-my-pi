@@ -1132,12 +1132,19 @@ export function modelSelectionInheritsSessionModel(value: string | string[] | un
 	return normalizeModelPatternList(value).some(pattern => matchSessionInheritedPattern(pattern) !== undefined);
 }
 
-/** An agent definition whose whole `model` is one of these runs on the session's model. */
-function isSessionInheritedAgentPattern(value: string): boolean {
+/**
+ * Whether an agent's frontmatter `model` leaves it on the session's model instead
+ * of naming its own: no model, a bare `@default` (or `*`/`pi/default`), or a
+ * selection that expands to nothing, such as `@task` while `modelRoles.task` is unset.
+ */
+export function agentModelInheritsSessionModel(
+	agentModel: string | string[] | undefined,
+	settings?: ModelRoleLookup,
+): boolean {
+	const patterns = normalizeModelPatternList(agentModel);
 	return (
-		isDefaultRolePattern(value) ||
-		value === formatModelRoleAlias("task") ||
-		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
+		(patterns.length === 1 && isDefaultRolePattern(patterns[0])) ||
+		resolveConfiguredModelPatterns(patterns, settings).length === 0
 	);
 }
 
@@ -1372,20 +1379,9 @@ function resolveEffectiveAgentModelSelection(
 		return { source: settingsOverride, patterns: overridePatterns };
 	}
 
-	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
-	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
-	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
-	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
-	if (configuredAgentPatterns.length > 0) {
-		if (
-			singleAgentPattern === formatModelRoleAlias("task") ||
-			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
-		) {
-			return { source: agentModel, patterns: configuredAgentPatterns };
-		}
-		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
+	if (!agentModelInheritsSessionModel(agentModel, settings)) {
+		return { source: agentModel, patterns: resolveConfiguredModelPatterns(agentModel, settings) };
 	}
-
 	return { patterns: inheritSessionModel() };
 }
 

@@ -10,6 +10,7 @@ import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
+	agentModelInheritsSessionModel,
 	modelSelectionInheritsSessionModel,
 	normalizeModelPatternList,
 	resolveAgentModelSelection,
@@ -508,17 +509,9 @@ export async function resolveEffectiveSubagentPolicy(
 				"Per-call `model` is disabled (task.perCallModel: off). Omit `model` to use the agent's configured model.",
 			);
 		}
-		// Pinned = the agent's own configuration changes which model it runs. The bundled `task`
-		// agent's `@task` inherits the parent until `modelRoles.task` is set, so it is unpinned by default.
-		const routing = {
-			settings: request.session.settings,
-			activeModelPattern: parentActiveModelPattern,
-			fallbackModelPattern: request.session.getModelString?.(),
-		};
-		const frontmatterPinned = !Bun.deepEquals(
-			resolveAgentModelSelection({ ...routing, agentModel: effectiveAgent.model }).patterns,
-			resolveAgentModelSelection(routing).patterns,
-		);
+		// Pinned = the agent's own configuration names a model, whatever the parent runs right now.
+		// The bundled `task` agent's `@task` inherits the parent until `modelRoles.task` is set, so it is unpinned by default.
+		const frontmatterPinned = !agentModelInheritsSessionModel(effectiveAgent.model, request.session.settings);
 		if (mode === "unpinned" && (configuredOverride !== undefined || frontmatterPinned)) {
 			throw new StructuredSubagentError(
 				"preflight",

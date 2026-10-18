@@ -1689,6 +1689,28 @@ describe("per-call model gate and approval", () => {
 		);
 	});
 
+	it("under `unpinned` decides pinned-ness from the agent's configuration, not the parent's live model", async () => {
+		const opus = "anthropic/claude-opus-4-5";
+		const settings = {
+			"task.perCallModel": "unpinned",
+			modelRoles: { review: "anthropic/claude-sonnet-4-5", default: opus },
+		};
+		const resolve = (agentModel: string[], parent: string) => {
+			mockDiscovery({ ...AGENT, model: agentModel });
+			return resolveEffectiveSubagentPolicy(request({ session: gated(settings, parent), model: "@review" }));
+		};
+		// A concrete frontmatter model spelling the parent's live model is still the agent's own.
+		await expect(resolve([opus], opus)).rejects.toThrow(/own configured model \(frontmatter\)/);
+		// `@smol` borrows modelRoles.default; the parent switching models does not change that.
+		for (const parent of [opus, "anthropic/claude-sonnet-4-5"]) {
+			await expect(resolve(["@smol"], parent)).rejects.toThrow(/own configured model \(frontmatter\)/);
+		}
+		// Parent-inheriting spellings stay unpinned whichever model the parent runs.
+		for (const agentModel of [["@default"], ["*"]]) {
+			await expect(resolve(agentModel, "anthropic/claude-sonnet-4-5")).resolves.toBeDefined();
+		}
+	});
+
 	it("accepts configured, inherited, glob and live-parent grants and rejects a catalog-only model", async () => {
 		mockDiscovery();
 		const on = { "task.perCallModel": "on" };
