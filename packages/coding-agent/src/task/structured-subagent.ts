@@ -24,6 +24,7 @@ import {
 	type CompactionThresholdPair,
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
+import { isKindRole } from "../config/model-roles";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -59,7 +60,6 @@ import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import {
 	assertPerCallModelApproved,
-	isNonChatRole,
 	perCallModelAllowsParent,
 	type PerCallModelGrants,
 	PerCallModelError,
@@ -565,7 +565,7 @@ export async function resolveEffectiveSubagentPolicy(
 			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
 			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
 			const requestedRole = resolveExplicitModelRole(pattern, settings);
-			if (isNonChatRole(requestedRole)) {
+			if (requestedRole && isKindRole(requestedRole)) {
 				throw new StructuredSubagentError(
 					"preflight",
 					`\`model\` ${JSON.stringify(pattern)} names the ${requestedRole} role, which selects non-chat models; a subagent needs a chat model role or model.`,

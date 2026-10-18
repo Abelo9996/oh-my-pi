@@ -21,7 +21,7 @@ import {
 	resolveExplicitModelRole,
 	splitRoleAliasThinkingSuffix,
 } from "../config/model-resolver";
-import { KIND_ROLE_IDS } from "../config/model-roles";
+import { isKindRole } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { expandDefaultRetryFallbackChains } from "../session/retry-fallback-chains";
 import { cfgRetryFallbackChains } from "../session/settings";
@@ -62,11 +62,6 @@ function isSessionToken(pattern: string): boolean {
  */
 export type PerCallModelUse = "select" | "dispatch";
 
-/** Roles that select non-chat models; a subagent cannot run on them. */
-export function isNonChatRole(role: string | undefined): boolean {
-	return role !== undefined && (KIND_ROLE_IDS as readonly string[]).includes(role);
-}
-
 /** `@default` means the parent's live model, as it does in `model`; a set allowlist must name it. */
 export function perCallModelAllowsParent(settings: Settings): boolean {
 	const allow = cfgTaskPerCallModelAllow.get(settings);
@@ -86,7 +81,7 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 					allow.flatMap(entry => resolveExplicitModelRole(entry, settings) ?? []),
 				)
 			: {},
-	).filter(([key]) => !isNonChatRole(key));
+	).filter(([key]) => !isKindRole(key));
 	// Wildcard chain entries are relative provider swaps, not models the operator named.
 	const concrete = (chain: readonly string[] | undefined) => (chain ?? []).filter(entry => !entry.includes("*"));
 	const overrides = cfgTaskAgentModelOverrides.get(settings);
@@ -98,9 +93,8 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 			? // An explicit list replaces the derived grants; a listed role brings its values and fallback chain.
 				allow.flatMap(entry => {
 					const role = resolveExplicitModelRole(entry, settings);
-					if (role === "default") return [];
-					if (isNonChatRole(role)) return [];
 					if (!role) return [entry];
+					if (role === "default" || isKindRole(role)) return [];
 					return [
 						...resolveConfiguredModelPatterns(entry, settings),
 						...concrete(chains.find(([key]) => key === role)?.[1]),
@@ -109,7 +103,7 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 			: [
 					// Values, not aliases: an alias resolves to one model, but every listed candidate is a grant.
 					...Object.entries(settings.getModelRoles())
-						.filter(([role]) => !isNonChatRole(role))
+						.filter(([role]) => !isKindRole(role))
 						.map(([, value]) => value),
 					...chains.map(([, chain]) => concrete(chain)),
 					agentEnabled ? grants.agentModel : undefined,
