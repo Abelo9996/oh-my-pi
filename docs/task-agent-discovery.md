@@ -261,7 +261,7 @@ naming one of them, or a model of another kind, fails preflight with that reason
 
 Two settings narrow those grants:
 
-- `task.perCallModelAllow`: a list of roles or model patterns (for example `["@smol", "@review", "anthropic/*"]`). When set, it replaces the derived grants; a listed role brings its configured value (for an unset role, the configured role the resolver borrows, such as `modelRoles.default` for `@smol`; never built-in role defaults) and its fallback chain. The parent's model counts only if `@default` is listed, and a `@default` request then fails preflight when the parent has no active model. A listed `@default` grants only the parent's live model, not `modelRoles.default` or the `retry.fallbackChains.default` entries (other listed roles without a chain of their own still inherit that chain). With no list the parent's model is always allowed.
+- `task.perCallModelAllow`: a list of roles or model patterns (for example `["@smol", "@review", "anthropic/*"]`). When set, it replaces the derived grants; a listed role brings its configured value (for an unset role, the configured role the resolver borrows, such as `modelRoles.default` for `@smol`; never built-in role defaults) and its fallback chain. The parent's model counts only if `@default` is listed, and a `@default` request then fails preflight when the parent has no active model. A listed `@default` grants only the parent's live model, not `modelRoles.default` or the `retry.fallbackChains.default` entries (other listed roles without a chain of their own still inherit that chain), so a `@default` worker under such a list fails rather than retry on a default-chain model. With no list the parent's model is always allowed.
 - `task.perCallModelFallbacks` decides how concrete `retry.fallbackChains` models count:
 
 | Value | Requestable in `model` | Runtime fallback |
@@ -276,7 +276,9 @@ Preflight rejects the ambiguous literals `default`/`inherit` (use `@default`), b
 selectors, invalid thinking suffixes, and selectors that match no available or no approved model.
 The model the child starts on (after an extension replacement, too) gets the same suffix and
 approval check before its session is created, so a model registry still loading at preflight cannot
-let an invalid suffix or a runtime-only fallback model through as the initial selection.
+let an invalid suffix or a runtime-only fallback model through as the initial selection. (A selector
+that only resolves inside the child session, after extension providers register, gets the
+per-request check below.)
 A requested model without working credentials fails rather than running on the parent's model,
 unless the selection includes `@default`. Once the child runs, every main-loop request is checked
 against the same grants, read from current settings, so a retry fallback, prewalk, extension
@@ -284,8 +286,9 @@ replacement, or settings change cannot move it to an unapproved model; disabling
 its own model and override as grants. Cold revival applies the same check, granting the agent's
 frontmatter model and `task.agentModelOverrides` entry only while that agent is still discovered. A
 running worker keeps the frontmatter model of the definition it spawned with; removing or editing the
-agent file takes effect at its next spawn or cold revival. `hostModel` keeps `model`'s precedence
-but is neither gated nor checked.
+agent file takes effect at its next spawn or cold revival. `task.perCallModel` gates new calls only:
+switching it to `off` leaves running and revived per-call workers on their model, still held to the
+grants. `hostModel` keeps `model`'s precedence but is neither gated nor checked.
 
 A spawn with a per-call `model` runs under `task.maxEffort` as a hard ceiling, exactly like the
 `effort` hint: a `:level` on the selector or on an approved role's value above the ceiling is clamped
