@@ -166,9 +166,13 @@ export function assertPerCallModelApproved(
 	use: PerCallModelUse,
 ): void {
 	if (isPerCallModelApproved(model, grants, registry, use)) return;
+	const selectionGuidance =
+		cfgTaskPerCallModelAllow.get(grants.settings).length > 0
+			? "use a model approved by task.perCallModelAllow, which replaces the derived grants (listed-role fallback grants require task.perCallModelFallbacks: select). Other configured models, including the parent's, are not implicitly approved."
+			: "use a configured role, agent model, task.agentModelOverrides entry, or the parent's model (fallback chain models count only with task.perCallModelFallbacks: select).";
 	throw new PerCallModelError(
 		use === "select"
-			? `Per-call model ${identity(model)} is not configured for agent "${grants.agentName}": use a configured role, agent model, task.agentModelOverrides entry, or the parent's model (fallback chain models count only with task.perCallModelFallbacks: select; task.perCallModelAllow narrows the set). Catalog or credentials alone do not approve a model.`
+			? `Per-call model ${identity(model)} is not configured for agent "${grants.agentName}": ${selectionGuidance} Catalog or credentials alone do not approve a model.`
 			: `Per-call subagent "${grants.agentName}" cannot switch to ${identity(model)}: it is not an approved model (task.perCallModelAllow / task.perCallModelFallbacks).`,
 	);
 }

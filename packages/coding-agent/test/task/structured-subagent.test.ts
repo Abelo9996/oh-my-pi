@@ -1759,7 +1759,7 @@ describe("per-call model gate and approval", () => {
 		// Authenticated and in the catalog, but no role, fallback, agent or parent names it.
 		await expect(
 			resolve(gated({ ...on, modelRoles: { review: "anthropic/claude-sonnet-4-5" } }), "anthropic/claude-opus-4-5"),
-		).rejects.toThrow(/not configured for agent "worker"/);
+		).rejects.toThrow(/use a configured role, agent model/);
 		// A configured role value.
 		await expect(
 			resolve(gated({ ...on, modelRoles: { review: "anthropic/claude-opus-4-5" } }), "anthropic/claude-opus-4-5"),
@@ -1791,6 +1791,34 @@ describe("per-call model gate and approval", () => {
 		settings.setModelRole("review", "anthropic/claude-opus-4-5");
 		expect(isPerCallModelApproved(MODEL, grants, registry, "dispatch")).toBe(false);
 		expect(isPerCallModelApproved(OTHER, grants, registry, "dispatch")).toBe(true);
+	});
+
+	it("gives allowlist recovery guidance even when the rejected model has other configured grants", async () => {
+		const deniedModel = "anthropic/claude-opus-4-5";
+		mockDiscovery({ ...AGENT, model: [deniedModel] });
+		const settings = {
+			"task.perCallModel": "eval",
+			"task.perCallModelAllow": ["@review"],
+			"task.perCallModelFallbacks": "off",
+			"task.agentModelOverrides": { worker: deniedModel },
+			modelRoles: { review: "anthropic/claude-sonnet-4-5", slow: deniedModel },
+		};
+		const childSession = gated(settings, deniedModel);
+		const input = request({ session: childSession, invocationKind: "eval", model: deniedModel });
+		const rejected: unknown = await resolveEffectiveSubagentPolicy(input).catch(error => error);
+		expect(rejected).toBeInstanceOf(StructuredSubagentError);
+		if (!(rejected instanceof Error)) throw new Error("Expected the unlisted model to fail preflight");
+		expect(rejected.message).toContain("use a model approved by task.perCallModelAllow");
+		expect(rejected.message).toContain("replaces");
+		expect(rejected.message).not.toContain("use a configured role");
+		expect(rejected.message).not.toContain("narrows the set");
+		const listed = await resolveEffectiveSubagentPolicy({ ...input, model: "@review" });
+		expect(listed.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+		const withoutList = await resolveEffectiveSubagentPolicy({
+			...input,
+			session: gated({ ...settings, "task.perCallModelAllow": [] }, deniedModel),
+		});
+		expect(withoutList.modelOverride).toEqual([deniedModel]);
 	});
 
 	it("limits grants to task.perCallModelAllow, with a listed role bringing its fallback chain", () => {
