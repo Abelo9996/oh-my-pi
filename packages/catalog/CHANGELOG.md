@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Made Factory Droid's image models the last `image` role defaults, so `generate_image` works with only a Factory login; they run only after earlier candidates are unavailable or fail with an HTTP error, including behind an `image` role set without its own fallback chain
+
 ### Fixed
 
 - Fixed DeepSeek V4.1 Flash image attachments being stripped on publisher-namespaced ids such as `ds/deepseek-flash` ([#16470](https://github.com/can1357/oh-my-pi/pull/16470) by [@ZanDev32](https://github.com/ZanDev32))
@@ -128,7 +132,6 @@
 
 ### Changed
 
-- Made Factory Droid's image models the last `image` role defaults, so `generate_image` works with only a Factory login; every other default image provider still runs first
 - Seeded TypeSafe `jev-1.14.0` and OpenRouter `typesafe/jev-1.14`, and made them the `judge` role defaults and TypeSafe's default model; TypeSafe discovery keeps seeded ids its alias-only `/v1/models` listing omits
 
 ## [18.12.1] - 2026-10-17
