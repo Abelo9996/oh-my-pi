@@ -640,6 +640,49 @@ describe("persisted subagent revival", () => {
 		await expect(revive(Settings.isolated()).then(check => check(own))).rejects.toThrow(/not an approved model/);
 	});
 
+	it("revokes a revived per-call worker's task.agentModelOverrides grant once its agent is disabled or removed", async () => {
+		const own = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!own) throw new Error("Expected bundled anthropic/claude-sonnet-4-5");
+		const reviewer: AgentDefinition = {
+			name: "reviewer",
+			description: "reviewer",
+			systemPrompt: "review",
+			source: "project",
+		};
+		const discover = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: [reviewer], projectAgentsDir: null });
+		let assertDispatchModel: CreateAgentSessionOptions["assertDispatchModel"];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			assertDispatchModel = options?.assertDispatchModel;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		const modelRegistry = { authStorage: {}, getAvailable: () => [own] } as unknown as ModelRegistry;
+		const overrides = { "task.agentModelOverrides": { reviewer: `${own.provider}/${own.id}` } };
+		const revive = async (settings: Settings) => {
+			const cwd = makeTempDir("@pi-revive-per-call-override-");
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+				agent: "reviewer",
+				perCallModel: true,
+			});
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd, undefined, { settings, modelRegistry })(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+			if (!assertDispatchModel) throw new Error("Expected a per-call dispatch check");
+			return assertDispatchModel;
+		};
+
+		await expect(revive(Settings.isolated(overrides)).then(check => check(own))).resolves.toBeUndefined();
+		await expect(
+			revive(Settings.isolated({ ...overrides, "task.disabledAgents": ["reviewer"] })).then(check => check(own)),
+		).rejects.toThrow(/not an approved model/);
+		discover.mockResolvedValue({ agents: [], projectAgentsDir: null });
+		await expect(revive(Settings.isolated(overrides)).then(check => check(own))).rejects.toThrow(
+			/not an approved model/,
+		);
+	});
+
 	it("restores the task.maxEffort ceiling for a revived per-call worker only", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const ceilings: unknown[] = [];

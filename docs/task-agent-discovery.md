@@ -277,7 +277,9 @@ unless the selection includes `@default`. Once the child runs, every main-loop r
 against the same grants, read from current settings, so a retry fallback, prewalk, extension
 replacement, or settings change cannot move it to an unapproved model; disabling the agent revokes
 its own model and override as grants. Cold revival applies the same check, granting the agent's
-frontmatter model only while that agent is still discovered. `hostModel` keeps `model`'s precedence
+frontmatter model and `task.agentModelOverrides` entry only while that agent is still discovered. A
+running worker keeps the frontmatter model of the definition it spawned with; removing or editing the
+agent file takes effect at its next spawn or cold revival. `hostModel` keeps `model`'s precedence
 but is neither gated nor checked.
 
 A spawn with a per-call `model` runs under `task.maxEffort` as a hard ceiling, exactly like the

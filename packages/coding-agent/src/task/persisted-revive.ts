@@ -200,8 +200,8 @@ export function createPersistedSubagentReviverFactory(
 			const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(ctx.settings));
 			const oauthAccountPools =
 				init.agent && Object.hasOwn(agentAccountPools, init.agent) ? agentAccountPools[init.agent] : undefined;
-			// The agent's own model grants a per-call worker only while that agent is still configured.
-			const perCallAgentModel =
+			// The agent's own model and override grant a per-call worker only while that agent is still discovered.
+			const perCallAgent =
 				init.perCallModel && init.agent
 					? getAgent(
 							[
@@ -215,7 +215,7 @@ export function createPersistedSubagentReviverFactory(
 								...ctx.session.getSessionAgents(),
 							],
 							init.agent,
-						)?.model
+						)
 					: undefined;
 			const persistedModelPattern = restoredSeance
 				? restoredSeance.modelPattern
@@ -290,7 +290,8 @@ export function createPersistedSubagentReviverFactory(
 										{
 											settings: ctx.settings,
 											agentName: init.agent ?? ref.displayName,
-											agentModel: perCallAgentModel,
+											agentModel: perCallAgent?.model,
+											agentRemoved: perCallAgent === undefined,
 											parentModelPattern: ctx.session.model
 												? `${ctx.session.model.provider}/${ctx.session.model.id}`
 												: undefined,

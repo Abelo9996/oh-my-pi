@@ -46,6 +46,8 @@ export interface PerCallModelGrants {
 	agentName: string;
 	/** The selected agent's frontmatter `model`. */
 	agentModel?: string | string[];
+	/** The selected agent is no longer discovered (cold revival): its model and override grant nothing. */
+	agentRemoved?: boolean;
 	/** The parent session's live model selector. */
 	parentModelPattern?: string;
 }
@@ -86,8 +88,8 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 	const concrete = (chain: readonly string[] | undefined) => (chain ?? []).filter(entry => !entry.includes("*"));
 	const overrides = cfgTaskAgentModelOverrides.get(settings);
 	const parentAllowed = perCallModelAllowsParent(settings);
-	// A disabled agent's own model and override stop granting, like a removed one.
-	const agentEnabled = !cfgTaskDisabledAgents.get(settings).includes(agentName);
+	// A disabled or removed agent's own model and override stop granting.
+	const agentEnabled = !grants.agentRemoved && !cfgTaskDisabledAgents.get(settings).includes(agentName);
 	const sources: Array<string | string[] | undefined> =
 		allow.length > 0
 			? // An explicit list replaces the derived grants; a listed role brings its configured values
