@@ -91,7 +91,7 @@ describe("task schema (single-spawn)", () => {
 });
 
 describe("task schema seance fields", () => {
-	it("accepts source and model selectors in every flat/batch isolation mode", () => {
+	it("accepts source and exact model selectors when per-call models are enabled", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({
@@ -99,10 +99,9 @@ describe("task schema seance fields", () => {
 					isolationEnabled,
 					evalToolsEnabled: false,
 					seanceFields: seanceTaskSchemaFields,
+					perCallModel: true,
 				});
-				const modelSelector = batchEnabled
-					? ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]
-					: "anthropic/claude-sonnet-4-5";
+				const modelSelector = "anthropic/claude-sonnet-4-5";
 				const item = {
 					agent: "seance",
 					task: "Read historical context.",
@@ -195,7 +194,7 @@ Custom prompt.`,
 		const ordinary = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
 		const ordinarySchema = JSON.stringify(ordinary.parameters.toJsonSchema());
 		expect(ordinarySchema).toContain('"sourceSession"');
-		expect(ordinarySchema).toContain('"model"');
+		expect(ordinarySchema).not.toContain('"model"');
 		expect(ordinary.description).toContain("`seance`");
 		expect(ordinary.description).toContain("Historical consults");
 	});
@@ -246,41 +245,24 @@ describe("task spawn validation", () => {
 		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
 	});
 
-	it("leaves a bundled seance's own `model` to seance resolution instead of the per-call selector rules", async () => {
-		// A catalog id such as `cursor/default` can be selected as bare `default` for seance, as on main.
+	it.each([
+		{ batch: false, mode: "off" },
+		{ batch: true, mode: "eval" },
+	])("rejects seance model input before reading the source under $mode with batch=$batch", async ({ batch, mode }) => {
+		const item = {
+			agent: "seance",
+			task: "Read historical context.",
+			solutionSpace: "focused read-only inspection",
+			sourceSession: "/missing/source.jsonl",
+			model: "anthropic/claude-sonnet-4-5",
+		};
 		const text = await executeText(
-			{
-				agent: "seance",
-				task: "Read historical context.",
-				solutionSpace: "focused read-only inspection",
-				sourceSession: "/missing/source.jsonl",
-				model: "default",
-			},
+			batch ? { context: "Historical consult.", tasks: [item] } : item,
 			[bundledSeance],
+			{ "task.batch": batch, "task.perCallModel": mode },
 		);
-		expect(text).not.toContain("ambiguous `model`");
-		expect(text).toContain("selected session file was not found");
-	});
-
-	it("leaves a batched bundled seance item's own `model` to seance resolution", async () => {
-		const text = await executeText(
-			{
-				context: "Historical consult.",
-				tasks: [
-					{
-						agent: "seance",
-						task: "Read historical context.",
-						solutionSpace: "focused read-only inspection",
-						sourceSession: "/missing/source.jsonl",
-						model: "default",
-					},
-				],
-			},
-			[bundledSeance],
-			{ "task.batch": true },
-		);
-		expect(text).not.toContain("ambiguous `model`");
-		expect(text).toContain("selected session file was not found");
+		expect(text).toContain(`task.perCallModel: ${mode}`);
+		expect(text).not.toContain("selected session file was not found");
 	});
 
 	it("names seance for a misplaced batch-container `sourceSession` and stays agent-neutral for `model` alone", () => {
@@ -313,25 +295,21 @@ describe("per-call model schema boundaries", () => {
 		}
 	}
 
-	it("accepts ordered model arrays on both flat calls and batch items", () => {
-		const models = ["p/preferred:high", "p/alternative"];
-		const flat = getTaskSchema({ isolationEnabled: false, batchEnabled: false, perCallModel: true })({
-			task: "Do work",
-			solutionSpace: "c",
-			model: models,
-		});
-		expect(flat instanceof type.errors).toBe(false);
-		if (flat instanceof type.errors) throw new Error(flat.summary);
-		expect(flat).toHaveProperty("model", models);
-		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, perCallModel: true })({
-			context: "Shared context",
-			tasks: [{ task: "Do work", solutionSpace: "c", model: models }],
-		});
-		expect(batch instanceof type.errors).toBe(false);
+	it("rejects ordered model arrays on flat calls and batch items", () => {
+		const item = { task: "Do work", solutionSpace: "c", model: ["p/preferred", "p/alternative"] };
+		for (const batchEnabled of [false, true]) {
+			const schema = getTaskSchema({ isolationEnabled: false, batchEnabled, perCallModel: true });
+			expect(schema(batchEnabled ? { context: "Shared context", tasks: [item] } : item) instanceof type.errors).toBe(
+				true,
+			);
+		}
 	});
 
 	it("advertises `model` in the task schema and prompt only for task-enabled modes", async () => {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [bundledSeance],
+			projectAgentsDir: null,
+		});
 		const advertised = async (perCallModel: string) => {
 			const tool = await TaskTool.create(createSession({ settings: { "task.perCallModel": perCallModel } }));
 			return {

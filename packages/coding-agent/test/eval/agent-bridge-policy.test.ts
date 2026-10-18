@@ -367,17 +367,20 @@ describe("runEvalAgent", () => {
 		const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
 
 		await expect(
-			runEvalAgent({ prompt: "work", agent: "reviewer", model: "@smol" }, { session: makeSession({ settings }) }),
+			runEvalAgent(
+				{ prompt: "work", agent: "reviewer", model: "p/requested" },
+				{ session: makeSession({ settings }) },
+			),
 		).rejects.toThrow(/task\.perCallModel: off/);
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 
-	it("rejects an ambiguous or blank per-call model on agent() before dispatch", async () => {
+	it("rejects an unqualified or blank per-call model on agent() before dispatch", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
 		await expect(runEvalAgent({ prompt: "work", model: "default" }, { session: makeSession() })).rejects.toThrow(
-			/"@default"/,
+			/invalid `model`/,
 		);
 		await expect(runEvalAgent({ prompt: "work", model: "   " }, { session: makeSession() })).rejects.toThrow(
 			/invalid `model`/,
@@ -1567,7 +1570,7 @@ describe("runEvalAgent isolation", () => {
 	});
 });
 
-describe("agent model arrays", () => {
+describe("agent exact model selection", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		AgentRegistry.resetGlobalForTests();
@@ -1575,13 +1578,15 @@ describe("agent model arrays", () => {
 		await Promise.all([...jobManagers].map(manager => manager.dispose()));
 		jobManagers.clear();
 	});
-	it("routes an ordered model array without substituting the agent definition", async () => {
+	it("rejects a model array before dispatching an agent", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-		await runEvalAgentAndWait(
-			{ prompt: "work", agent: "reviewer", model: ["p/preferred:high", "p/alternative"] },
-			{ session: makeSession() },
-		);
-		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/preferred:high", "p/alternative"]);
+		await expect(
+			runEvalAgentAndWait(
+				{ prompt: "work", agent: "reviewer", model: ["p/preferred:high", "p/alternative"] },
+				{ session: makeSession() },
+			),
+		).rejects.toThrow(/invalid/);
+		expect(runSpy).not.toHaveBeenCalled();
 	});
 });

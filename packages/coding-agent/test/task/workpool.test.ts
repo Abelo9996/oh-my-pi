@@ -462,7 +462,7 @@ describe("WorkPool model selection", () => {
 	it("selects each worker on the first turn and reuses its session on subsequent turns", async () => {
 		const session = makeSession([], 1);
 		const first = Promise.withResolvers<void>();
-		const selected = ["@reviewer:high", "p/alternative"];
+		const selected = "p/reviewer:high";
 		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			await first.promise;
 			const id = request.identity?.id ?? "missing";
@@ -497,11 +497,11 @@ describe("WorkPool model selection", () => {
 			return execution(id);
 		});
 		const first = new WorkPool(session, { name: "first", policy: POLICY, model: "p/first" });
-		const second = new WorkPool(session, { name: "second", policy: POLICY, model: ["p/second", "p/third"] });
+		const second = new WorkPool(session, { name: "second", policy: POLICY, model: "p/second" });
 		first.push(["one"]);
 		second.push(["two"]);
 		await Promise.all([finishPool(session, first), finishPool(session, second)]);
 		expect(selections.get(first.agents[0]!.id)).toBe("p/first");
-		expect(selections.get(second.agents[0]!.id)).toEqual(["p/second", "p/third"]);
+		expect(selections.get(second.agents[0]!.id)).toBe("p/second");
 	});
 });

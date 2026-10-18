@@ -94,6 +94,24 @@ describe("runEvalWorkpool", () => {
 });
 
 describe("workpool model validation", () => {
+	it("does not grant retry fallback models to a pool without an explicit fallback opt-in", async () => {
+		const primary = createMockModel();
+		const fallback = createMockModel({ id: "fallback" });
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
+		const session = Object.assign(
+			makeSession({
+				"task.perCallModel": "on",
+				modelRoles: { review: "mock/mock-model" },
+				"retry.fallbackChains": { review: ["mock/fallback"] },
+			}),
+			{ modelRegistry: { getAvailable: () => [primary, fallback] } },
+		);
+		await expect(
+			runEvalWorkpool({ op: "create", name: "fallback", agent: "scout", model: "mock/fallback" }, { session }),
+		).rejects.toThrow(/not configured/);
+		expect(WorkPoolRegistry.global().get("Main", "fallback")).toBeUndefined();
+	});
+
 	it("eval mode admits an approved pinned worker and rejects an unapproved model before creating a pool", async () => {
 		const approved = createMockModel();
 		const unapproved = createMockModel({ id: "unapproved" });
@@ -112,7 +130,7 @@ describe("workpool model validation", () => {
 		).rejects.toThrow(/not configured/);
 		expect(WorkPoolRegistry.global().get("Main", "denied")).toBeUndefined();
 		await expect(
-			runEvalWorkpool({ op: "create", name: "approved", agent: "scout", model: "@review" }, { session }),
+			runEvalWorkpool({ op: "create", name: "approved", agent: "scout", model: "mock/mock-model" }, { session }),
 		).resolves.toEqual({ name: "approved", agent: "scout", limit: 2 });
 	});
 
@@ -121,7 +139,8 @@ describe("workpool model validation", () => {
 		{ model: [], reason: /invalid `model` value/ },
 		{ model: ["p/valid", ""], reason: /invalid `model` value/ },
 		{ model: [42], reason: /invalid `model` value/ },
-		{ model: "default", reason: /ambiguous `model` value/ },
+		{ model: "@smol", reason: /invalid `model` value/ },
+		{ model: ["p/valid"], reason: /invalid `model` value/ },
 	]) {
 		it(`rejects invalid selection ${JSON.stringify(model)} before registering a pool`, async () => {
 			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
@@ -141,7 +160,7 @@ describe("workpool model validation", () => {
 			throw new Error("stop after dispatch");
 		});
 		const session = makeSession({ "task.perCallModel": perCallModel, modelRoles: { smol: "p/small" } });
-		const model = ["@smol", "@default"];
+		const model = "p/small";
 		await runEvalWorkpool({ op: "create", name: "picked", agent: "scout", model }, { session });
 		await runEvalWorkpool({ op: "push", name: "picked", items: ["one"] }, { session });
 		expect(await requested.promise).toEqual(model);

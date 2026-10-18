@@ -347,7 +347,7 @@ describe("requested candidate authentication order", () => {
 		expect(resolved.authFallbackUsed).toBe(false);
 	});
 
-	test("a per-call `model` exhausts candidates inside a configured role", async () => {
+	test("a per-call `model` rejects a configured role instead of expanding its candidates", async () => {
 		const settings = Settings.isolated({ modelRoles: { qa: "opencode-zen/qwen3.6-plus-free,deepseek/shared-id" } });
 		const registry = createMockRegistry({
 			models: [parentModel, unauthedTaskModel, sharedModel],
@@ -361,7 +361,7 @@ describe("requested candidate authentication order", () => {
 			undefined,
 			perCall,
 		);
-		expect(resolved.model?.id).toBe("shared-id");
+		expect(resolved.model).toBeUndefined();
 		expect(resolved.authFallbackUsed).toBe(false);
 	});
 

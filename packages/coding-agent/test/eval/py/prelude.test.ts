@@ -289,7 +289,7 @@ describe("python prelude", () => {
 });
 
 describe("python workpool model selection", () => {
-	it("forwards model arrays and preserves omission through the real Python bridge", async () => {
+	it("forwards an exact model selector and preserves omission through the real Python bridge", async () => {
 		const requests: unknown[] = [];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
@@ -300,7 +300,7 @@ describe("python workpool model selection", () => {
 			},
 		});
 		try {
-			const result = await runPrelude('workpool("scout", model=["@smol", "p/backup"])\nworkpool("scout")', {
+			const result = await runPrelude('workpool("scout", model="p/chosen:high")\nworkpool("scout")', {
 				PI_TOOL_BRIDGE_URL: server.url.toString(),
 				PI_TOOL_BRIDGE_TOKEN: "test-token",
 				PI_TOOL_BRIDGE_SESSION: "test-session",
@@ -312,7 +312,7 @@ describe("python workpool model selection", () => {
 					session: "test-session",
 					run: null,
 					name: "__workpool__",
-					args: { op: "create", agent: "scout", model: ["@smol", "p/backup"] },
+					args: { op: "create", agent: "scout", model: "p/chosen:high" },
 				},
 				{ session: "test-session", run: null, name: "__workpool__", args: { op: "create", agent: "scout" } },
 			]);

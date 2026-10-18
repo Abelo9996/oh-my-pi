@@ -12,6 +12,7 @@
  * way here as they do everywhere else.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
@@ -45,6 +46,7 @@ export class PerCallModelError extends Error {
 export interface PerCallModelGrants {
 	settings: Settings;
 	agentName: string;
+	agentSource?: AgentSource;
 	/** The selected agent's frontmatter `model`. */
 	agentModel?: string | string[];
 	/** The selected agent is no longer discovered (cold revival): its model and override grant nothing. */
@@ -65,7 +67,6 @@ function isSessionToken(pattern: string): boolean {
  */
 export type PerCallModelUse = "select" | "dispatch";
 
-/** `@default` means the parent's live model, as it does in `model`; a set allowlist must name it. */
 export function perCallModelAllowsParent(settings: Settings): boolean {
 	const allow = cfgTaskPerCallModelAllow.get(settings);
 	return allow.length === 0 || allow.some(entry => resolveExplicitModelRole(entry, settings) === "default");
@@ -111,7 +112,9 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 						.filter(([role]) => !isKindRole(role))
 						.map(([, value]) => resolveConfiguredModelPatterns(value, settings, { builtInDefaults: false })),
 					...chains.map(([, chain]) => concrete(chain)),
-					agentEnabled ? grants.agentModel : undefined,
+					agentEnabled && (grants.agentSource === "bundled" || grants.agentSource === "user")
+						? grants.agentModel
+						: undefined,
 					agentEnabled && Object.hasOwn(overrides, agentName) ? overrides[agentName] : undefined,
 				];
 	if (parentAllowed) sources.push(grants.parentModelPattern);
@@ -169,7 +172,7 @@ export function assertPerCallModelApproved(
 	const selectionGuidance =
 		cfgTaskPerCallModelAllow.get(grants.settings).length > 0
 			? "use a model approved by task.perCallModelAllow, which replaces the derived grants (listed-role fallback grants require task.perCallModelFallbacks: select). Other configured models, including the parent's, are not implicitly approved."
-			: "use a configured role, agent model, task.agentModelOverrides entry, or the parent's model (fallback chain models count only with task.perCallModelFallbacks: select).";
+			: "use an exact model approved by a configured role, bundled or user-level agent model, task.agentModelOverrides entry, or the parent's model (fallback chain models count only with task.perCallModelFallbacks: select).";
 	throw new PerCallModelError(
 		use === "select"
 			? `Per-call model ${identity(model)} is not configured for agent "${grants.agentName}": ${selectionGuidance} Catalog or credentials alone do not approve a model.`

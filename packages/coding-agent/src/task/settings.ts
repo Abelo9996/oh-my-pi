@@ -302,26 +302,30 @@ export const cfgTaskPerCallModel = register({
 		group: "Subagents",
 		label: "Per-Call Model",
 		description:
-			"Whether task items, eval agent() and workpool() accept a per-call model. A requested model must be one the operator configured (roles, fallback chains, agent models, overrides) or the parent's live model.",
+			"Whether task items, eval agent() and workpool() accept one exact provider/model[:level] selector. The model must be operator-approved; roles and arrays are not accepted. An agentModelOverrides entry conflicts with a per-call model.",
 		options: [
 			{
 				value: "off",
 				label: "Off",
-				description:
-					"Hide `model`: the task schema drops it, unless the bundled `seance` is advertised, in which case a non-seance call that passes it fails preflight; eval agent() and workpool() reject it",
+				description: "Hide `model` from task schemas and prompts; eval agent() and workpool() reject it",
 			},
 			{
 				value: "unpinned",
 				label: "Unpinned",
 				description:
-					"Accept `model` only for agents with no model of their own (no task.agentModelOverrides entry; frontmatter model absent or inheriting the parent, so bundled `task` counts until modelRoles.task is set)",
+					"Accept `model` only without a task.agentModelOverrides entry or a bundled/user-level frontmatter model that pins the agent; project frontmatter does not pin a model. Bundled `task` counts until modelRoles.task is set",
 			},
-			{ value: "on", label: "On", description: "Accept `model` for every agent" },
+			{
+				value: "on",
+				label: "On",
+				description:
+					"Accept `model` for agents without a task.agentModelOverrides entry, including agents with a frontmatter model",
+			},
 			{
 				value: "eval",
 				label: "Eval only",
 				description:
-					"Accept `model` for every agent in eval agent() and workpool(); task items behave as off, with seance unchanged",
+					"Accept `model` in eval agent() and workpool() unless task.agentModelOverrides conflicts; task items behave as off",
 			},
 		],
 	},
@@ -342,7 +346,7 @@ export const cfgTaskPerCallModelAllow = register({
 		label: "Per-Call Model Allowlist",
 		editor: "json",
 		description:
-			'Chat roles or model patterns a per-call model may use, e.g. ["@smol", "@review", "anthropic/*"]; replaces the derived grants, and a listed pattern can grant models no role names. A listed role includes its retry fallback chain (subject to task.perCallModelFallbacks); list "@default" to allow the parent\'s model (only that model, not the default fallback chain). Empty: every configured chat role, concrete retry fallback chain entry, agent model and override, plus the parent\'s model.',
+			'Chat roles or model patterns a per-call model may use, e.g. ["@smol", "@review", "anthropic/*"]; replaces the derived grants, and a listed pattern can grant models no role names. A listed role includes its retry fallback chain (subject to task.perCallModelFallbacks); list "@default" to allow the parent\'s model (only that model, not the default fallback chain). Empty: configured chat roles, bundled/user-level agent models, agent overrides and the parent\'s model; concrete chain entries count when enabled by task.perCallModelFallbacks.',
 	},
 });
 
@@ -350,7 +354,7 @@ export const cfgTaskPerCallModelFallbacks = register({
 	id: "task.perCallModelFallbacks",
 	type: "enum",
 	values: ["select", "runtime", "off"] as const,
-	default: "select",
+	default: "off",
 	ui: {
 		tab: "tasks",
 		group: "Subagents",

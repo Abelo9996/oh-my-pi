@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { resolveModelOverrideWithAuthFallback, resolveSessionModelSelector } from "../config/model-resolver";
 import { sessionFilesFromDisk } from "../internal-urls/registry-helpers";
 import seanceAssignmentTemplate from "../prompts/system/seance-assignment.md" with { type: "text" };
@@ -18,6 +19,7 @@ import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 import { getBundledAgent } from "./agents";
+import { assertPerCallModelApproved, isPerCallModelApproved, type PerCallModelGrants } from "./model-approval";
 import { SEANCE_AGENT_NAME } from "./seance-policy";
 import type { AgentDefinition } from "./types";
 
@@ -156,10 +158,8 @@ export async function resolveSeanceSource(
 	}
 	throw new Error(`Session "${label}" was not found.`);
 }
-const modelSelectorInputSchema = type("string | string[]");
 export const seanceTaskSchemaFields = {
 	"sourceSession?": type("string"),
-	"model?": modelSelectorInputSchema,
 };
 export const seanceTaskGuidance = seanceTaskGuidanceTemplate;
 
@@ -183,16 +183,8 @@ function validateSeanceFields(
 	if ("tools" in item && item.tools?.length)
 		return `${label} cannot pass custom tools to the read-only \`${SEANCE_AGENT_NAME}\` agent.`;
 	const model: unknown = item.model;
-	if (
-		model !== undefined &&
-		!(
-			(typeof model === "string" && model.trim().length > 0) ||
-			(Array.isArray(model) &&
-				model.length > 0 &&
-				model.every(value => typeof value === "string" && value.trim().length > 0))
-		)
-	) {
-		return `${label} has an invalid \`model\` selector. Provide a non-empty selector or selector array.`;
+	if (model !== undefined && !(typeof model === "string" && model.trim().length > 0)) {
+		return `${label} has an invalid \`model\` selector. Provide a non-empty selector.`;
 	}
 	return undefined;
 }
@@ -226,6 +218,8 @@ export async function prepareSeance(context: {
 	agent: AgentDefinition;
 	sourceSession?: string;
 	model?: string | string[];
+	modelGrants?: PerCallModelGrants;
+	exactModel?: boolean;
 	planMode: boolean;
 	isolationRequested: boolean;
 	hasCustomTools: boolean;
@@ -260,7 +254,14 @@ export async function prepareSeance(context: {
 	const modelPatterns: string[] = [];
 	for (const selector of requestedModels) {
 		if (requestedModel === undefined) {
-			if (resolveSessionModelSelector(modelRegistry, selector)) modelPatterns.push(selector);
+			const resolved = resolveSessionModelSelector(modelRegistry, selector);
+			if (
+				resolved &&
+				(!context.modelGrants ||
+					isPerCallModelApproved(resolved.model, context.modelGrants, modelRegistry, "select"))
+			) {
+				modelPatterns.push(selector);
+			}
 			continue;
 		}
 		const resolved = await resolveModelOverrideWithAuthFallback(
@@ -269,10 +270,25 @@ export async function prepareSeance(context: {
 			modelRegistry,
 			context.session.settings,
 			context.session.getSessionId?.() ?? undefined,
+			{ perCallModel: context.exactModel },
 		);
-		if (resolved.model && modelRegistry.hasConfiguredAuth(resolved.model)) modelPatterns.push(selector);
+		if (resolved.model && modelRegistry.hasConfiguredAuth(resolved.model)) {
+			if (context.modelGrants)
+				assertPerCallModelApproved(resolved.model, context.modelGrants, modelRegistry, "select");
+			const identity = `${resolved.model.provider}/${resolved.model.id}`;
+			modelPatterns.push(
+				context.modelGrants && !context.exactModel
+					? resolved.explicitThinkingLevel
+						? formatModelSelectorValue(identity, resolved.thinkingLevel)
+						: identity
+					: selector,
+			);
+		}
 	}
 	if (modelPatterns.length === 0) {
+		if (requestedModel === undefined && context.modelGrants) {
+			throw new Error("No approved saved model can serve this source. Configure an approved model or use /seance.");
+		}
 		throw new Error(
 			"No available saved model can serve this source. Select an available model explicitly with `--model`.",
 		);

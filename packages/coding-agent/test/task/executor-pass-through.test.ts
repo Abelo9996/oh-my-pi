@@ -126,6 +126,7 @@ function createModelRegistry(
 	return {
 		authStorage: {},
 		refresh: async () => {},
+		awaitBackgroundRefresh: async () => {},
 		getAvailable: () => available,
 		getApiKey,
 	} as unknown as ModelRegistry;
@@ -560,7 +561,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			label: "rejects an unapproved model that fits the ceiling",
 			efforts: [Effort.Low, Effort.High],
 			approved: false,
-			error: /not an approved model/,
+			error: /not configured/,
 		},
 		{
 			label: "clamps an approved model's explicit effort to the ceiling",
@@ -569,7 +570,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			error: undefined,
 		},
 	]) {
-		it(`${label} when per-call resolution is deferred to the session`, async () => {
+		it(`${label} after per-call background discovery completes`, async () => {
 			const cwd = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-per-call-deferred-ceiling-"));
 			const authStorage = await AuthStorage.create(":memory:");
 			const id = "subagent-per-call-deferred-ceiling";
@@ -594,10 +595,8 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 				vi.spyOn(modelRegistry, "find").mockImplementation((provider, modelId) =>
 					warm && provider === model.provider && modelId === model.id ? model : find(provider, modelId),
 				);
-				const createAgentSession = sdkModule.createAgentSession;
-				vi.spyOn(sdkModule, "createAgentSession").mockImplementation(options => {
+				vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockImplementation(async () => {
 					warm = true;
-					return createAgentSession(options);
 				});
 				const settings = Settings.isolated({
 					"task.maxEffort": "low",

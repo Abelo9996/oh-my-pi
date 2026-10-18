@@ -138,6 +138,45 @@ describe("runSubprocess per-agent prewalk", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("ignores project model, prewalk and advisor selectors while retaining parent and configured routing", async () => {
+		const spy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+		const primarySelector = `${primary.provider}/${primary.id}`;
+		const targetSelector = `${target.provider}/${target.id}`;
+		const agent: AgentDefinition = {
+			...baseAgent,
+			source: "project",
+			model: [targetSelector],
+			prewalk: targetSelector,
+			advisor: targetSelector,
+		};
+		const result = await runSubprocess({
+			...baseOptions("project-model-routing", Settings.isolated()),
+			agent,
+			parentActiveModelPattern: primarySelector,
+		});
+		expect(result.exitCode).toBe(0);
+		const forwarded = spy.mock.calls[0]?.[0];
+		expect(forwarded?.model?.id).toBe(primary.id);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(forwarded?.settings?.getModelRole("advisor")).toBeUndefined();
+		const configured = await runSubprocess({
+			...baseOptions(
+				"project-configured-routing",
+				Settings.isolated({
+					"task.agentPrewalk": { task: targetSelector },
+					"task.agentAdvisor": { task: targetSelector },
+				}),
+			),
+			agent,
+			modelOverride: [primarySelector],
+		});
+		expect(configured.exitCode).toBe(0);
+		expect(spy.mock.calls[1]?.[0]?.prewalk?.target.id).toBe(target.id);
+		expect(spy.mock.calls[1]?.[0]?.settings?.getModelRole("advisor")).toBe(targetSelector);
+	});
+
 	it("resolves a frontmatter prewalk pattern to a target for the spawned session", async () => {
 		const spy = vi
 			.spyOn(sdkModule, "createAgentSession")

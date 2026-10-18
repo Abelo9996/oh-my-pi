@@ -106,6 +106,7 @@ import { isCompletionProbeEnabled, startCompletionProbe } from "./completion-pro
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
+import { getAgentModelConfig } from "./agents";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -4072,6 +4073,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
+	const agentModelConfig = getAgentModelConfig(agent);
 	// Per-agent advisor: the agent definition's `advisor` frontmatter or the
 	// `task.agentAdvisor` settings override (agent name → "on"/"off"/model
 	// pattern) pairs the spawned session with an advisor. Subagents default to
@@ -4084,7 +4086,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		? undefined
 		: resolveAgentAdvisorSelection({
 				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
-				agentAdvisor: agent.advisor,
+				agentAdvisor: agentModelConfig.advisor,
 			});
 	const advisorRolePattern = advisorSelection?.model
 		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
@@ -4161,7 +4163,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		isIrcEnabled(subagentSettings, childDepth) &&
 		(toolNames === undefined || toolNames.includes("write"));
 
-	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
+	const modelPatterns = normalizeModelPatterns(
+		modelOverride ?? agentModelConfig.model ?? options.parentActiveModelPattern,
+	);
 	const sessionFile = subtaskSessionFile ?? null;
 	const spawnsEnv = atMaxDepth
 		? ""
@@ -4290,6 +4294,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			checkAbort();
 
+			if (options.perCallModelGrants) {
+				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+			}
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			const inheritedRetryFallbackChain =
 				configuredModelPatterns.length === 1
@@ -4315,6 +4322,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					{ perCallModel: options.perCallModelGrants !== undefined },
 				),
 			);
+			if (options.perCallModelGrants && !model) {
+				throw new PerCallModelError(
+					`Requested exact model ${JSON.stringify(modelPatterns)} is unavailable. Use an exact provider/model[:level] selector; do not substitute another model.`,
+				);
+			}
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -4441,7 +4453,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				? undefined
 				: resolveAgentPrewalkPattern({
 						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+						agentPrewalk: resolveAgentPrewalkDefault(
+							{ ...agent, prewalk: agentModelConfig.prewalk },
+							cfgTaskPrewalk.get(settings),
+						),
 					});
 			const perCallModelGrants = options.perCallModelGrants;
 			if (prewalkPattern) {
@@ -4751,7 +4766,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				task,
 				tools: persistedSubagentTools,
 				agent: agent.name,
-				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
+				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agentModelConfig.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
 				...(perCallModelGrants ? { perCallModel: true } : {}),
 				// Deferred model resolution installs this role inside createAgentSession,

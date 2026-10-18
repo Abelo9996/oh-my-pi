@@ -605,7 +605,7 @@ describe("persisted subagent revival", () => {
 			name: "reviewer",
 			description: "reviewer",
 			systemPrompt: "review",
-			source: "project",
+			source: "user",
 			model: [`${own.provider}/${own.id}`],
 		};
 		const discover = vi
@@ -633,6 +633,9 @@ describe("persisted subagent revival", () => {
 
 		// The spawn approved the model through the agent's frontmatter; revival keeps that grant.
 		await expect(revive(Settings.isolated()).then(check => check(own))).resolves.toBeUndefined();
+		discover.mockResolvedValue({ agents: [{ ...reviewer, source: "project" }], projectAgentsDir: null });
+		await expect(revive(Settings.isolated()).then(check => check(own))).rejects.toThrow(/not an approved model/);
+		discover.mockResolvedValue({ agents: [reviewer], projectAgentsDir: null });
 		// A disabled or removed agent no longer grants its model.
 		await expect(
 			revive(Settings.isolated({ "task.disabledAgents": ["reviewer"] })).then(check => check(own)),
@@ -836,10 +839,51 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.agentName).not.toBe("sub");
 	});
 
+	it("discards parked project advisor authority unless current operator settings configure it", async () => {
+		const cwd = makeTempDir("@pi-project-advisor-revive-");
+		const discover = vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "reviewer",
+					description: "reviewer",
+					systemPrompt: "review",
+					source: "project",
+					advisor: "moonshot/k3",
+				},
+			],
+			projectAgentsDir: null,
+		});
+		const captured: Settings[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options?.settings) captured.push(options.settings);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		const revive = async (settings: Settings) => {
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, "moonshot/k3", {
+				agent: "reviewer",
+			});
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd, undefined, { settings })(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+		};
+		await revive(Settings.isolated());
+		await revive(Settings.isolated({ "task.agentAdvisor": { reviewer: "anthropic/claude-sonnet-4-5" } }));
+		discover.mockResolvedValue({ agents: [], projectAgentsDir: null });
+		await revive(Settings.isolated());
+		expect(cfgAdvisorEnabled.get(captured[0])).toBe(false);
+		expect(captured[1].getModelRole("advisor")).toBe("anthropic/claude-sonnet-4-5");
+		expect(cfgAdvisorEnabled.get(captured[2])).toBe(false);
+	});
+
 	it("restores the persisted per-agent advisor opt-in on cold revival", async () => {
 		const cwd = makeTempDir("@pi-advisor-revive-");
-		const advisedFile = await createPersistedSession(cwd, undefined, undefined, "moonshot/k3");
-		const roleAdvisedFile = await createPersistedSession(cwd, undefined, undefined, "on");
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ name: "reviewer", description: "reviewer", systemPrompt: "review", source: "user" }],
+			projectAgentsDir: null,
+		});
+		const advisedFile = await createPersistedSession(cwd, undefined, undefined, "moonshot/k3", { agent: "reviewer" });
+		const roleAdvisedFile = await createPersistedSession(cwd, undefined, undefined, "on", { agent: "reviewer" });
 		const unadvisedFile = await createPersistedSession(cwd);
 		const captured: Settings[] = [];
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
@@ -865,8 +909,14 @@ describe("persisted subagent revival", () => {
 
 	it("keeps a nested spawn's owner-resolved advisor when reviving under root settings with a different advisor", async () => {
 		const cwd = makeTempDir("@pi-nested-advisor-revive-");
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ name: "reviewer", description: "reviewer", systemPrompt: "review", source: "user" }],
+			projectAgentsDir: null,
+		});
 		// What spawn persists for `@advisor:high` under a parent subagent whose advisor role is Sonnet.
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, "anthropic/claude-sonnet-4-5:high");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, "anthropic/claude-sonnet-4-5:high", {
+			agent: "reviewer",
+		});
 		const rootSettings = Settings.isolated({ modelRoles: { advisor: "anthropic/claude-haiku-4-5" } });
 		let captured: Settings | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {

@@ -118,7 +118,6 @@ function taskAgentSchemaRule(defaultAgent: string): string {
 
 type SeanceTaskSchemaFields = {
 	"sourceSession?"?: FluentType<string>;
-	"model?"?: FluentType<string | string[]>;
 };
 
 function createTaskSchema(options: {
@@ -137,7 +136,7 @@ function createTaskSchema(options: {
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	const modelField = options.perCallModel ? { "model?": "string | string[]" } : {};
+	const modelField = options.perCallModel ? { "model?": "string" } : {};
 	const seanceFields = { ...modelField, ...options.seanceFields };
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {

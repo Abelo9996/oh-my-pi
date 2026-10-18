@@ -18,7 +18,7 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
 {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
-{{/if}}{{#if perCallModelEnabled}}`model`: selector or ordered array for this spawn only (`provider/model[:level]`, configured role like `@smol`, `@default` = parent's live model){{#if batchEnabled}}; per `tasks[]` item{{/if}}. Only operator-configured models (roles, fallbacks, agent models, overrides; the parent's if approved).{{#if perCallModelUnpinnedOnly}} Agents with their own configured model reject it.{{/if}} Omit unless needed. Requested model unavailable → stop and report; NEVER substitute another.
+{{/if}}{{#if perCallModelEnabled}}`model`: one exact `provider/model[:level]` string for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}. Only operator-approved models; no roles, arrays, globs or partial IDs. An agent's `task.agentModelOverrides` entry conflicts with `model`.{{#if perCallModelUnpinnedOnly}} Agents pinned by bundled or user-level frontmatter also reject it.{{/if}} Omit unless needed. Requested model unavailable → stop and report; NEVER substitute another. Runtime model fallback is off unless the operator enables it.
 {{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
 {{/if}}{{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
 {{else}}`isolated`: worktree; changes retained, not applied.

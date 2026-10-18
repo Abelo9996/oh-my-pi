@@ -96,8 +96,15 @@ describe("task wire schema", () => {
 
 	it("keeps a per-call model selector on batch items", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, perCallModel: true });
-		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", solutionSpace: "c", model: "@smol" }] }));
-		expect(items[0]?.model).toBe("@smol");
+		const items = parsedItems(
+			batch({ context: "ctx", tasks: [{ task: "x", solutionSpace: "c", model: "openai/gpt-5.4" }] }),
+		);
+		expect(items[0]?.model).toBe("openai/gpt-5.4");
+	});
+
+	it("rejects model arrays in the public task schema", () => {
+		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, perCallModel: true });
+		expect(schema({ task: "x", solutionSpace: "c", model: ["openai/gpt-5.4"] }) instanceof type.errors).toBe(true);
 	});
 
 	it("defaults batch item agents to 'task' on the fast path and keeps names", () => {

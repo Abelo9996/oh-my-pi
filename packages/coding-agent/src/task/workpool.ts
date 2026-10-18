@@ -90,7 +90,7 @@ export interface WorkPoolPeekResult {
 export interface WorkPoolCreateOptions {
 	name: string;
 	/** Raw selector applied to each worker at creation, never to follow-up turns. */
-	model?: string | string[];
+	model?: string;
 	policy: EffectiveSubagentPolicy;
 	context?: string;
 	customTools?: CustomTool[];
@@ -113,7 +113,7 @@ export class WorkPool {
 	readonly ownerId: string;
 	readonly session: ToolSession;
 	readonly policy: EffectiveSubagentPolicy;
-	readonly #model?: string | string[];
+	readonly #model?: string;
 	readonly context?: string;
 	readonly customTools: CustomTool[];
 	readonly freshAgents: boolean;
@@ -136,7 +136,7 @@ export class WorkPool {
 		this.ownerId = session.getAgentId?.() ?? MAIN_AGENT_ID;
 		this.session = session;
 		this.policy = options.policy;
-		this.#model = Array.isArray(options.model) ? [...options.model] : options.model;
+		this.#model = options.model;
 		this.context = options.context;
 		this.customTools = options.customTools ?? [];
 		this.freshAgents = cfgEvalWorkpoolFreshAgents.get(session.settings);

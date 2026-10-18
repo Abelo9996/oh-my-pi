@@ -1690,10 +1690,29 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
-	options?: { allowInvalidThinkingSelectorFallback?: boolean },
+	options?: { allowInvalidThinkingSelectorFallback?: boolean; exactOnly?: boolean },
 ): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
+	if (options?.exactOnly) {
+		for (const pattern of modelPatterns) {
+			const selector = pattern.trim();
+			const literal = availableModels.find(model => `${model.provider}/${model.id}` === selector);
+			if (literal) return { model: literal, explicitThinkingLevel: false };
+			const { base, level } = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
+			if (!level) continue;
+			const model = availableModels.find(candidate => `${candidate.provider}/${candidate.id}` === base);
+			if (model) {
+				return {
+					model,
+					thinkingLevel:
+						level === AUTO_THINKING ? AUTO_THINKING : (resolveThinkingLevelForModel(model, level) ?? level),
+					explicitThinkingLevel: true,
+				};
+			}
+		}
+		return { explicitThinkingLevel: false };
+	}
 	const matchPreferences = getModelMatchPreferences(settings);
 	let warning: string | undefined;
 	for (const pattern of modelPatterns) {
@@ -1826,13 +1845,14 @@ export async function resolveModelOverrideWithAuthFallback(
 		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
 		lookupRegistry = { getAvailable: () => enabledModels };
 	}
-	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
+	const resolutionOptions = options?.perCallModel ? { exactOnly: true } : undefined;
+	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings, resolutionOptions);
 	if (!primary.model) {
 		return { ...primary, authFallbackUsed: false };
 	}
 	if (options?.perCallModel) {
-		for (const pattern of resolveConfiguredModelPatterns(modelPatterns, settings)) {
-			const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
+		for (const pattern of modelPatterns) {
+			const candidate = resolveModelOverride([pattern], lookupRegistry, settings, resolutionOptions);
 			if (!candidate.model) continue;
 			const key = await modelRegistry.getApiKey(candidate.model, sessionId);
 			if (key === kNoAuth || isAuthenticated(key)) return { ...candidate, authFallbackUsed: false };

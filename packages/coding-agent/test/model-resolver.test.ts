@@ -24,6 +24,7 @@ import {
 	resolveModelFromSettings,
 	resolveModelFromString,
 	resolveModelOverride,
+	resolveModelOverrideWithAuthFallback,
 	resolveModelRoleValue,
 	resolveModelScope,
 	resolveRoleChain,
@@ -1605,6 +1606,56 @@ describe("resolveModelFromString", () => {
 });
 
 describe("resolveModelOverride", () => {
+	test("exact overrides reject partial IDs, provider aliases and role selectors", () => {
+		const registry = { getAvailable: () => allModels };
+		const settings = Settings.isolated({ modelRoles: { review: "anthropic/claude-sonnet-4-5" } });
+		for (const pattern of [
+			"anthropic/sonnet",
+			"sonnet",
+			"@review",
+			"pi/default",
+			"pi/slow",
+			"ANTHROPIC/claude-sonnet-4-5",
+			"anthropic/claude-sonnet-4.5",
+			"anthropic/*",
+		]) {
+			expect(resolveModelOverride([pattern], registry, settings, { exactOnly: true }).model).toBeUndefined();
+		}
+		expect(resolveModelOverride(["anthropic/sonnet"], registry).model?.id).toBe("claude-sonnet-4-5");
+	});
+
+	test("exact overrides preserve literal colon IDs before parsing one supported effort suffix", () => {
+		const literal = { ...mockModels[0]!, id: "literal:high" };
+		const registry = { getAvailable: () => [...allModels, literal] };
+		const exact = resolveModelOverride(["anthropic/literal:high"], registry, undefined, { exactOnly: true });
+		expect(exact.model?.id).toBe("literal:high");
+		expect(exact.explicitThinkingLevel).toBe(false);
+		const suffixed = resolveModelOverride(["openrouter/qwen/qwen3-coder:exacto:high"], registry, undefined, {
+			exactOnly: true,
+		});
+		expect(suffixed.model?.id).toBe("qwen/qwen3-coder:exacto");
+		expect(suffixed.thinkingLevel).toBe(Effort.High);
+		expect(suffixed.explicitThinkingLevel).toBe(true);
+		for (const pattern of ["anthropic/claude-sonnet-4-5:invalid", "anthropic/claude-sonnet-4-5:high:low"]) {
+			expect(resolveModelOverride([pattern], registry, undefined, { exactOnly: true }).model).toBeUndefined();
+		}
+	});
+
+	test("per-call authentication resolution never fuzzy-matches an unavailable exact request", async () => {
+		const getApiKey = vi.fn(async () => "test-key");
+		const registry = { getAvailable: () => allModels, getApiKey };
+		const result = await resolveModelOverrideWithAuthFallback(
+			["anthropic/sonnet"],
+			"openai/gpt-4o",
+			registry,
+			undefined,
+			undefined,
+			{ perCallModel: true },
+		);
+		expect(result.model).toBeUndefined();
+		expect(getApiKey).not.toHaveBeenCalled();
+	});
+
 	test("preserves explicit off and explicit-thinking metadata", () => {
 		const registry = {
 			getAvailable: () => allModels,

@@ -12857,6 +12857,10 @@ export class AgentSession implements SettingsScope {
 	 * compile here instead of surfacing as `undefined` at runtime.
 	 */
 	buildAskReanswerContext(uiContext: ExtensionUIContext): AgentToolContext {
+		return this.buildToolContext(uiContext);
+	}
+
+	buildToolContext(uiContext?: ExtensionUIContext): AgentToolContext {
 		return {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
@@ -12868,7 +12872,7 @@ export class AgentSession implements SettingsScope {
 			},
 			settings: this.settings,
 			ui: uiContext,
-			hasUI: true,
+			hasUI: uiContext !== undefined,
 		};
 	}
 

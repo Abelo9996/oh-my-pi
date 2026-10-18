@@ -2208,8 +2208,7 @@ export interface TaskItem {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Per-call model selector(s) (`task.perCallModel`); for the bundled seance, the source session's model override. */
-	model?: string | string[];
+	model?: string;
 	/** The work; required by the schema. */
 	task?: string;
 	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
@@ -2239,8 +2238,7 @@ export interface TaskParams {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Per-call model selector(s) (flat form; `task.perCallModel`); for the bundled seance, the source session's model override. */
-	model?: string | string[];
+	model?: string;
 	/** The work (flat form). */
 	task?: string;
 	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
