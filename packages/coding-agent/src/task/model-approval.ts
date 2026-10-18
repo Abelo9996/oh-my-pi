@@ -124,6 +124,15 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 	return [...patterns];
 }
 
+/**
+ * Settings overrides for a per-call worker's own session: under
+ * `task.perCallModelFallbacks: off` it fails instead of switching models, even to
+ * one another grant approves. Agents the worker spawns restore the chain's value.
+ */
+export function perCallModelFallbackOverrides(settings: Settings): Readonly<Record<string, unknown>> | undefined {
+	return cfgTaskPerCallModelFallbacks.get(settings) === "off" ? { "retry.modelFallback": false } : undefined;
+}
+
 function identity(model: Pick<Model<Api>, "provider" | "id">): string {
 	return `${model.provider}/${model.id}`;
 }

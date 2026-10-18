@@ -36,7 +36,12 @@ import { createSessionDefaults } from "../helpers/session-defaults";
 import { manyToolName } from "../fixtures/many-tools-mcp";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
-import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgRetryModelFallback,
+	cfgTierAnthropic,
+	cfgTierGoogle,
+	cfgTierOpenai,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 
 function createMockSession(
 	onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void | Promise<void>,
@@ -790,6 +795,44 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			await fs.promises.rm(cwd, { recursive: true, force: true });
 		}
 	}, 30_000);
+
+	it("switches model fallback off for a per-call worker under perCallModelFallbacks: off, not for agents it spawns", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const createSession = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockImplementation(async () => createSessionResult(yieldEmittingSession()));
+		const selector = `${model.provider}/${model.id}`;
+		const rootSettings = Settings.isolated({
+			"task.perCallModelFallbacks": "off",
+			modelRoles: { review: selector },
+		});
+
+		await runSubprocess({
+			...baseOptions,
+			id: "fallbacks-off-child",
+			modelOverride: [selector],
+			perCallModelGrants: { settings: rootSettings, agentName: baseAgent.name },
+			settings: rootSettings,
+			modelRegistry: createModelRegistry(model),
+		});
+		const childSettings = createSession.mock.calls[0]?.[0]?.settings;
+		if (!childSettings) throw new Error("Expected child settings");
+		// A grandchild spawned without `model` from the worker's settings.
+		await runSubprocess({
+			...baseOptions,
+			id: "fallbacks-off-grandchild",
+			settings: childSettings,
+			modelRegistry: createModelRegistry(model),
+		});
+		const grandchildSettings = createSession.mock.calls[1]?.[0]?.settings;
+		if (!grandchildSettings) throw new Error("Expected grandchild settings");
+
+		expect([cfgRetryModelFallback.get(childSettings), cfgRetryModelFallback.get(grandchildSettings)]).toEqual([
+			false,
+			true,
+		]);
+	});
 
 	it("starts a per-call worker on its first candidate with working credentials, a plain spawn on its first", async () => {
 		const unauthed = getBundledModel("anthropic", "claude-sonnet-4-5");

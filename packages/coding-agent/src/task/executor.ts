@@ -134,6 +134,7 @@ import {
 	assertPerCallModelApproved,
 	isPerCallModelApproved,
 	PerCallModelError,
+	perCallModelFallbackOverrides,
 	type PerCallModelGrants,
 } from "./model-approval";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
@@ -149,7 +150,6 @@ import {
 	cfgTaskMaxRecursionDepth,
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentAccountPools,
-	cfgTaskPerCallModelFallbacks,
 } from "./settings";
 import {
 	cfgTierSubagent,
@@ -157,6 +157,7 @@ import {
 	cfgTierAnthropic,
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
+	cfgRetryModelFallback,
 	cfgDefaultThinkingLevel,
 } from "../session/settings";
 import { cfgDisabledProviders } from "../config/model-settings";
@@ -1123,9 +1124,17 @@ interface RootCompactionThresholds extends CompactionThresholdPair {
 	modelThresholdsEnabled: boolean;
 }
 
-/** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
+/**
+ * `retry.modelFallback` a per-spawn override replaced for one subagent (a per-call
+ * worker under `task.perCallModelFallbacks: off`). The override applies to that
+ * agent only; agents it spawns restore this value instead of inheriting it.
+ */
+const kRestoredRetryModelFallback = Symbol("task.restoredRetryModelFallback");
+
+/** Settings from {@link createSubagentSettings}, tagged with its chain's root values. */
 interface SubagentChainSettings extends Settings {
 	[kRootCompactionThresholds]?: RootCompactionThresholds;
+	[kRestoredRetryModelFallback]?: boolean;
 }
 
 /**
@@ -1164,8 +1173,10 @@ export function createSubagentSettings(
 		thresholdTokens: cfgCompactionThresholdTokens.get(baseSettings),
 		modelThresholdsEnabled: cfgCompactionModelThresholdsEnabled.get(baseSettings),
 	};
+	const restoredModelFallback = baseSettings[kRestoredRetryModelFallback];
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
 	const subagentSettings: SubagentChainSettings = baseSettings.overlay({
+		...(restoredModelFallback !== undefined && { "retry.modelFallback": restoredModelFallback }),
 		...(inheritedRootThresholds && {
 			"compaction.thresholdPercent": inheritedRootThresholds.thresholdPercent,
 			"compaction.thresholdTokens": inheritedRootThresholds.thresholdTokens,
@@ -1202,6 +1213,9 @@ export function createSubagentSettings(
 		...overrides,
 	});
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
+	if (restoredModelFallback !== undefined || overrides?.["retry.modelFallback"] !== undefined) {
+		subagentSettings[kRestoredRetryModelFallback] = restoredModelFallback ?? cfgRetryModelFallback.get(baseSettings);
+	}
 	return subagentSettings;
 }
 
@@ -4079,11 +4093,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			...(advisorRolePattern
 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
 				: undefined),
-			// `task.perCallModelFallbacks: off` means the per-call child fails instead of switching,
-			// even to a model another grant would approve.
-			...(options.perCallModelGrants && cfgTaskPerCallModelFallbacks.get(settings) === "off"
-				? { "retry.modelFallback": false }
-				: undefined),
+			...(options.perCallModelGrants ? perCallModelFallbackOverrides(settings) : undefined),
 		},
 		options.parentServiceTier,
 	);

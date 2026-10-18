@@ -268,7 +268,7 @@ Two settings reshape those grants:
 | --- | --- | --- |
 | `select` (default) | yes | yes |
 | `runtime` | no | yes |
-| `off` | no | no; the subagent fails instead of switching models, even to one another grant approves |
+| `off` | no | no; the subagent fails instead of switching models, even to one another grant approves (agents it spawns without `model` keep the parent's `retry.modelFallback`) |
 
 A model named directly in `task.perCallModelAllow` is a plain grant regardless of `task.perCallModelFallbacks`.
 
