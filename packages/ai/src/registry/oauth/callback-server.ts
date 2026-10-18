@@ -74,10 +74,17 @@ function serializeCallbackState(state: unknown): string {
  * {@link isAddressInUse} cannot distinguish from a real collision — Bun reuses
  * its "Is port X in use?" message for every listen failure (oven-sh/bun#7187) —
  * so the dual-bind path must be skipped up front rather than misread as a
- * conflict (issue #8814).
+ * conflict (issue #8814). If interface enumeration is denied, serve the IPv4
+ * loopback alone rather than aborting OAuth before a listener is bound.
  */
 function ipv6LoopbackAvailable(): boolean {
-	const interfaces = os.networkInterfaces();
+	let interfaces;
+	try {
+		interfaces = os.networkInterfaces();
+	} catch {
+		// Android/Termux can deny getifaddrs even though IPv4 loopback is usable.
+		return false;
+	}
 	for (const name in interfaces) {
 		const addresses = interfaces[name];
 		if (!addresses) continue;

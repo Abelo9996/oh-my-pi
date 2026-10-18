@@ -168,4 +168,32 @@ describe("OAuthCallbackFlow loopback address families", () => {
 		expect(flow.lastRedirectUri).toBe(`http://localhost:${port}/callback`);
 		expect(progress.some(msg => msg.includes("unavailable"))).toBe(false);
 	});
+
+	it("serves an IPv4 callback when Android denies network interface enumeration", async () => {
+		vi.spyOn(os, "networkInterfaces").mockImplementation(() => {
+			throw Object.assign(new Error("getifaddrs returned an error"), {
+				code: "ERR_SYSTEM_ERROR",
+				errno: 13,
+				syscall: "getifaddrs",
+			});
+		});
+
+		const callback = Promise.withResolvers<Response>();
+		const flow = new TestCallbackFlow(
+			{
+				onAuth: info => {
+					const url = new URL(info.url);
+					url.hostname = "127.0.0.1";
+					url.searchParams.set("code", "termux");
+					url.searchParams.set("state", flow.lastState ?? "");
+					void fetch(url).then(callback.resolve, callback.reject);
+				},
+			},
+			{ preferredPort: 0 },
+		);
+
+		const credentials = await flow.login();
+		expect((await callback.promise).status).toBe(200);
+		expect(credentials.access).toBe("access-termux");
+	});
 });

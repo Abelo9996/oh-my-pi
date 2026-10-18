@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OAuth loopback callbacks failing on Android/Termux when network interface enumeration is denied ([#16127](https://github.com/can1357/oh-my-pi/issues/16127)).
+
 ## [18.12.1] - 2026-10-17
 
 ### Fixed
