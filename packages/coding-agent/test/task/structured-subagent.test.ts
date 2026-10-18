@@ -1800,6 +1800,23 @@ describe("per-call model gate and approval", () => {
 		expect(approves("@advisor", { default: "anthropic/claude-opus-4-5" }, OTHER)).toBe(false);
 	});
 
+	it("never grants built-in role defaults through a configured role value that aliases an unconfigured role", () => {
+		const builtIn = buildModel({ ...MODEL, id: "claude-haiku-5-5", name: "Claude Haiku 5.5" });
+		const available = { getAvailable: () => [MODEL, builtIn] };
+		for (const allow of [[], ["@review"]]) {
+			const approves = (modelRoles: Record<string, string>, model: typeof MODEL) =>
+				isPerCallModelApproved(
+					model,
+					{ settings: Settings.isolated({ modelRoles, "task.perCallModelAllow": allow }), agentName: "worker" },
+					available,
+					"select",
+				);
+			// `review: "@smol"` with smol unset would route through the built-in smol list.
+			expect(approves({ review: "@smol" }, builtIn)).toBe(false);
+			expect(approves({ review: "@smol", default: "anthropic/claude-sonnet-4-5" }, MODEL)).toBe(true);
+		}
+	});
+
 	for (const { role, roles } of [
 		{ role: "review", roles: { review: "anthropic/claude-sonnet-4-5" } },
 		{ role: "smol", roles: { default: "anthropic/claude-sonnet-4-5" } },

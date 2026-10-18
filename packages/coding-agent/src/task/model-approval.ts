@@ -104,10 +104,11 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 					];
 				})
 			: [
-					// Values, not aliases: an alias resolves to one model, but every listed candidate is a grant.
+					// Every listed candidate of a value is a grant; an alias in a value expands only to
+					// configured roles, never to the built-in defaults an unset role would route through.
 					...Object.entries(settings.getModelRoles())
 						.filter(([role]) => !isKindRole(role))
-						.map(([, value]) => value),
+						.map(([, value]) => resolveConfiguredModelPatterns(value, settings, { builtInDefaults: false })),
 					...chains.map(([, chain]) => concrete(chain)),
 					agentEnabled ? grants.agentModel : undefined,
 					agentEnabled && Object.hasOwn(overrides, agentName) ? overrides[agentName] : undefined,

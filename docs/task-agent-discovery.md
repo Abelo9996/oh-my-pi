@@ -248,9 +248,11 @@ there is `modelRoles.default` at `high`; an agent whose whole frontmatter `model
 A supplied `model` is one selector or an ordered, non-empty array, and must name a chat model the
 operator already routes to: a chat role's `modelRoles` value, a concrete `retry.fallbackChains` entry,
 the selected agent's frontmatter model or `task.agentModelOverrides` entry, or the parent's live model.
-Catalog membership, credentials, enabled scope, and built-in role defaults are not enough. Role
-aliases, fuzzy IDs, and globs in those grants match the same way as everywhere else, and an
-unconfigured role such as `@smol` borrows `modelRoles.default` as the resolver does. The non-chat
+Catalog membership, credentials, enabled scope, and built-in role defaults are not enough. Fuzzy IDs
+and globs in those grants match the same way as everywhere else. A role alias inside a role value
+(for example `modelRoles.review: "@smol"`) expands only through configured roles: an unconfigured
+role such as `@smol` borrows `modelRoles.default` as the resolver does, but never grants the built-in
+priority list the resolver would fall back to. The non-chat
 roles (`image`, `web`, `speech`, `dictation`, `judge`) never grant a per-call model, and a request
 naming one of them, or a model of another kind, fails preflight with that reason.
 
