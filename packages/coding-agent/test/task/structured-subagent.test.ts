@@ -1888,6 +1888,19 @@ describe("per-call model gate and approval", () => {
 		).resolves.toBeDefined();
 	});
 
+	it("rejects an allowlisted `@default` at preflight when the parent has no active model", async () => {
+		mockDiscovery();
+		const settings = {
+			"task.perCallModel": "on",
+			modelRoles: { default: "anthropic/claude-sonnet-4-5", task: "anthropic/claude-opus-4-5" },
+			"task.perCallModelAllow": ["@task", "@default"],
+		};
+		// Without a live parent model, `@default` would fall back to a model no grant covers and every dispatch would be refused.
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: gated(settings), model: ["@default"] })),
+		).rejects.toThrow(/parent session has no active model/);
+	});
+
 	it("only grants chat models and rejects non-chat roles and models before dispatch", async () => {
 		const IMAGE = buildModel({ ...MODEL, id: "image-maker", name: "Image Maker", kind: "image" });
 		const byKind = {

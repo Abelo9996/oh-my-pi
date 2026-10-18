@@ -90,6 +90,7 @@ import {
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskPerCallModel,
+	cfgTaskPerCallModelAllow,
 } from "./settings";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
@@ -575,6 +576,18 @@ export async function resolveEffectiveSubagentPolicy(
 				throw new StructuredSubagentError(
 					"preflight",
 					`\`model\` ${JSON.stringify(pattern)} asks for the parent's model, which task.perCallModelAllow does not include; add "@default" to the list or pick a listed role.`,
+				);
+			}
+			// A set allowlist grants `@default` only as the parent's live model; without one the
+			// resolver's configured-default fallback is not a grant and every request would be refused.
+			if (
+				modelSelectionInheritsSessionModel(pattern) &&
+				!parentActiveModelPattern &&
+				cfgTaskPerCallModelAllow.get(settings).length > 0
+			) {
+				throw new StructuredSubagentError(
+					"preflight",
+					`\`model\` ${JSON.stringify(pattern)} asks for the parent's model, but the parent session has no active model; name a listed role or model instead.`,
 				);
 			}
 			// `@default` asks for the parent's live model, not a pattern to look up.
