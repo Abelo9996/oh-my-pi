@@ -2696,13 +2696,16 @@ export class TUI extends Container {
 			this.terminal.write(`${this.#takePendingAltEnter()}${this.#altScreenExit()}`);
 			setAltScreenActive(false);
 		}
+		// `setPointerShape` works with reporting off too, so the shell gets its pointer back either way.
+		const pointerReset = this.#takePointerReset();
+		const mouseOff = this.#mouseTracking !== "off" ? MOUSE_TRACKING_OFF : "";
 		if (this.#altActive || this.#pendingAltExit) {
 			// A pending fused exit may have been built without an OFF write to
 			// keep inline capture alive across the restore — at process quit
 			// nothing continues, so release unconditionally. The pending
 			// sequence itself can re-enable tracking (overlay-close restore),
 			// so the final OFF goes last or the shell keeps reporting.
-			const mouseExit = this.#mouseTracking !== "off" ? `${this.#takePointerReset()}${MOUSE_TRACKING_OFF}` : "";
+			const mouseExit = `${pointerReset}${mouseOff}`;
 			const exitSequence = this.#pendingAltExit
 				? `${this.#takePendingAltEnter()}${this.#pendingAltExit}${mouseExit}`
 				: `${mouseExit}${this.#altScreenExit()}`;
@@ -2714,11 +2717,11 @@ export class TUI extends Container {
 			this.#altPreparedRows = [];
 			this.#pendingAltExit = "";
 			this.#resizeAltExitFused = false;
-		} else if (this.#mouseTracking !== "off") {
+		} else if (pointerReset || mouseOff) {
 			// Inline capture with no overlay: still owned by us at quit, so
 			// release it — otherwise the parent shell keeps mouse reporting
 			// and loses native selection until a manual reset.
-			this.terminal.write(`${this.#takePointerReset()}${MOUSE_TRACKING_OFF}`);
+			this.terminal.write(`${pointerReset}${mouseOff}`);
 			this.#mouseTracking = "off";
 		}
 		// A latched destructive reset (settled rebuild-mode resize, /clear) pairs
@@ -4145,8 +4148,8 @@ export class TUI extends Container {
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: output,
+					terminalContent: output,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
@@ -4157,14 +4160,14 @@ export class TUI extends Container {
 			// Fitting a giant source can discard everything after the visible
 			// prefix. Preserve image rows verbatim first, but do not scan the
 			// entire source for width/OSC metadata that will immediately vanish.
-			if (TERMINAL.isImageLine(raw)) {
+			if (TERMINAL.isImageLine(output)) {
 				return {
 					raw,
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: output,
+					terminalContent: output,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
