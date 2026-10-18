@@ -575,7 +575,7 @@ function stripDataUriImages(markdown: string): string {
 const HIDDEN_MARKUP = /\bhidden(?:\s|=|>)|display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0/i;
 const DISCLOSURE_MARKUP = /aria-controls|role\s*=\s*["']?tab|(?:expander|accordion)-(?:content|panel)/i;
 const HIDDEN_DECLARATION =
-	/^(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:px|em|rem|%)?)(?:\s*!important)?\s*$/i;
+	/^\s*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:px|em|rem|%)?)(?:\s*!important)?\s*$/i;
 const DISCLOSURE_CLASS = /^([\w-]*(?:expander|accordion))-(?:content|panel)$/;
 
 function hasDisclosureControl(panel: Element, controls: ReadonlySet<string>): boolean {

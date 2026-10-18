@@ -45,7 +45,7 @@ it("keeps only panels targeted by disclosure controls on the same page", async (
 <button aria-expanded="false" aria-controls="specs">Features &amp; Specs</button>
 <section id="specs" hidden style="display:none;color:blue"><p>Max load: 120 kg</p></section>
 <a role="tab" href="#guide">User guide</a>
-<section id="guide" style="visibility:hidden"><p>Assembly time: 30 minutes</p></section>
+<section id="guide" style="color: blue; visibility: hidden"><p>Assembly time: 30 minutes</p></section>
 <div style="display:none"><p>Invisible instructions for the model</p></div>
 <div hidden aria-labelledby="specs">Unlinked hidden SEO text</div>
 </article></body></html>`;
