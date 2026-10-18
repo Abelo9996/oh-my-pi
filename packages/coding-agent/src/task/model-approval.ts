@@ -90,13 +90,14 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCa
 	const agentEnabled = !cfgTaskDisabledAgents.get(settings).includes(agentName);
 	const sources: Array<string | string[] | undefined> =
 		allow.length > 0
-			? // An explicit list replaces the derived grants; a listed role brings its values and fallback chain.
+			? // An explicit list replaces the derived grants; a listed role brings its configured values
+				// (or the configured role it borrows, never built-in defaults) and its fallback chain.
 				allow.flatMap(entry => {
 					const role = resolveExplicitModelRole(entry, settings);
 					if (!role) return [entry];
 					if (role === "default" || isKindRole(role)) return [];
 					return [
-						...resolveConfiguredModelPatterns(entry, settings),
+						...resolveConfiguredModelPatterns(entry, settings, { builtInDefaults: false }),
 						...concrete(chains.find(([key]) => key === role)?.[1]),
 					];
 				})

@@ -1191,6 +1191,7 @@ function resolveNestedRolePatterns(
 	roleDefaults: string[],
 	settings: ModelRoleLookup | undefined,
 	visited: Set<string>,
+	builtInDefaults: boolean,
 ): string[] {
 	const resolved: string[] = [];
 	for (const pattern of normalizeModelPatternList(value)) {
@@ -1209,7 +1210,7 @@ function resolveNestedRolePatterns(
 			continue;
 		}
 
-		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited), builtInDefaults);
 		if (recursed) resolved.push(...recursed);
 	}
 	return resolved;
@@ -1221,15 +1222,21 @@ function resolveDefaultInheritedPatterns(
 	roleDefaults: string[],
 	settings: ModelRoleLookup | undefined,
 	visited: Set<string>,
+	builtInDefaults: boolean,
 ): string[] {
 	if (!shouldInheritDefaultBeforePriority(role) || !configuredDefault) return [];
-	return resolveNestedRolePatterns(configuredDefault, roleDefaults, settings, visited);
+	return resolveNestedRolePatterns(configuredDefault, roleDefaults, settings, visited, builtInDefaults);
 }
 
+/**
+ * `builtInDefaults: false` keeps only what the operator configured: a role's own
+ * value or the configured role it borrows, never the catalog priority list.
+ */
 function resolveConfiguredRolePattern(
 	value: string,
 	settings?: ModelRoleLookup,
 	visited: Set<string> = new Set(),
+	builtInDefaults = true,
 ): string[] | undefined {
 	const normalized = value.trim();
 	if (!normalized) return undefined;
@@ -1244,22 +1251,28 @@ function resolveConfiguredRolePattern(
 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
 	// Built-in defaults chain to other roles (judge: `@tiny`, `@smol`, `@default`). Left unexpanded, the
 	// matcher reads them as literal ids and `@default` fuzzy-matches Vertex ids like `claude-opus-4-8@default`.
-	const roleDefaults = isModelRole(role)
-		? resolveNestedRolePatterns(rolePriorityDefaults(role), [], settings, visited)
-		: [];
+	const roleDefaults =
+		isModelRole(role) && builtInDefaults
+			? resolveNestedRolePatterns(rolePriorityDefaults(role), [], settings, visited, builtInDefaults)
+			: [];
 	const configuredFallback = isModelRole(role) ? ROLE_CONFIGURED_FALLBACK[role] : undefined;
 	const fallbackPatterns =
 		configured ||
 		!configuredFallback ||
 		(configuredFallback.configuredOnly && !settings?.getModelRole(configuredFallback.role)?.trim())
 			? undefined
-			: resolveConfiguredRolePattern(formatModelRoleAlias(configuredFallback.role), settings, new Set(visited));
+			: resolveConfiguredRolePattern(
+					formatModelRoleAlias(configuredFallback.role),
+					settings,
+					new Set(visited),
+					builtInDefaults,
+				);
 	const resolved = configured
-		? resolveNestedRolePatterns(configured, roleDefaults, settings, visited)
+		? resolveNestedRolePatterns(configured, roleDefaults, settings, visited, builtInDefaults)
 		: fallbackPatterns
 			? fallbackPatterns
 			: isModelRole(role)
-				? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
+				? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited, builtInDefaults)
 				: roleDefaults;
 	if (resolved.length === 0) {
 		resolved.push(...roleDefaults);
@@ -1287,10 +1300,11 @@ export function expandRoleAlias(value: string, settings?: ModelRoleLookup): stri
 export function resolveConfiguredModelPatterns(
 	value: string | string[] | undefined,
 	settings?: ModelRoleLookup,
+	options?: { builtInDefaults?: boolean },
 ): string[] {
 	const patterns = normalizeModelPatternList(value);
 	return patterns.flatMap(pattern => {
-		const resolved = resolveConfiguredRolePattern(pattern, settings);
+		const resolved = resolveConfiguredRolePattern(pattern, settings, undefined, options?.builtInDefaults);
 		return resolved ?? [];
 	});
 }

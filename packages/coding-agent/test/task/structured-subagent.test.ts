@@ -1757,6 +1757,27 @@ describe("per-call model gate and approval", () => {
 		);
 	});
 
+	it("grants an allowlisted role only operator-configured values, never its built-in defaults", () => {
+		// `claude-haiku-5-5` heads the built-in smol priority list; no operator setting names it.
+		const builtIn = buildModel({ ...MODEL, id: "claude-haiku-5-5", name: "Claude Haiku 5.5" });
+		const available = { getAvailable: () => [MODEL, OTHER, builtIn] };
+		const approves = (entry: string, modelRoles: Record<string, string>, model: typeof MODEL) =>
+			isPerCallModelApproved(
+				model,
+				{ settings: Settings.isolated({ modelRoles, "task.perCallModelAllow": [entry] }), agentName: "worker" },
+				available,
+				"select",
+			);
+		expect(approves("@smol", {}, builtIn)).toBe(false);
+		// An unconfigured role still borrows the configured role the resolver borrows.
+		expect(approves("@smol", { default: "anthropic/claude-sonnet-4-5" }, MODEL)).toBe(true);
+		expect(approves("@smol", { default: "anthropic/claude-sonnet-4-5" }, builtIn)).toBe(false);
+		expect(approves("@tiny", { smol: "anthropic/claude-opus-4-5" }, OTHER)).toBe(true);
+		// The advisor borrows a configured slow role, never default.
+		expect(approves("@advisor", { slow: "anthropic/claude-opus-4-5" }, OTHER)).toBe(true);
+		expect(approves("@advisor", { default: "anthropic/claude-opus-4-5" }, OTHER)).toBe(false);
+	});
+
 	for (const { role, roles } of [
 		{ role: "review", roles: { review: "anthropic/claude-sonnet-4-5" } },
 		{ role: "smol", roles: { default: "anthropic/claude-sonnet-4-5" } },
