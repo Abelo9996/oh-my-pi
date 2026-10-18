@@ -307,7 +307,7 @@ export const cfgTaskPerCallModel = register({
 				value: "off",
 				label: "Off",
 				description:
-					"Hide `model`; task calls that still pass it have it dropped or rejected, eval calls are rejected",
+					"Hide `model`: the task schema drops it, unless the bundled `seance` is advertised, in which case a non-seance call that passes it fails preflight; eval agent() and workpool() reject it",
 			},
 			{
 				value: "unpinned",
@@ -328,8 +328,9 @@ export const cfgTaskPerCallModelAllow = register({
 		tab: "tasks",
 		group: "Subagents",
 		label: "Per-Call Model Allowlist",
+		editor: "json",
 		description:
-			'Chat roles or model patterns a per-call model may use, e.g. ["@smol", "@review", "anthropic/*"]. A listed role includes its retry fallback chain (subject to task.perCallModelFallbacks); list "@default" to allow the parent\'s model (only that model, not the default fallback chain). Empty: every configured chat role, agent model and override, plus the parent\'s model.',
+			'Chat roles or model patterns a per-call model may use, e.g. ["@smol", "@review", "anthropic/*"]; replaces the derived grants, and a listed pattern can grant models no role names. A listed role includes its retry fallback chain (subject to task.perCallModelFallbacks); list "@default" to allow the parent\'s model (only that model, not the default fallback chain). Empty: every configured chat role, concrete retry fallback chain entry, agent model and override, plus the parent\'s model.',
 	},
 });
 

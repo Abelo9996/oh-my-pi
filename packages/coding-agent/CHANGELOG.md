@@ -2,13 +2,13 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- SDK callers passing `model` to `runStructuredSubagent()` must pass `hostModel` instead: `model` is now the per-call selector, gated by `task.perCallModel` and limited to operator-configured models ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+
 ### Added
 
-- Added `task.perCallModel` (`off` by default, `unpinned`, `on`) so task items, eval `agent()` and `workpool()` can pick a model per call; only models you already configured (model roles, retry fallback chains, the agent's own model or `task.agentModelOverrides` entry, or the parent's model) are accepted, and a subagent that would reach any other model fails instead. `task.perCallModelAllow` narrows the allowed roles and models, and `task.perCallModelFallbacks` (`select`, `runtime`, `off`) decides whether fallback chain models can be requested directly or only used as runtime fallbacks ([#7982](https://github.com/can1357/oh-my-pi/issues/7982), [#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix), [#15641](https://github.com/can1357/oh-my-pi/pull/15641) by [@andrebrait](https://github.com/andrebrait))
-
-### Fixed
-
-- Fixed per-call model allowlists rejecting an allowed role's inherited default retry fallbacks ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+- Added `task.perCallModel` (`off` by default, `unpinned`, `on`) so task items, eval `agent()` and `workpool()` can pick a model per call; only models you already configured (model roles, retry fallback chains, the agent's own model or `task.agentModelOverrides` entry, or the parent's model) are accepted, and a subagent that would reach any other model fails instead. `task.perCallModelAllow` replaces those grants with the listed roles and models, and `task.perCallModelFallbacks` (`select`, `runtime`, `off`) decides whether fallback chain models can be requested directly or only used as runtime fallbacks ([#7982](https://github.com/can1357/oh-my-pi/issues/7982), [#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix), [#15641](https://github.com/can1357/oh-my-pi/pull/15641) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.12.1] - 2026-10-17
 
