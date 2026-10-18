@@ -1999,11 +1999,13 @@ describe("per-call model gate and approval", () => {
 			expect(ran.result.output).toBe("approved answer");
 			expect(approved.calls).toHaveLength(1);
 
-			// The spawn hook may replace the model; the replacement is still held to the grants.
+			// The spawn hook may replace the model; the replacement is held to the grants before the session starts.
 			parentSession.emitBeforeSubagentSpawn = async () => ({ model: `mock/${swapped.id}` });
 			const refused = await run("PerCallSwapped");
 			expect(refused.result.exitCode).not.toBe(0);
-			expect(`${refused.result.error ?? ""}${refused.result.stderr}`).toContain("not an approved model");
+			expect(`${refused.result.error ?? ""}${refused.result.stderr}`).toContain(
+				'is not configured for agent "worker"',
+			);
 			expect(swapped.calls).toHaveLength(0);
 		} finally {
 			unregisterCustomApis(sourceId);
@@ -2077,6 +2079,90 @@ describe("per-call model gate and approval", () => {
 		} finally {
 			await AgentRegistry.global().get(agentId)?.session?.dispose();
 			AgentRegistry.global().unregister(agentId);
+			unregisterCustomApis(sourceId);
+			authStorage.close();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("re-checks a per-call model the executor resolves after a cold-registry preflight", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-per-call-cold-"));
+		const cwd = path.join(root, "project");
+		await fs.mkdir(cwd, { recursive: true });
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("mock", "test-key");
+		const sourceId = "structured-subagent-per-call-cold";
+		registerMockApi(sourceId);
+		const primary = createMockModel({
+			id: "per-call-cold-primary",
+			handler: () => ({ content: ["primary answer"] }),
+		});
+		const chain = createMockModel({ id: "per-call-cold-chain", handler: () => ({ content: ["chain answer"] }) });
+		const models = [primary, chain];
+		const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+		const find = modelRegistry.find.bind(modelRegistry);
+		modelRegistry.find = (provider, id) =>
+			models.find(model => model.provider === provider && model.id === id) ?? find(provider, id);
+		// Discovery is still running at preflight and finishes before the executor resolves the model.
+		let warm = false;
+		modelRegistry.getAvailable = () => (warm ? models : []);
+		const runSubprocess = executorModule.runSubprocess;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(options => {
+			warm = true;
+			return runSubprocess(options);
+		});
+		mockDiscovery({ ...AGENT, tools: ["read"], model: undefined });
+		const settings = Settings.isolated({
+			"task.maxRecursionDepth": 2,
+			"task.perCallModel": "on",
+			"task.perCallModelFallbacks": "runtime",
+			"task.isolation.enabled": false,
+			modelRoles: { review: `mock/${primary.id}` },
+			"retry.fallbackChains": { review: [`mock/${chain.id}`] },
+		});
+		const parentSession = Object.assign(session({ cwd, settings }), {
+			authStorage,
+			modelRegistry,
+			restrictToolNames: true,
+			enableMCP: false,
+			enableLsp: false,
+			enableIrc: false,
+		});
+		const run = async (agentId: string, model: string) => {
+			warm = false;
+			try {
+				return (
+					await runStructuredSubagent(
+						request({
+							session: parentSession,
+							model,
+							structured: false,
+							identity: { id: agentId },
+							keepAlive: false,
+						}),
+					)
+				).result;
+			} finally {
+				await AgentRegistry.global().get(agentId)?.session?.dispose();
+				AgentRegistry.global().unregister(agentId);
+			}
+		};
+
+		try {
+			// A runtime-only chain model cannot be the initial selection.
+			const chainOnly = await run("PerCallColdChain", `mock/${chain.id}`);
+			expect(chainOnly.exitCode).not.toBe(0);
+			expect(`${chainOnly.error ?? ""}${chainOnly.stderr}`).toContain('is not configured for agent "worker"');
+			// An approved model with a typo'd suffix fails instead of running at the default level.
+			const typo = await run("PerCallColdSuffix", `mock/${primary.id}:heigh`);
+			expect(typo.exitCode).not.toBe(0);
+			expect(`${typo.error ?? ""}${typo.stderr}`).toContain("invalid thinking suffix");
+			expect([primary.calls.length, chain.calls.length]).toEqual([0, 0]);
+
+			const approved = await run("PerCallColdApproved", "@review");
+			expect(approved.exitCode).toBe(0);
+			expect(approved.output).toBe("primary answer");
+		} finally {
 			unregisterCustomApis(sourceId);
 			authStorage.close();
 			await fs.rm(root, { recursive: true, force: true });

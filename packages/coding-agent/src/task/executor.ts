@@ -129,7 +129,12 @@ import {
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
 import { yieldSectionShapes } from "./yield-assembly";
-import { assertPerCallModelApproved, isPerCallModelApproved, type PerCallModelGrants } from "./model-approval";
+import {
+	assertPerCallModelApproved,
+	isPerCallModelApproved,
+	PerCallModelError,
+	type PerCallModelGrants,
+} from "./model-approval";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
 	cfgTaskPrewalk,
@@ -4299,6 +4304,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					resolvedProvider: model.provider,
 					resolvedModel: model.id,
 				});
+			}
+			// Preflight skips these checks while the registry is cold, so hold the model
+			// a per-call child actually starts on to them before its session exists.
+			if (options.perCallModelGrants && model) {
+				if (modelResolutionWarning) {
+					throw new PerCallModelError(
+						`Per-call \`model\` ${JSON.stringify(modelPatterns)} has an invalid thinking suffix. Use a supported thinking level or a literal model ID.`,
+					);
+				}
+				assertPerCallModelApproved(model, options.perCallModelGrants, modelRegistry, "select");
 			}
 			// The exact-name `task.agentServiceTierOverrides` entry dispatch resolved
 			// for this agent. The session evaluates it against its final model —

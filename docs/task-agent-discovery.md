@@ -269,6 +269,9 @@ A model named directly in `task.perCallModelAllow` is a plain grant regardless o
 
 Preflight rejects the ambiguous literals `default`/`inherit` (use `@default`), blank or comma-only
 selectors, invalid thinking suffixes, and selectors that match no available or no approved model.
+The model the child starts on (after an extension replacement, too) gets the same suffix and
+approval check before its session is created, so a model registry still loading at preflight cannot
+let an invalid suffix or a runtime-only fallback model through as the initial selection.
 A requested model without working credentials fails rather than running on the parent's model,
 unless the selection includes `@default`. Once the child runs, every main-loop request is checked
 against the same grants, read from current settings, so a retry fallback, prewalk, extension

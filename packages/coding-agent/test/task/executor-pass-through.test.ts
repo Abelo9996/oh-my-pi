@@ -705,7 +705,10 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const registry = createModelRegistry([unauthed, authed], async model =>
 			model.provider === authed.provider ? "test-key" : undefined,
 		);
-		const settings = Settings.isolated();
+		// Both candidates are configured, so either may start the per-call worker.
+		const settings = Settings.isolated({
+			modelRoles: { review: `${unauthed.provider}/${unauthed.id}`, commit: `${authed.provider}/${authed.id}` },
+		});
 		const modelOverride = [`${unauthed.provider}/${unauthed.id}`, `${authed.provider}/${authed.id}`];
 
 		for (const perCallModelGrants of [{ settings, agentName: baseAgent.name }, undefined]) {
