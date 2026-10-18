@@ -2208,7 +2208,7 @@ export interface TaskItem {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
+	/** Per-call model selector(s) (`task.perCallModel`); for the bundled seance, the source session's model override. */
 	model?: string | string[];
 	/** The work; required by the schema. */
 	task?: string;
@@ -2239,7 +2239,7 @@ export interface TaskParams {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
+	/** Per-call model selector(s) (flat form; `task.perCallModel`); for the bundled seance, the source session's model override. */
 	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;
