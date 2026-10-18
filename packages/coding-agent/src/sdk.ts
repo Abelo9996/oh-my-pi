@@ -249,6 +249,7 @@ import { isScoutSpawnable } from "./task/spawn-policy";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
+	assertModelSupportsEffortCeiling,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
@@ -4486,6 +4487,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getApiKey: effectiveGetApiKey,
 			streamFn: (streamModel, context, streamOptions) => {
 				options.assertDispatchModel?.(streamModel);
+				if (options.thinkingLevelCeiling !== undefined) {
+					assertModelSupportsEffortCeiling(streamModel, options.thinkingLevelCeiling);
+				}
 				if (notifyFirstChatDispatch) {
 					const cb = notifyFirstChatDispatch;
 					notifyFirstChatDispatch = undefined;

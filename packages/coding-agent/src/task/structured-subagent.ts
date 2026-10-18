@@ -518,6 +518,10 @@ export async function resolveEffectiveSubagentPolicy(
 				`Agent "${agentName}" has its own configured model (${configuredOverride !== undefined ? "task.agentModelOverrides" : "frontmatter"}), so per-call \`model\` is rejected under task.perCallModel: unpinned. Omit \`model\`.`,
 			);
 		}
+		for (const pattern of normalizeModelPatternList(perCallModel)) {
+			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
+			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
+		}
 	}
 	// A set allowlist that names `@default` grants it only as the parent's live model. With no
 	// parent model the resolver's configured-default fallback is not a grant, so the `@default`
@@ -577,8 +581,6 @@ export async function resolveEffectiveSubagentPolicy(
 		// selector; only syntax and empty expansions are judged without one.
 		const warmRegistry = modelRegistry && modelRegistry.getAvailable().length > 0 ? modelRegistry : undefined;
 		for (const pattern of requestPatterns) {
-			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
-			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
 			const requestedRole = resolveExplicitModelRole(pattern, settings);
 			if (requestedRole && isKindRole(requestedRole)) {
 				throw new StructuredSubagentError(

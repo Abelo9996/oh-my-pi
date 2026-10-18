@@ -1957,6 +1957,21 @@ describe("per-call model gate and approval", () => {
 		expect(policy.modelOverride).toEqual(["anthropic/claude-opus-4-5"]);
 	});
 
+	it.each(["default", "default:high"])(
+		"rejects an ambiguous %s candidate before skipping parent inheritance",
+		async model => {
+			mockDiscovery();
+			const childSession = gated({
+				"task.perCallModel": "on",
+				modelRoles: { task: "anthropic/claude-opus-4-5" },
+				"task.perCallModelAllow": ["@task", "@default"],
+			});
+			await expect(
+				resolveEffectiveSubagentPolicy(request({ session: childSession, model: [model, "@task"] })),
+			).rejects.toThrow(/ambiguous `model`/);
+		},
+	);
+
 	it("only grants chat models and rejects non-chat roles and models before dispatch", async () => {
 		const IMAGE = buildModel({ ...MODEL, id: "image-maker", name: "Image Maker", kind: "image" });
 		const byKind = {

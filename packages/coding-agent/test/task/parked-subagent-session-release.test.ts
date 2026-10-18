@@ -20,7 +20,8 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { cfgContextPromotionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { createSubagentSettings, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -100,7 +101,7 @@ function writeAndObserveLiveSettings(id: string): WeakRef<Settings> {
 }
 
 /** Runs `AGENT_ID` to a finished keep-alive state; `release` drops the mock's session-bound recordings. */
-async function runKeptAliveSubagent(): Promise<{ release(): void; close(): void }> {
+async function runKeptAliveSubagent(perCallSettings?: Settings): Promise<{ release(): void; close(): void }> {
 	// Under the isolated HOME: project discovery walks up from cwd and stops at os.homedir(). On Windows
 	// os.tmpdir() lives under the real home, so a cwd outside the fake HOME would walk into the real
 	// ~/.omp and load the developer's installed plugins as project plugins.
@@ -133,17 +134,20 @@ async function runKeptAliveSubagent(): Promise<{ release(): void; close(): void 
 			modelOverride: "mock/mock-model",
 			authStorage,
 			modelRegistry,
-			settings: Settings.isolated({
-				// No TTL timer: the test parks explicitly through the same path the timer takes.
-				"task.agentIdleTtlMs": 0,
-				"async.enabled": false,
-				"compaction.enabled": false,
-				"retry.enabled": false,
-				"todo.enabled": false,
-				"todo.reminders": false,
-				"advisor.enabled": false,
-				modelRoles: { default: "mock/mock-model" },
-			}),
+			settings:
+				perCallSettings ??
+				Settings.isolated({
+					// No TTL timer: the test parks explicitly through the same path the timer takes.
+					"task.agentIdleTtlMs": 0,
+					"async.enabled": false,
+					"compaction.enabled": false,
+					"retry.enabled": false,
+					"todo.enabled": false,
+					"todo.reminders": false,
+					"advisor.enabled": false,
+					modelRoles: { default: "mock/mock-model" },
+				}),
+			perCallModelGrants: perCallSettings ? { settings: perCallSettings, agentName: "task" } : undefined,
 			enableLsp: false,
 			enableMCP: false,
 			enableIrc: false,
@@ -194,6 +198,35 @@ it("parks without retaining the run's settings overlay and revives with the sett
 
 		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
 		expect(cfgContextPromotionEnabled.get(revived)).toBe(true);
+	} finally {
+		run.close();
+	}
+}, 30_000);
+
+it("keeps ordinary descendants' model fallback enabled after their per-call parent warm-revives", async () => {
+	const run = await runKeptAliveSubagent(
+		Settings.isolated({
+			"task.perCallModelFallbacks": "off",
+			"task.agentIdleTtlMs": 0,
+			"async.enabled": false,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"todo.reminders": false,
+			"advisor.enabled": false,
+			modelRoles: { review: "mock/mock-model" },
+		}),
+	);
+	try {
+		const session = AgentRegistry.global().get(AGENT_ID)?.session;
+		if (!session) throw new Error("Expected a kept-alive per-call session");
+		expect(cfgRetryModelFallback.get(session.settings)).toBe(false);
+		expect(cfgRetryModelFallback.get(createSubagentSettings(session.settings))).toBe(true);
+
+		await AgentLifecycleManager.global().park(AGENT_ID);
+		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		expect(cfgRetryModelFallback.get(revived.settings)).toBe(false);
+		expect(cfgRetryModelFallback.get(createSubagentSettings(revived.settings))).toBe(true);
 	} finally {
 		run.close();
 	}

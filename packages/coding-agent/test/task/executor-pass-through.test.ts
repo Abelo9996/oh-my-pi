@@ -549,6 +549,101 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy).not.toHaveBeenCalled();
 	});
 
+	for (const { label, efforts, approved, error } of [
+		{
+			label: "rejects a model whose floor exceeds the ceiling",
+			efforts: [Effort.High],
+			approved: true,
+			error: /has no supported thinking effort at or below task.maxEffort=low/,
+		},
+		{
+			label: "rejects an unapproved model that fits the ceiling",
+			efforts: [Effort.Low, Effort.High],
+			approved: false,
+			error: /not an approved model/,
+		},
+		{
+			label: "clamps an approved model's explicit effort to the ceiling",
+			efforts: [Effort.Low, Effort.High],
+			approved: true,
+			error: undefined,
+		},
+	]) {
+		it(`${label} when per-call resolution is deferred to the session`, async () => {
+			const cwd = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-per-call-deferred-ceiling-"));
+			const authStorage = await AuthStorage.create(":memory:");
+			const id = "subagent-per-call-deferred-ceiling";
+			const sourceId = "executor-per-call-deferred-ceiling";
+			try {
+				authStorage.keys.setRuntime("mock", "test-key");
+				registerMockApi(sourceId);
+				const model = Object.assign(
+					createMockModel({
+						id: "per-call-deferred-ceiling",
+						reasoning: true,
+						handler: () => ({ content: ["Completed within the ceiling."] }),
+					}),
+					{ thinking: { mode: "effort" as const, efforts, defaultLevel: Effort.High } },
+				);
+				const selector = `${model.provider}/${model.id}:high`;
+				const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+				let warm = false;
+				vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => (warm ? [model] : []));
+				vi.spyOn(modelRegistry, "getAll").mockImplementation(() => (warm ? [model] : []));
+				const find = modelRegistry.find.bind(modelRegistry);
+				vi.spyOn(modelRegistry, "find").mockImplementation((provider, modelId) =>
+					warm && provider === model.provider && modelId === model.id ? model : find(provider, modelId),
+				);
+				const createAgentSession = sdkModule.createAgentSession;
+				vi.spyOn(sdkModule, "createAgentSession").mockImplementation(options => {
+					warm = true;
+					return createAgentSession(options);
+				});
+				const settings = Settings.isolated({
+					"task.maxEffort": "low",
+					"async.enabled": false,
+					"compaction.enabled": false,
+					"retry.enabled": false,
+					modelRoles: { review: approved ? selector : "mock/another-model" },
+				});
+				const result = await runSubprocess({
+					...baseOptions,
+					cwd,
+					id,
+					agent: { ...baseAgent, tools: ["read"] },
+					modelOverride: [selector],
+					settings,
+					modelRegistry,
+					perCallModelGrants: { settings, agentName: baseAgent.name },
+					structured: false,
+					keepAlive: false,
+					restrictToolNames: true,
+					enableMCP: false,
+					enableIrc: false,
+					rules: [],
+					preloadedExtensionPaths: [],
+					preloadedPreparedExtensions: [],
+					preloadedCustomToolPaths: [],
+				});
+
+				if (error) {
+					expect(result.exitCode).toBe(1);
+					expect(result.stderr).toMatch(error);
+					expect(model.calls).toHaveLength(0);
+				} else {
+					expect(result.exitCode).toBe(0);
+					expect(model.calls.map(call => call.options?.reasoning)).toEqual([Effort.Low]);
+				}
+			} finally {
+				await AgentRegistry.global().get(id)?.session?.dispose();
+				AgentRegistry.global().unregister(id);
+				unregisterCustomApis(sourceId);
+				authStorage.close();
+				await fs.promises.rm(cwd, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
+
 	it("preserves the model's full effort range by default", async () => {
 		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
