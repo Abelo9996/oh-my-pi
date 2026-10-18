@@ -12,6 +12,7 @@
  * way here as they do everywhere else.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { getBundledModel, isGeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRegistry } from "../config/model-registry";
@@ -145,7 +146,7 @@ function identity(model: Pick<Model<Api>, "provider" | "id">): string {
 export function isPerCallModelApproved(
 	model: Pick<Model<Api>, "provider" | "id">,
 	grants: PerCallModelGrants,
-	registry: Pick<ModelRegistry, "getAvailable">,
+	registry: Pick<ModelRegistry, "getAvailable"> & Partial<Pick<ModelRegistry, "getAll">>,
 	use: PerCallModelUse,
 ): boolean {
 	const patterns = perCallModelGrantPatterns(grants, use);
@@ -155,17 +156,28 @@ export function isPerCallModelApproved(
 	// Subagents run chat models only; a grant matching an image, search, speech or judge model does not count.
 	const chat = registry.getAvailable("chat");
 	const chatIds = new Set(chat.map(identity));
+	const catalogIds = new Set(registry.getAll?.("all").map(identity));
+	const isKnownModel = (selector: string): boolean => {
+		if (chatIds.has(selector) || catalogIds.has(selector)) return true;
+		const slash = selector.indexOf("/");
+		const provider = selector.slice(0, slash);
+		return (
+			slash > 0 &&
+			isGeneratedProvider(provider) &&
+			getBundledModel(provider, selector.slice(slash + 1)) !== undefined
+		);
+	};
 	const literalGrants = new Set<string>();
 	const patternGrants: string[] = [];
 	for (const pattern of patterns) {
 		const selector = pattern.trim();
-		const base = chatIds.has(selector)
+		const base = isKnownModel(selector)
 			? selector
 			: splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
-		if (chatIds.has(base)) literalGrants.add(base);
+		if (isKnownModel(base)) literalGrants.add(base);
 		else patternGrants.push(pattern);
 	}
-	if (literalGrants.has(target)) return true;
+	if (literalGrants.has(target) && chatIds.has(target)) return true;
 	if (patternGrants.length === 0) return false;
 	// An ambiguous grant counts as the provider selection would pick, not the first catalog entry.
 	return filterAvailableModelsByEnabledPatterns(
@@ -180,7 +192,7 @@ export function isPerCallModelApproved(
 export function assertPerCallModelApproved(
 	model: Pick<Model<Api>, "provider" | "id">,
 	grants: PerCallModelGrants,
-	registry: Pick<ModelRegistry, "getAvailable">,
+	registry: Pick<ModelRegistry, "getAvailable"> & Partial<Pick<ModelRegistry, "getAll">>,
 	use: PerCallModelUse,
 ): void {
 	if (isPerCallModelApproved(model, grants, registry, use)) return;

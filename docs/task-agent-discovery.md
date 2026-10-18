@@ -266,7 +266,10 @@ defaults, project agent frontmatter and saved transcripts are not enough. Globs 
 operator-configured grants match the same way as everywhere else: a glob in a role value, trusted
 agent frontmatter model, `task.agentModelOverrides` entry, or allowlist entry grants every chat model it
 matches (`*/*` grants the whole catalog); a bare `*` is not a glob but a spelling of `@default`, so
-it never grants the catalog. A grant naming a catalog id literally grants exactly that model. A role
+it never grants the catalog. A grant naming a known model id literally (bundled, discovered or custom,
+even while it is unavailable) grants exactly that model and only while it is available; its brackets
+never act as a glob. An entry that names no known model is treated as a pattern, so write a never-catalogued
+id containing `[`/`]` only when you intend glob matching. A role
 alias inside a role value (for example `modelRoles.review: "@smol"`) expands only through configured
 roles: an unconfigured role such as `@smol` borrows `modelRoles.default` as the resolver does, but
 never grants the built-in priority list the resolver would fall back to. The non-chat roles (`image`,

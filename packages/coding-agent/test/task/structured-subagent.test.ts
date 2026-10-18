@@ -6,6 +6,7 @@ import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { normalizeModelPatternList, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import {
 	disableProvider,
@@ -1678,6 +1679,47 @@ describe("per-call literal bracket identifiers", () => {
 		expect([BRACKETED, SIBLING].map(model => approves([`${identity}:high`], model))).toEqual([true, false]);
 		expect(approves(["zhipu-coding-plan/glm-5.2-highspeed[0-9]"], SIBLING)).toBe(true);
 	});
+
+	it.each(["select", "dispatch"] as const)(
+		"keeps a catalogued literal grant exact for %s when that model becomes unavailable",
+		use => {
+			const literal = getBundledModel("zhipu-coding-plan", "glm-5.2-highspeed[1m]");
+			if (!literal) throw new Error("Bundled bracket fixture is missing");
+			const sibling = { ...literal, id: "glm-5.2-highspeed1" };
+			for (const modelRoles of [{ review: identity }, { review: `${identity}:high` }]) {
+				const grants = { settings: Settings.isolated({ modelRoles }), agentName: "worker" };
+				for (const registry of [
+					{ getAvailable: () => [sibling] },
+					{ getAvailable: () => [sibling], getAll: () => [literal, sibling] },
+				]) {
+					expect(isPerCallModelApproved(sibling, grants, registry, use)).toBe(false);
+					expect(isPerCallModelApproved(literal, grants, registry, use)).toBe(false);
+				}
+			}
+			const custom = { ...BRACKETED, provider: "custom-host", id: "model[1m]" };
+			const customSibling = { ...custom, id: "model1" };
+			const customGrants = {
+				settings: Settings.isolated({ modelRoles: { review: "custom-host/model[1m]" } }),
+				agentName: "worker",
+			};
+			expect(
+				isPerCallModelApproved(
+					customSibling,
+					customGrants,
+					{ getAvailable: () => [customSibling], getAll: () => [custom, customSibling] },
+					use,
+				),
+			).toBe(false);
+			expect(
+				isPerCallModelApproved(customSibling, customGrants, { getAvailable: () => [custom, customSibling] }, use),
+			).toBe(false);
+			const wildcard = {
+				settings: Settings.isolated({ modelRoles: { review: "zhipu-coding-plan/*" } }),
+				agentName: "worker",
+			};
+			expect(isPerCallModelApproved(sibling, wildcard, { getAvailable: () => [sibling] }, use)).toBe(true);
+		},
+	);
 });
 
 describe("per-call model gate and approval", () => {
