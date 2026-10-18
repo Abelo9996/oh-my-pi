@@ -458,6 +458,34 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBe(Effort.Low);
 	});
 
+	it("caps a per-call model's thinking suffix at task.maxEffort, leaving plain spawns uncapped", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const selector = `${model.provider}/${model.id}:max`;
+		const settings = Settings.isolated({ "task.maxEffort": "low", modelRoles: { review: selector } });
+		const spy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockImplementation(async () => createSessionResult(yieldEmittingSession()));
+
+		for (const perCallModelGrants of [{ settings, agentName: baseAgent.name }, undefined]) {
+			const result = await runSubprocess({
+				...baseOptions,
+				id: `subagent-suffix-ceiling-${perCallModelGrants ? "per-call" : "plain"}`,
+				modelOverride: [selector],
+				perCallModelGrants,
+				settings,
+				modelRegistry: createModelRegistry(model),
+			});
+			expect(result.exitCode).toBe(0);
+		}
+
+		// The ceiling rides into the per-call session so retry-fallback recovery cannot raise it either.
+		expect(spy.mock.calls.map(call => [call[0]?.thinkingLevel, call[0]?.thinkingLevelCeiling])).toEqual([
+			[ThinkingLevel.Low, Effort.Low],
+			[ThinkingLevel.Max, undefined],
+		]);
+	});
+
 	it("rejects a spawn when task.maxEffort is below the model floor", async () => {
 		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");

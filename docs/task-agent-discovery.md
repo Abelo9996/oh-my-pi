@@ -277,6 +277,10 @@ its own model and override as grants. Cold revival applies the same check, grant
 frontmatter model only while that agent is still discovered. `hostModel` keeps `model`'s precedence
 but is neither gated nor checked.
 
+A spawn with a per-call `model` runs under `task.maxEffort` as a hard ceiling, exactly like the
+`effort` hint: a `:level` on the selector or on an approved role's value above the ceiling is clamped
+to it, and retry-fallback recovery cannot raise it. Spawns without `model` are unaffected.
+
 After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
 
 The `Alt+P` task model pick is session-only; saving a model in `/agents` replaces that runtime selection for the current session and persists the new value for future sessions.
