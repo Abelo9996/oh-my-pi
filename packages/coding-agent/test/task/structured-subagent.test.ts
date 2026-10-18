@@ -1939,7 +1939,7 @@ describe("per-call model gate and approval", () => {
 		).resolves.toBeDefined();
 	});
 
-	it("rejects an allowlisted `@default` at preflight when the parent has no active model", async () => {
+	it("drops an allowlisted `@default` when the parent has no active model, failing only a selection of nothing else", async () => {
 		mockDiscovery();
 		const settings = {
 			"task.perCallModel": "on",
@@ -1950,6 +1950,11 @@ describe("per-call model gate and approval", () => {
 		await expect(
 			resolveEffectiveSubagentPolicy(request({ session: gated(settings), model: ["@default"] })),
 		).rejects.toThrow(/parent session has no active model/);
+		// Other candidates still run; only the `@default` one is skipped.
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: gated(settings), model: ["@default", "@task"] }),
+		);
+		expect(policy.modelOverride).toEqual(["anthropic/claude-opus-4-5"]);
 	});
 
 	it("only grants chat models and rejects non-chat roles and models before dispatch", async () => {

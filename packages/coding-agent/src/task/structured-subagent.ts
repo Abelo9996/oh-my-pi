@@ -500,7 +500,7 @@ export async function resolveEffectiveSubagentPolicy(
 	const configuredOverride = Object.hasOwn(agentModelOverrides, agentName)
 		? agentModelOverrides[agentName]
 		: undefined;
-	const perCallModel = hasPreparedSeance ? undefined : request.model;
+	let perCallModel = hasPreparedSeance ? undefined : request.model;
 	if (perCallModel !== undefined) {
 		const mode = cfgTaskPerCallModel.get(request.session.settings);
 		if (mode === "off") {
@@ -518,6 +518,27 @@ export async function resolveEffectiveSubagentPolicy(
 				`Agent "${agentName}" has its own configured model (${configuredOverride !== undefined ? "task.agentModelOverrides" : "frontmatter"}), so per-call \`model\` is rejected under task.perCallModel: unpinned. Omit \`model\`.`,
 			);
 		}
+	}
+	// A set allowlist that names `@default` grants it only as the parent's live model. With no
+	// parent model the resolver's configured-default fallback is not a grant, so the `@default`
+	// candidates are dropped; a selection of nothing else fails here instead of at every request.
+	if (
+		perCallModel !== undefined &&
+		!parentActiveModelPattern &&
+		cfgTaskPerCallModelAllow.get(request.session.settings).length > 0 &&
+		perCallModelAllowsParent(request.session.settings) &&
+		modelSelectionInheritsSessionModel(perCallModel)
+	) {
+		const others = normalizeModelPatternList(perCallModel).filter(
+			pattern => !modelSelectionInheritsSessionModel(pattern),
+		);
+		if (others.length === 0) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`\`model\` ${JSON.stringify(perCallModel)} asks for the parent's model, but the parent session has no active model; name a listed role or model instead.`,
+			);
+		}
+		perCallModel = others;
 	}
 	const perCallModelGrants: PerCallModelGrants | undefined =
 		perCallModel === undefined
@@ -571,18 +592,6 @@ export async function resolveEffectiveSubagentPolicy(
 					`\`model\` ${JSON.stringify(pattern)} asks for the parent's model, which task.perCallModelAllow does not include; add "@default" to the list or pick a listed role.`,
 				);
 			}
-			// A set allowlist grants `@default` only as the parent's live model; without one the
-			// resolver's configured-default fallback is not a grant and every request would be refused.
-			if (
-				modelSelectionInheritsSessionModel(pattern) &&
-				!parentActiveModelPattern &&
-				cfgTaskPerCallModelAllow.get(settings).length > 0
-			) {
-				throw new StructuredSubagentError(
-					"preflight",
-					`\`model\` ${JSON.stringify(pattern)} asks for the parent's model, but the parent session has no active model; name a listed role or model instead.`,
-				);
-			}
 			// `@default` asks for the parent's live model, not a pattern to look up.
 			if (!warmRegistry || modelSelectionInheritsSessionModel(pattern)) continue;
 			// Validate every concrete candidate, even beside @default or another
@@ -626,12 +635,12 @@ export async function resolveEffectiveSubagentPolicy(
 		}
 		// With `@default` in the selection the resolver already answered with the
 		// inherited model the parent is running; there is nothing left to match.
-		if (!modelSelectionInheritsSessionModel(request.model)) {
+		if (!modelSelectionInheritsSessionModel(perCallModel)) {
 			// Role-expand the request's own patterns: `modelOverride` may come
 			// from a lower-precedence source, and blaming `model` for its
 			// failure misleads. An empty expansion is a config/shape failure no
 			// amount of discovery can fix, so it is rejected even on a cold registry.
-			const resolvedRequest = resolveConfiguredModelPatterns(request.model, settings);
+			const resolvedRequest = resolveConfiguredModelPatterns(perCallModel, settings);
 			const unmatched =
 				resolvedRequest.length === 0 ||
 				(warmRegistry !== undefined &&
@@ -641,7 +650,7 @@ export async function resolveEffectiveSubagentPolicy(
 			if (unmatched) {
 				throw new StructuredSubagentError(
 					"preflight",
-					`No available model matches \`model\`: ${JSON.stringify(request.model)}. \`omp models find <query> --json\` lists selectors, but only fix the spelling of the same model. Do NOT substitute a different model or drop \`model\` unless the user allowed it: stop and report that the requested model is unavailable.`,
+					`No available model matches \`model\`: ${JSON.stringify(perCallModel)}. \`omp models find <query> --json\` lists selectors, but only fix the spelling of the same model. Do NOT substitute a different model or drop \`model\` unless the user allowed it: stop and report that the requested model is unavailable.`,
 				);
 			}
 		}
