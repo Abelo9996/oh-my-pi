@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `htmlToMarkdown`'s `hiddenContent` option to include collapsed sections without including scripts or templates in `reachable` mode ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
+
 ## [18.12.2] - 2026-10-18
 
 ### Added

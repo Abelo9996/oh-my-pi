@@ -1,7 +1,8 @@
 //! HTML to Markdown conversion.
 
 use html_to_markdown_rs::{
-	ConversionOptions, PreprocessingOptions, PreprocessingPreset, WarningKind, convert,
+	ConversionOptions, HiddenContent, PreprocessingOptions, PreprocessingPreset, WarningKind,
+	convert,
 };
 use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
@@ -13,9 +14,11 @@ use crate::{js::into_string, task};
 #[derive(Debug, Default)]
 pub struct HtmlToMarkdownOptions {
 	/// Remove navigation elements, forms, headers, footers.
-	pub clean_content: Option<bool>,
+	pub clean_content:  Option<bool>,
 	/// Skip images during conversion.
-	pub skip_images:   Option<bool>,
+	pub skip_images:    Option<bool>,
+	/// Hidden page content to include: "drop" (default), "reachable", or "all".
+	pub hidden_content: Option<String>,
 }
 
 /// Convert HTML source to Markdown with optional preprocessing.
@@ -31,10 +34,18 @@ pub fn html_to_markdown(
 	let options = options.unwrap_or_default();
 	let clean_content = options.clean_content.unwrap_or(false);
 	let skip_images = options.skip_images.unwrap_or(false);
+	let hidden_content = options
+		.hidden_content
+		.as_deref()
+		.map(HiddenContent::parse)
+		.transpose()
+		.map_err(|err| Error::from_reason(format!("Conversion error: {err}")))?
+		.unwrap_or_default();
 
 	Ok(task::blocking("html_to_markdown", (), move |_| {
 		let conversion_opts = ConversionOptions {
 			skip_images,
+			hidden_content,
 			preprocessing: PreprocessingOptions {
 				enabled:           clean_content,
 				preset:            PreprocessingPreset::Aggressive,

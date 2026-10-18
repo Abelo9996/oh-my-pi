@@ -1126,6 +1126,18 @@ try {
 			// Navigation/footer may or may not be removed depending on preprocessing
 		});
 
+		it("keeps collapsed details only when requested without exposing templates", async () => {
+			const html =
+				'<main><p>Product information</p><div style="display:none"><p>Is Assembly Required? No</p></div><template>Unrendered product claim</template></main>';
+
+			const defaultContent = await htmlToMarkdown(html);
+			const reachableContent = await htmlToMarkdown(html, { hiddenContent: "reachable" });
+
+			expect(defaultContent).not.toContain("Is Assembly Required?");
+			expect(reachableContent).toContain("Is Assembly Required? No");
+			expect(reachableContent).not.toContain("Unrendered product claim");
+		});
+
 		it("should reject depth-truncated HTML", async () => {
 			const html = `${"<div>".repeat(90)}<p>deep-content</p>${"</div>".repeat(90)}`;
 
