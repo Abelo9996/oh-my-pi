@@ -15,6 +15,7 @@ import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
+	getModelMatchPreferences,
 	modelSelectionInheritsSessionModel,
 	normalizeModelPatternList,
 	resolveConfiguredModelPatterns,
@@ -139,9 +140,13 @@ export function isPerCallModelApproved(
 	if (patterns.length === 0) return false;
 	const target = identity(model);
 	// Subagents run chat models only; a grant matching an image, search, speech or judge model does not count.
-	return filterAvailableModelsByEnabledPatterns(registry.getAvailable("chat"), patterns, grants.settings).some(
-		granted => identity(granted) === target,
-	);
+	// An ambiguous grant counts as the provider selection would pick, not the first catalog entry.
+	return filterAvailableModelsByEnabledPatterns(
+		registry.getAvailable("chat"),
+		patterns,
+		grants.settings,
+		getModelMatchPreferences(grants.settings),
+	).some(granted => identity(granted) === target);
 }
 
 /** Throw {@link PerCallModelError} unless `model` is approved. */

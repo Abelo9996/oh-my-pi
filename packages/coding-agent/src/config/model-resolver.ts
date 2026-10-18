@@ -2065,15 +2065,19 @@ export async function resolveAllowedModels(
  * consistent with the empty-list contract of {@link resolveAllowedModels}. Callers that render
  * a UI picker should treat an empty list as "hide the picker entry", matching how the SDK
  * surfaces the same misconfiguration during session initialization.
+ *
+ * `preferences` ranks ambiguous non-glob selectors like model selection does
+ * (`modelProviderOrder`, recent usage); without it the first catalog match wins.
  */
 export function filterAvailableModelsByEnabledPatterns(
 	available: Model<Api>[],
 	patterns: readonly string[],
 	settings?: Settings,
+	preferences?: ModelMatchPreferences,
 ): Model<Api>[] {
 	if (patterns.length === 0) return available;
 
-	const context = buildPreferenceContext(available, undefined);
+	const context = buildPreferenceContext(available, preferences);
 	const allowedModels: Model<Api>[] = [];
 	const addAllowed = (model: Model<Api>) => {
 		allowedModels.push(model);

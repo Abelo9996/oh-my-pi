@@ -1817,6 +1817,18 @@ describe("per-call model gate and approval", () => {
 		}
 	});
 
+	it("matches a fuzzy grant to the provider selection prefers, not the first catalog entry", () => {
+		const alpha = buildModel({ ...MODEL, provider: "alpha", id: "shared-id", name: "Shared" });
+		const beta = buildModel({ ...MODEL, provider: "beta", id: "shared-id", name: "Shared" });
+		const available = { getAvailable: () => [alpha, beta] };
+		const settings = Settings.isolated({ modelRoles: { qa: "shared-id" }, modelProviderOrder: ["beta", "alpha"] });
+		// Selection resolves `@qa` to beta, so beta is the granted model.
+		expect(resolveModelOverride(["shared-id"], available, settings).model?.provider).toBe("beta");
+		const grants = { settings, agentName: "worker" };
+		expect(isPerCallModelApproved(beta, grants, available, "select")).toBe(true);
+		expect(isPerCallModelApproved(alpha, grants, available, "select")).toBe(false);
+	});
+
 	for (const { role, roles } of [
 		{ role: "review", roles: { review: "anthropic/claude-sonnet-4-5" } },
 		{ role: "smol", roles: { default: "anthropic/claude-sonnet-4-5" } },
