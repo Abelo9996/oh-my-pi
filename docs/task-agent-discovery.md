@@ -256,7 +256,7 @@ naming one of them, or a model of another kind, fails preflight with that reason
 
 Two settings narrow those grants:
 
-- `task.perCallModelAllow`: a list of roles or model patterns (for example `["@smol", "@review", "anthropic/*"]`). When set, it replaces the derived grants; a listed role brings its configured value (for an unset role, the configured role the resolver borrows, such as `modelRoles.default` for `@smol`; never built-in role defaults) and its fallback chain. The parent's model counts only if `@default` is listed, and a `@default` request then fails preflight when the parent has no active model; with no list it is always allowed.
+- `task.perCallModelAllow`: a list of roles or model patterns (for example `["@smol", "@review", "anthropic/*"]`). When set, it replaces the derived grants; a listed role brings its configured value (for an unset role, the configured role the resolver borrows, such as `modelRoles.default` for `@smol`; never built-in role defaults) and its fallback chain. The parent's model counts only if `@default` is listed, and a `@default` request then fails preflight when the parent has no active model. A listed `@default` grants only the parent's live model, not `modelRoles.default` or the `retry.fallbackChains.default` entries (other listed roles without a chain of their own still inherit that chain). With no list the parent's model is always allowed.
 - `task.perCallModelFallbacks` decides how concrete `retry.fallbackChains` models count:
 
 | Value | Requestable in `model` | Runtime fallback |

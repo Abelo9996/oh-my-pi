@@ -329,7 +329,7 @@ export const cfgTaskPerCallModelAllow = register({
 		group: "Subagents",
 		label: "Per-Call Model Allowlist",
 		description:
-			'Chat roles or model patterns a per-call model may use, e.g. ["@smol", "@review", "anthropic/*"]. A listed role includes its retry fallback chain (subject to task.perCallModelFallbacks); list "@default" to allow the parent\'s model. Empty: every configured chat role, agent model and override, plus the parent\'s model.',
+			'Chat roles or model patterns a per-call model may use, e.g. ["@smol", "@review", "anthropic/*"]. A listed role includes its retry fallback chain (subject to task.perCallModelFallbacks); list "@default" to allow the parent\'s model (only that model, not the default fallback chain). Empty: every configured chat role, agent model and override, plus the parent\'s model.',
 	},
 });
 
