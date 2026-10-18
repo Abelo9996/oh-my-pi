@@ -21,6 +21,7 @@ import agentCreationArchitectPrompt from "../prompts/system/agent-creation-archi
 import agentCreationUserPrompt from "../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../sdk";
 import { refreshAgentDiscovery } from "../task";
+import { getAgentModelConfig } from "../task/agents";
 import { discoverAgents } from "../task/discovery";
 import { resolveAgentPrewalkDefault } from "../task/prewalk";
 import { createModelBrowserSource } from "./model-browser-source";
@@ -86,7 +87,7 @@ export function createAgentsHubDeps(
 		effectiveModelPatterns: agent =>
 			resolveAgentModelPatterns({
 				settingsOverride: agent.overrideModel,
-				agentModel: agent.model,
+				agentModel: getAgentModelConfig(agent).model,
 				settings,
 				activeModelPattern,
 				fallbackModelPattern: defaultModelPattern,
@@ -105,12 +106,15 @@ export function createAgentsHubDeps(
 		effectivePrewalkPattern: agent =>
 			resolveAgentPrewalkPattern({
 				settingsOverride: agent.prewalkOverride,
-				agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+				agentPrewalk: resolveAgentPrewalkDefault(
+					{ ...agent, prewalk: getAgentModelConfig(agent).prewalk },
+					cfgTaskPrewalk.get(settings),
+				),
 			}),
 		effectiveAdvisorPattern: agent => {
 			const selection = resolveAgentAdvisorSelection({
 				settingsOverride: agent.advisorOverride,
-				agentAdvisor: agent.advisor,
+				agentAdvisor: getAgentModelConfig(agent).advisor,
 			});
 			return selection ? (selection.model ?? "@advisor") : undefined;
 		},

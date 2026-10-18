@@ -1590,6 +1590,94 @@ describe("per-call selector syntax", () => {
 			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "anthropic/claude-sonnet-4-5:heigh" })),
 		).rejects.toThrow(/thinking suffix/);
 	});
+
+	it.each(["zhipu-coding-plan/glm-5.2-highspeed[1m]", "zhipu-coding-plan/glm-5.2-highspeed[1m]:high"])(
+		"accepts the literal catalog identifier %s",
+		model => {
+			expect(invalidModelSelectorReason(model, "The call")).toBeUndefined();
+		},
+	);
+
+	it.each(["zhipu-coding-plan/glm-5.2-highspeed*", "zhipu-coding-plan/{glm,gpt}", "zhipu-coding-plan/glm?"])(
+		"keeps rejecting glob selector %s",
+		model => {
+			expect(invalidModelSelectorReason(model, "The call")).toMatch(/model/);
+		},
+	);
+});
+
+describe("per-call literal bracket identifiers", () => {
+	const BRACKETED = buildModel({
+		...MODEL,
+		provider: "zhipu-coding-plan",
+		id: "glm-5.2-highspeed[1m]",
+		name: "GLM 5.2 Highspeed 1M",
+	});
+	const SIBLING = buildModel({ ...BRACKETED, id: "glm-5.2-highspeed1", name: "GLM 5.2 Highspeed" });
+	const identity = "zhipu-coding-plan/glm-5.2-highspeed[1m]";
+
+	function bracketSession(settings: Record<string, unknown>): ToolSession {
+		return {
+			...session({
+				settings: Settings.isolated({ "task.maxRecursionDepth": 2, "task.perCallModel": "on", ...settings }),
+			}),
+			modelRegistry: { getAvailable: () => [MODEL, BRACKETED, SIBLING] },
+			getActiveModelString: () => "anthropic/claude-sonnet-4-5",
+		} as ToolSession;
+	}
+
+	it.each([identity, `${identity}:high`])("selects and approves the exact configured model %s", async model => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: bracketSession({ modelRoles: { review: identity } }), model }),
+		);
+		expect(policy.modelOverride).toEqual([model]);
+		const grants = policy.perCallModelGrants;
+		if (!grants) throw new Error("Expected per-call grants");
+		expect(isPerCallModelApproved(BRACKETED, grants, { getAvailable: () => [BRACKETED, SIBLING] }, "select")).toBe(
+			true,
+		);
+		expect(isPerCallModelApproved(SIBLING, grants, { getAvailable: () => [BRACKETED, SIBLING] }, "select")).toBe(
+			false,
+		);
+	});
+
+	it("does not approve a bracketed model the operator never configured", async () => {
+		mockDiscovery();
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: bracketSession({}), model: identity })),
+		).rejects.toThrow(/not configured/);
+	});
+
+	it.each(["zhipu-coding-plan/glm-5.2-highspeed[m1]", "zhipu-coding-plan/glm-5.2-highspeed[1]"])(
+		"does not treat %s as a character class",
+		async model => {
+			mockDiscovery();
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({ session: bracketSession({ modelRoles: { review: identity } }), model }),
+				),
+			).rejects.toThrow(/No available model matches/);
+		},
+	);
+
+	it("keeps a configured wildcard grant matching while a literal bracket grant names one model", () => {
+		const available = { getAvailable: () => [MODEL, BRACKETED, SIBLING] };
+		const approves = (allow: string[], model: typeof MODEL) =>
+			isPerCallModelApproved(
+				model,
+				{ settings: Settings.isolated({ "task.perCallModelAllow": allow }), agentName: "worker" },
+				available,
+				"select",
+			);
+		expect([BRACKETED, SIBLING, MODEL].map(model => approves(["zhipu-coding-plan/*"], model))).toEqual([
+			true,
+			true,
+			false,
+		]);
+		expect([BRACKETED, SIBLING].map(model => approves([`${identity}:high`], model))).toEqual([true, false]);
+		expect(approves(["zhipu-coding-plan/glm-5.2-highspeed[0-9]"], SIBLING)).toBe(true);
+	});
 });
 
 describe("per-call model gate and approval", () => {

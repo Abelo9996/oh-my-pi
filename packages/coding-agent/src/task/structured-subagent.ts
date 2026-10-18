@@ -341,7 +341,7 @@ export function invalidModelSelectorReason(model: unknown, label: string): strin
 	if (model === undefined) return undefined;
 	if (
 		typeof model !== "string" ||
-		!/^[^\s/@,*?[\]{}]+\/[^\s,*?[\]{}]+$/.test(model.trim()) ||
+		!/^[^\s/@,*?[\]{}]+\/[^\s,*?{}]+$/.test(model.trim()) ||
 		modelSelectionInheritsSessionModel(model)
 	) {
 		return `${label} has an invalid \`model\` value ${JSON.stringify(model)}. Use one exact provider/model-id selector, optionally followed by a supported :level. Role aliases, patterns, and candidate arrays are not accepted.`;

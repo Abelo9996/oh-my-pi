@@ -12,6 +12,7 @@
  * way here as they do everywhere else.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRegistry } from "../config/model-registry";
 import {
@@ -152,10 +153,24 @@ export function isPerCallModelApproved(
 	if (patterns.length === 0) return false;
 	const target = identity(model);
 	// Subagents run chat models only; a grant matching an image, search, speech or judge model does not count.
+	const chat = registry.getAvailable("chat");
+	const chatIds = new Set(chat.map(identity));
+	const literalGrants = new Set<string>();
+	const patternGrants: string[] = [];
+	for (const pattern of patterns) {
+		const selector = pattern.trim();
+		const base = chatIds.has(selector)
+			? selector
+			: splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
+		if (chatIds.has(base)) literalGrants.add(base);
+		else patternGrants.push(pattern);
+	}
+	if (literalGrants.has(target)) return true;
+	if (patternGrants.length === 0) return false;
 	// An ambiguous grant counts as the provider selection would pick, not the first catalog entry.
 	return filterAvailableModelsByEnabledPatterns(
-		registry.getAvailable("chat"),
-		patterns,
+		chat,
+		patternGrants,
 		grants.settings,
 		getModelMatchPreferences(grants.settings),
 	).some(granted => identity(granted) === target);

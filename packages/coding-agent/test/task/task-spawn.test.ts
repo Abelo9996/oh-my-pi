@@ -198,6 +198,66 @@ describe("task spawn routing", () => {
 		}
 	});
 
+	it("shows only bundled/user frontmatter model, prewalk and advisor as effective, keeping operator overrides", async () => {
+		const frontmatter = {
+			model: ["anthropic/claude-opus-5"],
+			prewalk: "anthropic/claude-haiku-5",
+			advisor: "anthropic/claude-sonnet-5",
+		};
+		const agents = ["project", "user", "bundled", "legacy-unclassified"].map(source => ({
+			name: `${source}-agent`,
+			description: source,
+			systemPrompt: source,
+			source,
+			...frontmatter,
+		})) as AgentDefinition[];
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
+		const settings = Settings.isolated({ "task.prewalk": false });
+		const auth = createInMemoryAuthStorage();
+		try {
+			const deps = createAgentsHubDeps(
+				"/tmp",
+				settings,
+				new ModelRegistry(auth),
+				() => ({ explicit: [], configured: [], configuredLevel: "user", mode: "explicit-only" }),
+				"anthropic/parent-model",
+			);
+			const view = async () =>
+				Object.fromEntries(
+					(await deps.loadAgents()).map(agent => [
+						agent.source,
+						{
+							model: deps.effectiveModelPatterns(agent),
+							prewalk: deps.effectivePrewalkPattern(agent),
+							advisor: deps.effectiveAdvisorPattern(agent),
+						},
+					]),
+				);
+			const trusted = {
+				model: ["anthropic/claude-opus-5"],
+				prewalk: "anthropic/claude-haiku-5",
+				advisor: "anthropic/claude-sonnet-5",
+			};
+			const untrusted = { model: ["anthropic/parent-model"], prewalk: undefined, advisor: undefined };
+			expect(await view()).toEqual({
+				project: untrusted,
+				user: trusted,
+				bundled: trusted,
+				"legacy-unclassified": untrusted,
+			});
+			deps.setAgentOverride("model", "project-agent", "openai/operator-model");
+			deps.setAgentOverride("prewalk", "project-agent", "openai/operator-prewalk");
+			deps.setAgentOverride("advisor", "project-agent", "openai/operator-advisor");
+			expect((await view()).project).toEqual({
+				model: ["openai/operator-model"],
+				prewalk: "openai/operator-prewalk",
+				advisor: "openai/operator-advisor",
+			});
+		} finally {
+			auth.close();
+		}
+	});
+
 	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
