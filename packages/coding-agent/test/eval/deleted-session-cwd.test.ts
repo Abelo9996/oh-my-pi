@@ -6,6 +6,10 @@ import { getSafeProjectCwd, TempDir } from "@oh-my-pi/pi-utils";
 
 // A session cwd removed mid-session (e.g. a merged worktree) must not make eval
 // unusable: kernels start from an existing directory and keep serving (#16376).
+// Windows refuses to remove a directory that is a process's cwd, so cases that
+// delete a directory while a process sits in it run only on POSIX.
+const posixOnly = it.skipIf(process.platform === "win32");
+
 describe("eval with a deleted session cwd", () => {
 	afterAll(async () => {
 		await disposeAllKernelSessions();
@@ -27,7 +31,7 @@ describe("eval with a deleted session cwd", () => {
 		expect(result.output.trim()).toBe(fs.realpathSync(getSafeProjectCwd(cwd)));
 	});
 
-	it("moves a live Python kernel to the fallback directory once its session cwd is removed", async () => {
+	posixOnly("moves a live Python kernel to the fallback directory once its session cwd is removed", async () => {
 		using tempDir = TempDir.createSync("@eval-deleted-cwd-live-");
 		const cwd = path.join(tempDir.path(), "worktree");
 		fs.mkdirSync(cwd);
@@ -41,7 +45,7 @@ describe("eval with a deleted session cwd", () => {
 		expect(result.output.trim().split("\n")).toEqual(["42", fs.realpathSync(getSafeProjectCwd(cwd))]);
 	});
 
-	it("spawns hosted workers from an existing directory once the process cwd is deleted", async () => {
+	posixOnly("spawns hosted workers from an existing directory once the process cwd is deleted", async () => {
 		using tempDir = TempDir.createSync("@eval-deleted-cwd-worker-");
 		const cwd = path.join(tempDir.path(), "worktree");
 		fs.mkdirSync(cwd);
