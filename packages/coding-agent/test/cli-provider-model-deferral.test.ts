@@ -109,3 +109,70 @@ describe("print-mode suggestions for a provider-qualified miss", () => {
 		}
 	}, 60_000);
 });
+
+describe("print mode with a stale configured default", () => {
+	test("warns on stderr naming the stale default and the model that runs instead", async () => {
+		const home = path.join(os.tmpdir(), `pi-cli-stale-default-${Snowflake.next()}`);
+		const agentDir = path.join(home, ".omp", "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			"modelRoles:\n  default: anthropic/claude-sonnet-9-9\nretry:\n  enabled: false\n",
+		);
+		try {
+			const proc = Bun.spawn(
+				[
+					process.execPath,
+					path.resolve(import.meta.dir, "../src/cli.ts"),
+					"--no-title",
+					"--no-lsp",
+					"--no-extensions",
+					"--no-tools",
+					"--no-session",
+					"-p",
+					"hi",
+				],
+				{
+					cwd: home,
+					env: {
+						PATH: process.env.PATH,
+						HOME: home,
+						USERPROFILE: home,
+						TMPDIR: process.env.TMPDIR,
+						NO_COLOR: "1",
+						ANTHROPIC_API_KEY: "test-key",
+						// The fallback model's request never reaches Anthropic; the test stops the run once the warning is out.
+						ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
+					},
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe",
+				},
+			);
+			const warning = "Default model anthropic/claude-sonnet-9-9 not found. Using anthropic/";
+			const stderr = await readUntil(proc.stderr, warning);
+			proc.kill();
+			await proc.exited;
+			expect(stderr).toContain(warning);
+		} finally {
+			removeSyncWithRetries(home);
+		}
+	}, 60_000);
+});
+
+/** Stderr read until it contains `needle`, or all of it once the stream ends without it. */
+async function readUntil(stream: ReadableStream<Uint8Array>, needle: string): Promise<string> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	let text = "";
+	try {
+		while (!text.includes(needle)) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			text += decoder.decode(value, { stream: true });
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	return text;
+}
