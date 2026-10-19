@@ -397,6 +397,14 @@ describe("analyzeTable", () => {
 		expect(analysis.measures.map(column => column.header)).toEqual(["GNU", "uutils"]);
 	});
 
+	// Regression (#16331): a dotted numeric summary after a status other than `ok` still marks the row.
+	it("keeps dotted numeric status summaries in a status column", () => {
+		const analysis = analyze(
+			"| Task | Result |\n|---|---|\n| a | FAIL. 3 tests |\n| b | passed. 12 checks |\n| c | ERROR. 500 responses |",
+		);
+		expect(analysis.columns[1]!.statuses).toEqual(["bad", "good", "bad"]);
+	});
+
 	// Regression (#16175): space-grouped counts read as prose, so the period column became the measure.
 	it("labels by the period column when the counts beside it group thousands by spaces", () => {
 		const analysis = analyze(

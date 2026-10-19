@@ -327,11 +327,11 @@ const STATUS_MARKS: readonly (readonly [RegExp, Status])[] = [
 	[/^[⚠🟡]/u, "warn"],
 	[/^[⏳🕐]/u, "pending"],
 ];
-/** A leading status word; one abbreviated before a number (`ok. 5–6 gru`, Polish "about") is not a verdict. */
+/** A leading status word; `ok.` before a number (`ok. 5–6 gru`, Polish "about") is not a verdict. */
 const STATUS_WORD = new RegExp(
-	String.raw`^(?:${Object.keys(STATUS_WORDS)
+	String.raw`^(?!ok\.\s*\d)(?:${Object.keys(STATUS_WORDS)
 		.sort((a, b) => b.length - a.length)
-		.join("|")})(?![\w-]|\.\s*\d)`,
+		.join("|")})(?![\w-])`,
 	"i",
 );
 
