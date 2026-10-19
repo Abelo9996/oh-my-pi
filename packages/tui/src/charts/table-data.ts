@@ -199,10 +199,12 @@ const DAY_FIRST_LOCALES = [
 let dayFirst: RegExp | undefined;
 
 /**
- * A date written day first, a day range or a year after it allowed (`9 Oct`,
- * `3–4 paź`, `31 paź – 1 lis`, `9. Okt. 2024`). Month names are matched whole,
- * as `Intl` writes them, so a count of a noun (`3 decks`, `3 out of 5`) stays a
- * number. Built on first use: formatting every month of every locale takes milliseconds.
+ * A date written day first, a day range, a year, a second date or a note after
+ * it allowed (`9 Oct`, `3–4 paź`, `31 paź – 1 lis`, `9. Okt. 2024`,
+ * `5 lis (zmiana)`). Month names are matched whole, as `Intl` writes them, so a
+ * count of a noun (`3 decks`, `3 out of 5`) stays a number; prose after the
+ * month (`3 may fail`, `5 sie zmieni`) reads as a counted word, not a date.
+ * Built on first use: formatting every month of every locale takes milliseconds.
  */
 function dayFirstDate(): RegExp {
 	if (dayFirst) return dayFirst;
@@ -219,7 +221,7 @@ function dayFirstDate(): RegExp {
 	}
 	const months = [...names].map(name => RegExp.escape(name)).join("|");
 	dayFirst = new RegExp(
-		String.raw`^\d{1,2}\.?(?:\s*[-–—]\s*\d{1,2}\.?)?(?:(?<=\.)\s*|\s+)(?:${months})(?![\p{L}\d])`,
+		String.raw`^\d{1,2}\.?(?:\s*[-–—]\s*\d{1,2}\.?)?(?:(?<=\.)\s*|\s+)(?:${months})\.?(?=$|\s*[(,;]|\s*[-–—]\s*\d|\s+\d{4}(?!\d))`,
 		"iu",
 	);
 	return dayFirst;

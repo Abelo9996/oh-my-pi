@@ -302,6 +302,9 @@ describe("parseCell", () => {
 		}
 		expect(parseCell("3 decks")).toMatchObject({ value: 3, fit: "note" });
 		expect(parseCell("3 out of 5")).toMatchObject({ value: 3, fit: "prose" });
+		// A month name followed by prose is a counted word: `may` and `sie` are also English and Polish words.
+		expect(parseCell("3 may fail")).toMatchObject({ value: 3, fit: "prose" });
+		expect(parseCell("5 sie zmieni")).toMatchObject({ value: 5, fit: "prose" });
 		expect(parseCell("12 żółwi")).toMatchObject({ value: 12, fit: "note" });
 		expect(parseCell("3–4 zł")).toMatchObject({ value: 3, upper: 4, figure: "3–4 zł" });
 	});
