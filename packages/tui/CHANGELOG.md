@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the mouse wheel not scrolling the answer pane in the `/btw` history panel ([#16372](https://github.com/can1357/oh-my-pi/issues/16372))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added

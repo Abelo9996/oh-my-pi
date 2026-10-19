@@ -33,6 +33,7 @@ import { formatKeyHint, type KeyId } from "../app-keybindings";
 import { bottomBorder, row, topBorder } from "../chrome/overlay-box";
 import { padToWidth } from "../render/utils";
 import { SplitPane } from "../components/layout/split-pane";
+import { routeSgrMouseInput } from "../mouse";
 import { clampSelection, contentRowWidth, padLinesToHeight, renderScrollableList } from "../chrome/selector-helpers";
 import type { TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode, NativeScroll, NativeUiEvent } from "../native/node";
@@ -148,6 +149,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#listCache: readonly string[] = [];
 	#detailCache: readonly string[] = [];
 	#bodyHeightLast = 1;
+	#bodyTop = 0;
+	#bodyWidth = 0;
+	#bodyFramed = false;
 	readonly #framePrefix = () => `${theme.fg("border", theme.boxRound.vertical)} `;
 	readonly #frameDivider = () => ` ${theme.fg("border", theme.boxRound.vertical)} `;
 	readonly #frameSuffix = () => ` ${theme.fg("border", theme.boxRound.vertical)}`;
@@ -368,6 +372,22 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#options.requestRender();
 	}
 	handleInput(data: string): void {
+		if (data.startsWith("\x1b[<")) {
+			routeSgrMouseInput(data, event => {
+				if (event.wheel === null || event.row < this.#bodyTop || event.row >= this.#bodyTop + this.#bodyHeightLast)
+					return false;
+				if (this.#bodyFramed) {
+					if (this.#split.locate(event.row - this.#bodyTop, event.col)?.pane !== "right") return false;
+				} else if (this.#focus !== "answer" || event.col < 0 || event.col >= this.#bodyWidth) {
+					return false;
+				}
+				this.#detail.scroll(event.wheel * 3);
+				this.#followLatest = false;
+				this.#options.requestRender();
+				return true;
+			});
+			return;
+		}
 		if (this.#composer) {
 			// The input owns every key it handles, including panel shortcuts and
 			// pasted text; the line keys it ignores still scroll the answer above.
@@ -900,6 +920,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 			this.#detail.scrollToBottom();
 			detail = this.#detail.render(detailWidth);
 		}
+		this.#bodyTop = framed ? 2 : height >= 3 ? 1 : 0;
+		this.#bodyHeightLast = bodyHeight;
+		this.#bodyWidth = width;
+		this.#bodyFramed = framed;
 		const lines: string[] = [];
 		if (framed) {
 			lines.push(topBorder(width, "BTW history"));
@@ -908,7 +932,6 @@ export class BtwHistoryPanel implements Component, Focusable {
 			lines.push(truncateToWidth(this.#focusLabel(this.#focus), width));
 		}
 		if (framed) {
-			this.#bodyHeightLast = bodyHeight;
 			this.#detailCache = detail ?? [];
 			this.#listCache = wide || this.#focus === "list" ? this.#renderList(listWidth, bodyHeight) : [];
 			this.#split.setHeight(bodyHeight);

@@ -145,7 +145,7 @@ describe("AgentTranscriptViewer native esc", () => {
 	});
 });
 
-describe("BtwHistoryPanel native events", () => {
+describe("BtwHistoryPanel events", () => {
 	const record = (id: string, question: string): BtwHistoryRecord => ({
 		id,
 		leafId: null,
@@ -311,6 +311,38 @@ describe("BtwHistoryPanel native events", () => {
 		history.update([]);
 		expect(history.nativeOverlay.size).toBe("md");
 		expect(findNode(history.describe(), node => node.key === "empty")).toBeDefined();
+	});
+
+	it("scrolls only the answer under the wheel, even when the history list or composer has focus", () => {
+		const answer = Array.from({ length: 60 }, (_, index) => `answer row ${index}`).join("\n");
+		const history = new BtwHistoryPanel({
+			records: [{ ...record("a", "long answer"), answer }, record("b", "short answer")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp: async () => true,
+			requestRender: () => {},
+			getHeight: () => 18,
+		});
+		const shown = () => Bun.stripANSI(history.render(100).join("\n"));
+		const wheel = (button: number, col: number, row: number) => history.handleInput(`\x1b[<${button};${col};${row}M`);
+		const first = shown();
+		expect(first).toContain("answer row 0");
+		wheel(65, 8, 8); // list
+		wheel(67, 80, 8); // horizontal wheel
+		wheel(65, 80, 2); // pane label
+		expect(shown()).toBe(first);
+		wheel(65, 80, 8); // details, despite list focus
+		expect(shown()).toContain("answer row 9");
+		expect(shown()).not.toContain("Question");
+		history.handleInput("f");
+		history.pasteText("draft");
+		const composed = shown();
+		expect(composed).toContain("answer row 59");
+		wheel(64, 80, 8);
+		expect(shown()).not.toContain("answer row 59");
+		expect(shown()).toContain("draft");
 	});
 
 	it("gives a lone record's answer the arrow keys in text mode, with no pane switch to offer", () => {
