@@ -73,13 +73,6 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 
 		const pending = takeQueuedMessage(messaging);
 		if (pending && messaging) return messageResult(messaging.senderId, pending);
-		// Refreshes owned-service tracking only; jobs are in-process, so a hung
-		// broker must not turn every wait into an error.
-		if (cfgLaunchEnabled.get(this.session.settings)) {
-			await listServicesTolerant(this.session, signal);
-			const queued = takeQueuedMessage(messaging);
-			if (queued && messaging) return messageResult(messaging.senderId, queued);
-		}
 		const jobs = manager?.getRunningJobs({ ownerId: senderId }) ?? [];
 		// An accepted completion whose delivery has not reached the transcript
 		// yet (queued, parked on the yield queue, or skipped while an earlier
@@ -89,12 +82,20 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []);
 		}
 		const serviceRunning = hasLiveOwnedService(this.session);
-		if (jobs.length === 0 && !serviceRunning) {
+		const discoveryAbort = new AbortController();
+		const discovery = cfgLaunchEnabled.get(this.session.settings)
+			? listServicesTolerant(this.session, discoveryAbort.signal)
+			: undefined;
+		if (jobs.length === 0 && !serviceRunning && !discovery) {
 			throw new ToolError(
 				"Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own.",
 			);
 		}
-		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, signal, onUpdate });
+		try {
+			return await this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, discovery, signal, onUpdate });
+		} finally {
+			discoveryAbort.abort();
+		}
 	}
 
 	/** Block until an owned job settles, an owned service finishes, a message arrives, the cap elapses, or the call aborts. */
@@ -103,14 +104,15 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		manager: AsyncJobManager | undefined;
 		messaging: WaitMessaging | undefined;
 		serviceRunning: boolean;
+		discovery: Promise<{ error?: string }> | undefined;
 		signal: AbortSignal | undefined;
 		onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
 	}): Promise<AgentToolResult<CoordinationDetails>> {
-		const { jobs, manager, messaging, serviceRunning, signal, onUpdate } = args;
+		const { jobs, manager, messaging, serviceRunning, discovery, signal, onUpdate } = args;
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
-		const serviceLeg = serviceRunning ? waitForOwnedServiceCompletion(this.session, serviceAbort.signal) : undefined;
+		let serviceLeg = serviceRunning ? waitForOwnedServiceCompletion(this.session, serviceAbort.signal) : undefined;
 		const busAbort = new AbortController();
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
 		const busLeg = messaging
@@ -133,26 +135,56 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			});
 		const progressTimer = onUpdate && jobs.length > 0 ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
 		if (jobs.length > 0) emitProgress();
-		let wake: "job" | "message" | "service" | "timeout" | "abort";
+		// A failure during discovery must release job delivery suppression too.
 		try {
-			wake = await Promise.race([
-				...jobs.map(job => job.promise.then(() => "job" as const)),
-				...(busLeg ? [busLeg.then(() => "message" as const)] : []),
-				...(serviceLeg ? [serviceLeg.then(() => "service" as const)] : []),
-				timeout.then(() => "timeout" as const),
-				abort.promise.then(() => "abort" as const),
-			]);
-		} finally {
-			clearTimeout(timer);
-			clearInterval(progressTimer);
-			busAbort.abort();
-			serviceAbort.abort();
-			signal?.removeEventListener("abort", onAbort);
-		}
-		// Unwatch only after the result is built: a job recovered below is
-		// consumed first, while one left unreported (message or interrupt won
-		// the race) is re-enqueued for its ordinary async delivery.
-		try {
+			const jobLegs = jobs.map(job => job.promise.then(() => "job" as const));
+			let wake: "job" | "message" | "service" | "discovery" | "timeout" | "abort";
+			let pendingDiscovery = discovery;
+			try {
+				for (;;) {
+					wake = await Promise.race([
+						...jobLegs,
+						...(busLeg ? [busLeg.then(() => "message" as const)] : []),
+						...(serviceLeg ? [serviceLeg.then(() => "service" as const)] : []),
+						...(pendingDiscovery ? [pendingDiscovery.then(() => "discovery" as const)] : []),
+						timeout.then(() => "timeout" as const),
+						abort.promise.then(() => "abort" as const),
+					]);
+					if (wake !== "discovery") break;
+					const error = (await pendingDiscovery)?.error;
+					pendingDiscovery = undefined;
+					if (signal?.aborted) {
+						wake = "abort";
+						break;
+					}
+					const currentService = hasLiveOwnedService(this.session);
+					if (serviceRunning && !currentService) {
+						wake = "service";
+						break;
+					}
+					if (!serviceRunning && currentService) {
+						serviceLeg = waitForOwnedServiceCompletion(this.session, serviceAbort.signal);
+					}
+					if (jobs.length === 0 && !currentService) {
+						if (error)
+							throw new ToolError(
+								`Service state unavailable: ${error}. Cannot determine whether an owned service is running.`,
+							);
+						throw new ToolError(
+							"Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own.",
+						);
+					}
+				}
+			} finally {
+				clearTimeout(timer);
+				clearInterval(progressTimer);
+				busAbort.abort();
+				serviceAbort.abort();
+				signal?.removeEventListener("abort", onAbort);
+			}
+			// Unwatch only after the result is built: a job recovered below is
+			// consumed first, while one left unreported (message or interrupt won
+			// the race) is re-enqueued for its ordinary async delivery.
 			// A dequeued message wins a photo-finish with a job: the job remains
 			// deliverable, whereas a lost message cannot be recovered from the bus.
 			const message = await busLeg;

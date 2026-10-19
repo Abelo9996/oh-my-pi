@@ -141,7 +141,22 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	async request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		if (this.#closed) throw new Error("Daemon broker client is closed");
 		if (signal?.aborted) throw new Error("Daemon broker request aborted");
-		await this.#connect();
+		const connecting = this.#connect();
+		if (signal) {
+			const cancelled = Promise.withResolvers<never>();
+			const onAbort = () => cancelled.reject(new Error("Daemon broker request aborted"));
+			signal.addEventListener("abort", onAbort, { once: true });
+			if (signal.aborted) onAbort();
+			try {
+				await Promise.race([connecting, cancelled.promise]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+		} else {
+			await connecting;
+		}
+		if (this.#closed) throw new Error("Daemon broker client is closed");
+		if (signal?.aborted) throw new Error("Daemon broker request aborted");
 		const socket = this.#socket;
 		if (!socket || socket.closed) throw new Error("Daemon broker socket is unavailable");
 
