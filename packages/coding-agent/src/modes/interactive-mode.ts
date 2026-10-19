@@ -44,7 +44,17 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
-import { col, kbd, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
+import { col, compact, kbd, keyed, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
+import {
+	describeJobWidgetMiniSpark,
+	describeJobWidgetsHovercard,
+	type JobWidgetEntry,
+	jobWidgetGlance,
+	jobWidgetGlanceSpans,
+	jobWidgetSummary,
+	latestJobWidget,
+} from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
@@ -387,6 +397,7 @@ import {
 	cfgTuiRenderMermaid,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
+	cfgTuiCompleteScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
@@ -423,6 +434,7 @@ const cfgLiveUiSettings = combine({
 	showHardwareCursor: cfgShowHardwareCursor,
 	"tui.maxInlineImages": cfgTuiMaxInlineImages,
 	"tui.resizeScrollback": cfgTuiResizeScrollback,
+	"tui.completeScrollback": cfgTuiCompleteScrollback,
 	"tui.imeSafeCursor": cfgTuiImeSafeCursor,
 	autocompleteMaxVisible: cfgAutocompleteMaxVisible,
 	"spelling.typoDetection": cfgSpellingTypoDetection,
@@ -750,6 +762,76 @@ const JOBS_SEGMENT: RunningSegmentSpec = {
 	shortcut: "/jobs",
 	act: "jobs.open",
 };
+
+/** The jobs segment with the widgets it was described from (`id:updatedAt:state` per widget). */
+interface JobsSegment extends RunningSegment {
+	readonly widgets: string;
+}
+
+/**
+ * `prev` while it still shows `running` jobs and the same widget data, else a
+ * fresh jobs segment; undefined when nothing runs.
+ */
+function jobsSegment(
+	prev: JobsSegment | undefined,
+	running: number,
+	entries: readonly JobWidgetEntry[],
+): JobsSegment | undefined {
+	if (running === 0) return undefined;
+	let widgets = "";
+	for (const entry of entries) widgets += `${entry.id}:${entry.view.updatedAt}:${entry.view.state};`;
+	if (prev?.running === running && prev.widgets === widgets) return prev;
+	const described =
+		entries.length > 0 ? describeJobsSegment(running, entries) : describeRunningSegment(JOBS_SEGMENT, running);
+	return { running, widgets, node: described };
+}
+
+/**
+ * The jobs segment while jobs draw widgets: the count, then the freshest
+ * widget's headline and a mini spark of its primary series. The hover label
+ * lists every widget on its own line; the hover card stacks their compact
+ * widgets.
+ */
+function describeJobsSegment(running: number, entries: readonly JobWidgetEntry[]): NativeNode {
+	const label = `${running} ${JOBS_SEGMENT.noun}${running === 1 ? "" : "s"} running`;
+	const latest = latestJobWidget(entries)?.view;
+	const glance = latest && jobWidgetGlance(latest);
+	const spark = latest && describeJobWidgetMiniSpark(latest);
+	const title = [
+		`${label}  ${JOBS_SEGMENT.shortcut}`,
+		...entries.map(entry => `${entry.id}  ${jobWidgetSummary(entry.view)}`),
+	].join("\n");
+	const hovercard = describeJobWidgetsHovercard(entries);
+	return node(
+		"row",
+		{
+			role: "omp.hud.seg",
+			gap: "xs",
+			align: "center",
+			title,
+			aria: label,
+			actions: { click: JOBS_SEGMENT.act },
+			...(hovercard ? { hovercard } : {}),
+		},
+		compact([
+			node("icon", { name: JOBS_SEGMENT.icon, tone: JOBS_SEGMENT.tone }, undefined, "icon"),
+			node("text", { spans: [span(String(running), "num")], wrap: "none" }, undefined, "count"),
+			glance &&
+				node(
+					"text",
+					{
+						role: "omp.hud.glance",
+						spans: jobWidgetGlanceSpans({ text: glance.text, ...(glance.trend ? { trend: glance.trend } : {}) }),
+						wrap: "none",
+					},
+					undefined,
+					"glance",
+				),
+			spark && keyed(spark, "spark"),
+		]),
+		JOBS_SEGMENT.key,
+	);
+}
 
 /** One counter segment: a tinted icon and the bare count; the words live in the hover label. */
 function describeRunningSegment(spec: RunningSegmentSpec, running: number): NativeNode {
@@ -1188,6 +1270,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
+	refreshScopedModelsAfterLogin?: () => Promise<void>;
 	settings: Settings;
 	keybindings: KeybindingsManager;
 	agent: Agent;
@@ -1368,7 +1451,21 @@ export class InteractiveMode implements InteractiveModeContext {
 	#todoHudNative: { checklist: NativeNode; fallback: NativeNode } | undefined;
 	#hudPillsNative: { children: readonly NativeChild[]; node: NativeNode } | undefined;
 	#agentsSegment: RunningSegment | undefined;
-	#jobsSegment: RunningSegment | undefined;
+	#jobsSegment: JobsSegment | undefined;
+	/** The job widget registry this mode repaints on, and how to stop listening to it. */
+	#jobWidgetsListener: { registry: JobWidgetRegistry; unsubscribe: () => void } | undefined;
+	/**
+	 * Repaint whenever a shown job widget changes (the HUD jobs segment, the
+	 * status line's glance), following the root job manager's current registry.
+	 */
+	#syncJobWidgetsListener(): void {
+		const registry = this.session.asyncJobManager?.widgets;
+		if (this.#jobWidgetsListener?.registry === registry) return;
+		this.#jobWidgetsListener?.unsubscribe();
+		this.#jobWidgetsListener = registry
+			? { registry, unsubscribe: registry.subscribe(() => this.ui.requestRender()) }
+			: undefined;
+	}
 	/** Gen tok/s for the native composer bar, one decimal (a steadier `rate` target): live while running, else the last reading. */
 	#nativeTokenRate(): number | undefined {
 		if (!cfgComposerTokenRate.get(settings)) return undefined;
@@ -1412,7 +1509,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			shortcut: formatDoubleTap("left"),
 			act: "agents.open",
 		});
-		this.#jobsSegment = runningSegment(this.#jobsSegment, this.statusLine.runningBackgroundJobCount(), JOBS_SEGMENT);
+		this.#syncJobWidgetsListener();
+		// A subagent's task job draws a widget too, though it counts as no
+		// background job: its widget alone keeps the segment and hover card up.
+		const widgets = this.session.getRunningJobWidgets();
+		const runningJobs = Math.max(this.statusLine.runningBackgroundJobCount(), widgets.length);
+		this.#jobsSegment = jobsSegment(this.#jobsSegment, runningJobs, widgets);
 		const segments: NativeChild[] = [];
 		if (this.#agentsSegment) segments.push(this.#agentsSegment.node);
 		if (this.#jobsSegment) segments.push(this.#jobsSegment.node);
@@ -1763,7 +1865,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		eventBus?: EventBus,
 		composer?: Composer,
 		subagentEventBus?: EventBus,
+		refreshScopedModelsAfterLogin?: () => Promise<void>,
 	) {
+		this.refreshScopedModelsAfterLogin = refreshScopedModelsAfterLogin;
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
@@ -2482,6 +2586,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Subscribe to agent events
 		this.#subscribeToAgent();
+
+		// Job widgets refresh in the background; repaint the HUD and status line glance when one changes.
+		this.#syncJobWidgetsListener();
+		this.#eventBusUnsubscribers.push(() => {
+			this.#jobWidgetsListener?.unsubscribe();
+			this.#jobWidgetsListener = undefined;
+		});
 
 		this.#eventBusUnsubscribers.push(
 			this.session.subscribe(event => {
@@ -3499,6 +3610,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			showHardwareCursor: cfgShowHardwareCursor.get(this.settings),
 			maxInlineImages: cfgTuiMaxInlineImages.get(this.settings),
 			resizeScrollback: cfgTuiResizeScrollback.get(this.settings),
+			completeScrollback: cfgTuiCompleteScrollback.get(this.settings),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(this.settings),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(this.settings),
 			spellingTypoDetection: cfgSpellingTypoDetection.get(this.settings),
@@ -3540,6 +3652,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				"showHardwareCursor",
 				"tui.maxInlineImages",
 				"tui.resizeScrollback",
+				"tui.completeScrollback",
 				"tui.imeSafeCursor",
 				"autocompleteMaxVisible",
 				"spelling.typoDetection",
@@ -3802,7 +3915,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (ansi) {
 				this.editor.borderColor = (str: string) => `${ansi}${str}\x1b[39m`;
 			} else {
-				const level = this.session.thinkingLevel ?? ThinkingLevel.Off;
+				const level = this.viewSession.thinkingLevel ?? ThinkingLevel.Off;
 				this.editor.borderColor = theme.getThinkingBorderColor(level);
 			}
 		}

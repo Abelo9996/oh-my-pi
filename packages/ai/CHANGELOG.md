@@ -4,8 +4,28 @@
 
 ### Added
 
+- Added `validateToolArguments(tool, call, { keepUnknownRootKeys: true })` to keep unknown root keys that a closed schema would otherwise drop during argument repair ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
+
+### Fixed
+
+- Fixed Claude streams that a gateway cut off before `message_delta` failing the turn instead of being retried ([#16341](https://github.com/can1357/oh-my-pi/pull/16341) by [@lz-lunzi](https://github.com/lz-lunzi))
+- Fixed Gemini pairing parallel same-name tool results with the wrong call when history stores them out of call order (sessions from before 18.4.2, SDK-built contexts) ([#16259](https://github.com/can1357/oh-my-pi/pull/16259) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Factory Droid Gemini dropping calls to tools with names over 64 characters (most MCP tools) and their results from later requests, so the model called the tool again; such names now shorten to 64 characters ([#16283](https://github.com/can1357/oh-my-pi/pull/16283) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Factory Droid Gemini requests failing with 400 "For schema with items, schema type should be ARRAY" when a tool parameter accepts a string or a list, as the default `task` tool's `model` field does ([#16249](https://github.com/can1357/oh-my-pi/pull/16249) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `PI_REQ_DEBUG=1` request dumps writing your API key, bearer token and response cookies to disk in plain text: credential headers now read `[redacted]`, as in rejected-request dumps ([#16293](https://github.com/can1357/oh-my-pi/pull/16293) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed finalized signed reasoning disappearing from displayed thinking when no deltas streamed ([#16227](https://github.com/can1357/oh-my-pi/issues/16227))
+
+## [18.12.2] - 2026-10-18
+
+### Added
+
 - Added `nativeJudgmentImageBounds()`: the image bounds a native judge enforces, its wire's transport limits tightened by the catalog's model bounds
 - Added Box judgment questions (`BoxQuestion`/`BoxAnswer`, TypeSafe Jev 1.14+ direct or through OpenRouter): each names the request image it searches by `image` index, and comes back as that image's edges as 0–1 fractions; text, OpenAI Decisions, and Workers AI judges reject them
+
+### Fixed
+
+- Fixed Muse Code usage going stale whenever its 5-hour window sits idle: the idle window now reports as unused, and weekly usage carries over from the last active window until its reset ([#16193](https://github.com/can1357/oh-my-pi/pull/16193) by [@eggpeat](https://github.com/eggpeat))
+- Fixed DeepSeek tool calls never running when the model writes them as chat-template tokens with `_` in place of `▁`, a missing `｜`, or no per-call close (e.g. `<｜tool_calls_begin｜>…<｜tool_calls_end｜>`): they now run as tool calls, and any that still cannot be parsed are removed from history and reported to the model as a failed call ([#16216](https://github.com/can1357/oh-my-pi/pull/16216) by [@H4vC](https://github.com/H4vC))
 
 ## [18.12.1] - 2026-10-17
 

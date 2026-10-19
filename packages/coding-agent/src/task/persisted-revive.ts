@@ -32,6 +32,7 @@ import {
 	followMCPTools,
 	subagentRetryFallbackRole,
 } from "./executor";
+import { isCompletionProbeEnabled } from "./completion-probe";
 import { discoverAgents, getAgent } from "./discovery";
 import { assertPerCallModelApproved, perCallModelFallbackOverrides } from "./model-approval";
 import { cfgTaskAgentAccountPools, cfgTaskAgentAdvisor, cfgTaskMaxEffort } from "./settings";
@@ -385,6 +386,7 @@ export function createPersistedSubagentReviverFactory(
 			attachIrcWakeTurnMonitor(session, {
 				id: ref.id,
 				agent: persistedAgentDefinition(ref.displayName, init),
+				completionProbe: isCompletionProbeEnabled(ctx.settings, taskDepth - 1),
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 				sessionFile,

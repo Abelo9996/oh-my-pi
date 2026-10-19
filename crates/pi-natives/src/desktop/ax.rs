@@ -576,36 +576,14 @@ fn format_tree(
 		text.push('\n');
 	}
 	text.push_str(&"  ".repeat(depth));
-	text.push_str("- ");
-	text.push_str(&node.props.role);
-	if let Some(label) = label(&node.props) {
-		let _ = write!(text, " \"{}\"", escaped_truncated(label, 80));
-	}
-	let _ = write!(text, " [ref={reference}]");
-	if depth == 0 {
-		let _ = write!(text, " app={}", window.app);
-	}
-	if let Some(value) = node
-		.props
-		.value
-		.as_deref()
-		.filter(|value| !value.is_empty())
-	{
-		let _ = write!(text, ": \"{}\"", escaped_truncated(value, 80));
-	}
-	if !node.props.enabled {
-		text.push_str(" (disabled)");
-	}
 	// The root's own AXFocused only reflects app-local focus; report the global
 	// roster flag instead.
-	let focused = if depth == 0 {
-		window.focused
+	let (app, focused) = if depth == 0 {
+		(Some(window.app.as_str()), window.focused)
 	} else {
-		node.props.focused
+		(None, node.props.focused)
 	};
-	if focused {
-		text.push_str(" (focused)");
-	}
+	write_line(text, &node.props, &reference, app, focused);
 	*nodes += 1;
 	for child in node.children {
 		format_tree(
@@ -621,6 +599,51 @@ fn format_tree(
 			nodes,
 		);
 	}
+}
+
+/// One element's line as `ax()` prints it, without its indent.
+fn write_line(
+	text: &mut String,
+	props: &AxProps,
+	reference: &str,
+	app: Option<&str>,
+	focused: bool,
+) {
+	text.push_str("- ");
+	text.push_str(&props.role);
+	if let Some(label) = label(props) {
+		let _ = write!(text, " \"{}\"", escaped_truncated(label, 80));
+	}
+	let _ = write!(text, " [ref={reference}]");
+	if let Some(app) = app {
+		let _ = write!(text, " app={app}");
+	}
+	if let Some(value) = props.value.as_deref().filter(|value| !value.is_empty()) {
+		let _ = write!(text, ": \"{}\"", escaped_truncated(value, 80));
+	}
+	if !props.enabled {
+		text.push_str(" (disabled)");
+	}
+	if focused {
+		text.push_str(" (focused)");
+	}
+}
+
+/// `handle`'s line as `ax()` prints it, registered under `target` so its ref
+/// resolves.
+pub fn element_line(
+	backend: &mut dyn AxBackend,
+	registry: &mut AxRegistry,
+	target: &str,
+	handle: AxHandle,
+) -> CoreResult<String> {
+	let props = backend.props(&handle)?;
+	let generation = registry.current_generation(target);
+	let reference =
+		registry.register(backend, target, generation, handle, &props, Uniqueness::Unknown);
+	let mut line = String::new();
+	write_line(&mut line, &props, &reference, None, props.focused);
+	Ok(line)
 }
 
 pub fn snapshot(
@@ -796,6 +819,8 @@ pub fn refind(
 	let (Some(proof), target) = (entry.proof.clone(), entry.target_key.clone()) else {
 		return Ok(None);
 	};
+	// Finding a sheet's, popover's or menu's root walks the app's tree too.
+	control::check()?;
 	let root = backend.window_root(window)?;
 	// The window id may now name another window, of this app or another.
 	if root != proof.walk.root {
@@ -918,6 +943,8 @@ mod tests {
 		bounds_reads: u32,
 		/// The window element, when not node 1.
 		root:         Option<u64>,
+		/// Window root lookups.
+		root_reads:   u32,
 	}
 	impl Mock {
 		fn handle(&self, id: u64) -> AxHandle {
@@ -936,6 +963,7 @@ mod tests {
 	}
 	impl AxBackend for Mock {
 		fn window_root(&mut self, _: &DesktopWindow) -> CoreResult<AxHandle> {
+			self.root_reads += 1;
 			Ok(self.handle(self.root.unwrap_or(1)))
 		}
 
@@ -1316,6 +1344,31 @@ mod tests {
 			.unwrap()
 			.expect("the one copy");
 		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(4)));
+	}
+	#[test]
+	fn a_cancelled_search_does_not_look_up_the_window() {
+		let mut m = Mock {
+			props: [
+				(1, p("window", Some("Title"))),
+				(2, p("button", Some("Go"))),
+				(4, p("button", Some("Go"))),
+			]
+			.into(),
+			children: [(1, vec![2])].into(),
+			..Default::default()
+		};
+		let mut registry = AxRegistry::default();
+		snapshot(&mut m, &mut registry, &window(), &AxSnapshotOptions::default()).unwrap();
+		m.destroyed.insert(2);
+		m.children.insert(1, vec![4]);
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		source.cancel();
+		let reads = m.root_reads;
+		let result =
+			control::with_token_for_test(&token, || refind(&mut m, &mut registry, &window(), "e2"));
+		assert_eq!(result.err().map(|error| error.code), Some(ErrorCode::Cancelled));
+		assert_eq!(m.root_reads, reads);
 	}
 	/// A window with a "Go" button, node 100, 31 levels down: past the 24
 	/// `find()` reads.

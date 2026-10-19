@@ -10,6 +10,7 @@ import {
 	renderKittyPlaceholderLines,
 	setKittyGraphics,
 } from "./kitty-graphics";
+import { ensureSixelRasterWidth } from "./sixel";
 import {
 	isInsideTerminalMultiplexer,
 	isTerminalBackgroundQueryTrusted,
@@ -1281,7 +1282,9 @@ export function encodeSixelNow(
 	backgroundRgb = getTerminalBackgroundColor(),
 ): string | null {
 	try {
-		return encodeSixel(new Uint8Array(Buffer.from(base64Data, "base64")), widthPx, heightPx, backgroundRgb);
+		return ensureSixelRasterWidth(
+			encodeSixel(new Uint8Array(Buffer.from(base64Data, "base64")), widthPx, heightPx, backgroundRgb),
+		);
 	} catch {
 		return null;
 	}

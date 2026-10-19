@@ -17,6 +17,7 @@ import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "..
 import { actionBar, actionButton, selectList } from "../native/overlay";
 import { theme } from "../theme/theme";
 import { buildJobTree, type JobTreeAgent, type JobTreeRow, jobTreeGuide } from "./job-tree";
+import { describeJobWidget, type JobWidgetView, renderJobWidgetLines } from "../tools/job-widget";
 
 /** One async job as the session snapshots it. */
 export interface JobsPanelJob {
@@ -54,6 +55,8 @@ export interface JobsPanelDetail {
 	readonly output?: string;
 	/** Artifact holding the full output when `output` is cut. */
 	readonly artifactId?: string;
+	/** The job's live widget (frozen once it settles), drawn above the output. */
+	readonly widget?: JobWidgetView;
 }
 
 /** The session behind a {@link JobsSheet}. */
@@ -149,6 +152,7 @@ export class JobsSheet implements Component {
 			detail?.pids.join(" "),
 			detail?.exitCode,
 			detail?.artifactId,
+			detail?.widget ? `${detail.widget.updatedAt}:${detail.widget.state}` : "",
 			jobs.some(job => job.status === "running") ? Math.floor(now / 1000) : "",
 		].join("|");
 		const output = detail?.output;
@@ -205,6 +209,11 @@ export class JobsSheet implements Component {
 				detail.artifactId && `artifact://${detail.artifactId}`,
 			]);
 			if (facts.length > 0) lines.push(truncateToWidth(`   ${facts.join(" · ")}`, width));
+			if (detail.widget) {
+				for (const line of renderJobWidgetLines(detail.widget, Math.max(0, width - 3), theme)) {
+					lines.push(`   ${line}`);
+				}
+			}
 			for (const line of this.#tailLines(selected.id, detail.output ?? "")) {
 				if (line) lines.push(truncateToWidth(`   ${line}`, width));
 			}
@@ -413,6 +422,7 @@ function describeDetail(
 			? code(command, { lang: "bash", wrap: true, preview: { lines: 4 }, role: "omp.jobs.command" })
 			: text(job.label, { role: "omp.jobs.title", wrap: "word" }),
 		facts.length > 0 && node("kv", { items: facts, role: "omp.jobs.facts" }),
+		detail?.widget && node("col", { role: "omp.jobs.widget" }, [describeJobWidget(detail.widget)], "widget"),
 		node(
 			"col",
 			{ role: "omp.jobs.out", gap: "sm" },

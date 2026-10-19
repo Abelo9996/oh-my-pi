@@ -8,6 +8,7 @@ import {
 	type JobsSheetSource,
 } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { modelEval } from "./fixtures/job-widget-views";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -161,6 +162,29 @@ describe("JobsSheet", () => {
 		const lines = sheet.render(100).join("\n");
 		expect(lines).toContain("cargo test --workspace");
 		expect(lines).toContain("pid 41");
+	});
+
+	it("shows the selected job's widget above its output, natively and in the terminal fallback", async () => {
+		await initTheme();
+		const detail: JobsPanelDetail = { ...DETAILS["bash-1"]!, widget: modelEval };
+		const source: JobsSheetSource = {
+			load: () => JOBS,
+			inspect: id => (id === "bash-1" ? detail : DETAILS[id]),
+			close: vi.fn(),
+		};
+		const sheet = new JobsSheet(source);
+		sheet.handleInput(DOWN);
+		const root = sheet.describe(CX);
+		const detailNode = byRole(root, "omp.jobs.detail")[0]!;
+		const roles = (detailNode.c ?? []).map(child => ("k" in child ? prop(child, "role") : undefined));
+		expect(roles.indexOf("omp.jobs.widget")).toBeLessThan(roles.indexOf("omp.jobs.out"));
+		expect(byRole(root, "omp.job.widget.bar")).toHaveLength(3);
+
+		const lines = sheet.render(100).map(line => Bun.stripANSI(line));
+		const head = lines.findIndex(line => line.includes("eval · tests passed per model"));
+		expect(head).toBeGreaterThan(0);
+		expect(lines[head + 2]).toMatch(/^ {5}opus-4\.5 +█+░* +26\/30$/);
+		expect(lines.findIndex(line => line.includes("running 12 tests"))).toBeGreaterThan(head);
 	});
 
 	describe("as a tree of subagents", () => {

@@ -182,6 +182,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"chars",
 		"multi",
 		"wakeRelay",
+		"broadcast",
 		"partialLine",
 		"requestedTimeoutSeconds",
 	]),
