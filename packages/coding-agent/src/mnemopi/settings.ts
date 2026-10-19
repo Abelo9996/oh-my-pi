@@ -218,7 +218,7 @@ export const cfgMnemopiEmbeddingApiKey = register({
 		tab: "memory",
 		group: "Mnemopi",
 		label: "Mnemopi Embedding API Key",
-		description: "Optional embedding API key passed to Mnemopi",
+		description: "Optional embedding API key or environment variable name for Mnemopi",
 		condition: "mnemopiActive",
 	},
 });

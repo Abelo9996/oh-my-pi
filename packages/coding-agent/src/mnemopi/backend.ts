@@ -8,6 +8,7 @@ import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
 import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
 import { logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveConfigValue } from "../config/resolve-config-value";
 import { roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
 import { type JudgmentUsageLedger, journalJudgmentUsage } from "../judgment";
@@ -535,14 +536,17 @@ async function resolveMnemopiProviderOptions(
 	sessionId: string,
 	usageLedger: Partial<JudgmentUsageLedger>,
 ): Promise<MnemopiProviderOptions> {
+	const embeddingApiKey = config.providerOptions.embeddingApiKey;
 	const base: MnemopiProviderOptions = {
 		noEmbeddings: config.providerOptions.noEmbeddings,
 		embeddingModel: config.providerOptions.embeddingModel,
 		embeddingApiUrl: config.providerOptions.embeddingApiUrl,
 		embeddingApiKey:
-			config.providerOptions.embeddingApiKey ??
-			(await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl)),
-		llm: false,
+			embeddingApiKey === undefined
+				? await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl)
+				: typeof embeddingApiKey === "string"
+					? await resolveConfigValue(embeddingApiKey)
+					: embeddingApiKey,
 	};
 
 	if (config.llmMode === "none") return base;
