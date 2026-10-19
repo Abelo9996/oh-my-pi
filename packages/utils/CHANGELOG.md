@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `getSafeProjectCwd()` accepts a preferred directory, returned when it still exists ([#16376](https://github.com/can1357/oh-my-pi/issues/16376))
+
 ## [18.12.2] - 2026-10-18
 
 ### Added

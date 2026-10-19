@@ -4,6 +4,8 @@ import * as path from "node:path";
 import {
 	$env,
 	$which,
+	directoryIsEnterableSync,
+	getSafeProjectCwd,
 	isBunTestRuntime,
 	isCompiledBinary,
 	isExecutable,
@@ -164,14 +166,23 @@ export function resolveCliEntryCmd(): string[] {
  * newest process in that group, so anchoring them to the install dir leaks
  * into newly opened terminal tabs. With no declared host entry (bun test, SDK
  * embedding) fall back to a cwd-relative `src/cli.ts`, which Bun subprocess
- * IPC handles more reliably under `bun test`.
+ * IPC handles more reliably under `bun test`. A compiled binary refuses to
+ * start in a deleted working directory, so once this process's cwd is gone
+ * (e.g. a removed worktree) the hosted branches pin {@link getSafeProjectCwd}.
  */
 export function resolveWorkerSpawnCmd(workerArg: string): WorkerSpawnCommand {
 	const executable = resolveExecutablePath();
-	if (isCompiledBinary()) return { cmd: [executable, workerArg] };
+	// Bun caches `process.cwd()` on the main thread (it throws only in workers),
+	// so check the directory itself.
+	let inherited: string | undefined;
+	try {
+		inherited = process.cwd();
+	} catch {}
+	const cwd = inherited !== undefined && directoryIsEnterableSync(inherited) ? undefined : getSafeProjectCwd();
+	if (isCompiledBinary()) return { cmd: [executable, workerArg], cwd };
 	const hostEntry = workerHostEntry();
 	if (hostEntry) {
-		return { cmd: [executable, hostEntry, workerArg] };
+		return { cmd: [executable, hostEntry, workerArg], cwd };
 	}
 	const packageRoot = path.resolve(import.meta.dir, "..", "..");
 	return { cmd: [executable, "src/cli.ts", workerArg], cwd: packageRoot };

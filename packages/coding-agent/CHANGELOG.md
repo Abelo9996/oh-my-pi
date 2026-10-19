@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `eval` failing to start after the session's working directory was deleted (e.g. a removed worktree): Python failed on `os.chdir` and a fresh JS kernel exited; kernels now run from the project directory, or your home directory if that is gone too ([#16376](https://github.com/can1357/oh-my-pi/issues/16376))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added

@@ -313,13 +313,16 @@ export function directoryIsEnterableSync(dir: string): boolean {
 }
 
 /**
- * Project directory when it is enterable, otherwise a safe fallback.
- * Used by spawns that must preserve project-relative behavior when healthy.
+ * `dir` (default: the project directory) when it is enterable, otherwise the
+ * project directory, otherwise the home directory. Used by spawns that must
+ * preserve directory-relative behavior when healthy but still start after the
+ * directory was removed (e.g. a deleted worktree).
  */
-export function getSafeProjectCwd(): string {
+export function getSafeProjectCwd(dir?: string): string {
+	if (dir !== undefined && directoryIsEnterableSync(dir)) return dir;
 	try {
-		const dir = getProjectDir();
-		if (directoryIsEnterableSync(dir)) return dir;
+		const projectDir = getProjectDir();
+		if (directoryIsEnterableSync(projectDir)) return projectDir;
 	} catch {}
 	return os.homedir();
 }

@@ -2451,12 +2451,19 @@ _MANAGED_ENV_KEYS = (
 def _apply_request_runtime(req: dict) -> None:
     cwd = req.get("cwd")
     if isinstance(cwd, str) and cwd:
-        os.chdir(cwd)
         try:
-            sys.path.remove(cwd)
-        except ValueError:
+            os.chdir(cwd)
+        except OSError:
+            # The host already swaps a removed session cwd for an existing
+            # fallback; it can still vanish before this request lands. Keep the
+            # kernel's current directory instead of failing the request.
             pass
-        sys.path.insert(0, cwd)
+        else:
+            try:
+                sys.path.remove(cwd)
+            except ValueError:
+                pass
+            sys.path.insert(0, cwd)
 
     env = req.get("env")
     if isinstance(env, dict):

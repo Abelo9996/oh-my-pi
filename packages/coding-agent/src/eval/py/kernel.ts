@@ -8,7 +8,7 @@
  * timeout.
  */
 import * as path from "node:path";
-import { $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { $flag, getSafeProjectCwd, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
 import {
 	BaseKernel,
@@ -151,7 +151,10 @@ async function probePythonKernelAvailability(
 				env: runtime.env,
 				label: runtime.pythonPath,
 			})),
-			{ cwd, signal: probeOpts?.signal, timeoutMs: probeOpts?.timeoutMs },
+			// A removed session cwd makes posix_spawn fail with ENOENT; spawn from a
+			// directory that still exists. runner.py keeps it when the per-request
+			// chdir into the session cwd fails.
+			{ cwd: getSafeProjectCwd(cwd), signal: probeOpts?.signal, timeoutMs: probeOpts?.timeoutMs },
 		);
 		if (result.ok) {
 			const runtime = runtimes[result.index];
@@ -188,7 +191,9 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 				JSON.stringify({
 					id: msgId,
 					code,
-					cwd: opts?.cwd,
+					// A live kernel whose session cwd was removed moves to the same
+					// fallback a fresh kernel spawns in.
+					cwd: opts?.cwd === undefined ? undefined : getSafeProjectCwd(opts.cwd),
 					filename: opts?.filename,
 					env: opts?.env,
 					silent: opts?.silent ?? false,
@@ -306,7 +311,8 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		const kernel = new PythonKernel(Snowflake.next(), runtime.pythonPath);
 
 		const proc = Bun.spawn([runtime.pythonPath, "-u", scriptPath], {
-			cwd: options.cwd,
+			// See probePythonKernelAvailability: survive a removed session cwd.
+			cwd: getSafeProjectCwd(options.cwd),
 			detached: shouldDetachKernel(process.platform),
 			env: spawnEnv,
 			stdin: "pipe",
@@ -394,7 +400,6 @@ function buildInitScript(cwd: string, env?: Record<string, string | undefined>):
 	return [
 		"import os, sys",
 		`__omp_cwd = ${JSON.stringify(cwd)}`,
-		"os.chdir(__omp_cwd)",
 		`__omp_env = ${JSON.stringify(envPayload)}`,
 		"for __omp_key, __omp_val in __omp_env.items():\n    os.environ[__omp_key] = __omp_val",
 		"if __omp_cwd not in sys.path:\n    sys.path.insert(0, __omp_cwd)",
