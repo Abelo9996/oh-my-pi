@@ -9,6 +9,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
@@ -114,6 +115,8 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "./types";
+import { seanceIsolationOptions } from "./seance-policy";
+import type { PreparedSeanceSession } from "./seance";
 import {
 	type AgentProgress,
 	type SingleResult,
@@ -409,6 +412,7 @@ export interface ExecutorOptions {
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
+	preparedSession?: PreparedSeanceSession;
 	/** Shared background from the task call (`task.batch`), rendered into the subagent's system prompt. */
 	context?: string;
 	/**
@@ -1399,14 +1403,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
 	let lastAssistantSalvageText: string | undefined;
-	// Text of the most recent assistant turn that READ AS A REPORT: it carried
-	// prose and started no further work (no tool call, or only the terminal
-	// `yield`). This — not merely the last assistant message — is what a
-	// data-less `yield` finalize harvests. Both the idle reminder and the
-	// budget wrap-up tell a finished subagent to finalize "from last assistant
-	// turn", and models routinely comply one turn later, so the finalize turn
-	// itself is usually text-less. Turns that started more work are excluded on
-	// purpose: mid-run narration must never surface as a final result.
+	// The latest prose that can describe completed work. Locally runnable work
+	// invalidates it; after tools Cursor already ran server-side, only text
+	// following the last such call qualifies. A text-less yield turn may still
+	// finalize the preceding report.
 	let lastReportTurnText: string | undefined;
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
@@ -1748,6 +1748,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		{ tool: string; args?: string; argsKey?: string; intent?: string; startMs: number }
 	>();
 	let visibleToolCallId: string | undefined;
+	// Providers that run the tool loop server-side (Cursor) execute tools while
+	// the assistant message is still streaming. Each such tool result feeds
+	// another model step that never surfaces as its own message, so it counts
+	// as a request; otherwise one message could run hundreds of steps unbudgeted.
+	// Parallel calls of one step count separately: Cursor's stream does not mark
+	// step boundaries, so such a turn reaches its budget early.
+	let assistantStreaming = false;
 
 	/**
 	 * Soft request budget: steer at the budget, stop the free-running turn at
@@ -1795,6 +1802,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		switch (event.type) {
 			case "message_start":
 				if (event.message?.role === "assistant") {
+					assistantStreaming = true;
 					resetRecentOutput();
 				}
 				// An async-result follow-up injected after a recorded yield
@@ -1895,6 +1903,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const handler = subprocessToolRegistry.getHandler(event.toolName);
 				const eventRecord: unknown = event;
 				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
+				let endsRun = false;
 				if (handler) {
 					// Extract data using handler
 					if (handler.extractData) {
@@ -1933,7 +1942,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							isError: event.isError,
 						}) === true;
 					const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
-					if (wantsTerminate || forcedFinalYield) {
+					endsRun = wantsTerminate || forcedFinalYield;
+					if (endsRun) {
 						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
 							// Terminal yield with owner jobs still pending: park the
 							// run behind the quiescence barrier instead of completing
@@ -1976,6 +1986,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					}
 				}
 				flushProgress = true;
+				if (assistantStreaming && !endsRun) {
+					progress.requests += 1;
+					// A sibling yield still validating may be the run's terminal
+					// report; checking now could abort the response before it lands.
+					if (yieldCallPending) budgetCheckDeferred = true;
+					else evaluateSoftRequestBudget();
+				}
 				break;
 			}
 
@@ -2022,12 +2039,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// Extract text from assistant and toolResult messages (not user prompts)
 				const role = event.message?.role;
 				if (role === "assistant") {
+					assistantStreaming = false;
 					progress.requests += 1;
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
 					const messageContent = getMessageContent(event.message) || eventContent;
 					if (messageContent && Array.isArray(messageContent)) {
 						const turnText: string[] = [];
 						let startedMoreWork = false;
+						let completedServerWork = false;
 						for (const block of messageContent) {
 							if (!isRecord(block)) continue;
 							if (block.type === "text" && typeof block.text === "string") {
@@ -2043,18 +2062,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 								}
 								continue;
 							}
-							startedMoreWork = true;
+							if (isCursorExecResolved(block)) completedServerWork = true;
+							else startedMoreWork = true;
+							turnText.length = 0;
 						}
-						// Only the report turn immediately preceding the finalize is
-						// harvestable. A turn that started more work invalidates any
-						// earlier candidate: the model took the reminder's "resume
-						// work" path, so that prose predates the work and is no longer
-						// a description of the finished assignment. Skipping the
-						// update alone would leave it harvestable and hand the parent
-						// stale narration as the completed result.
+						// Locally runnable calls make all prose in or before this turn
+						// mid-work narration. Cursor exec-resolved calls already ran, so
+						// text after the last one is a report; without such text, prior
+						// prose predates that work and is invalidated.
 						const text = turnText.join("\n");
 						if (startedMoreWork) lastReportTurnText = undefined;
 						else if (text.trim()) lastReportTurnText = text;
+						else if (completedServerWork) lastReportTurnText = undefined;
 					}
 					// A yield awaiting validation suppresses the budget check for
 					// its own turn (#5006). Defer it rather than drop it: every
@@ -2733,7 +2752,9 @@ interface FinalizeRunArgs {
 	/**
 	 * This finalize is a revival/wake or explicit follow-up turn, not the initial
 	 * run. Structured turns only republish a real `yield`; message-result turns
-	 * republish successful, non-empty reports only when requested by the parent.
+	 * republish successful, non-empty reports only when the parent or the user
+	 * requested the turn. These follow-up message results exclude peer replies
+	 * and cancelled turns; the initial run is unaffected.
 	 */
 	followUpTurn?: boolean;
 	publishMessageResult?: boolean;
@@ -2807,8 +2828,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	//
 	// Structured follow-ups need a real yield so conversational wakes cannot
 	// replace the accepted artifact with a missing-yield warning (issue #9518).
-	// Message-result agents publish successful parent-requested reports, not
-	// conversational replies to peers or cancelled follow-ups.
+	// Message-result agents publish successful reports the parent or the user
+	// asked for, not conversational replies to peers or cancelled follow-ups.
 	let outputMeta: { lineCount: number; charCount: number } | undefined;
 	let outputPath: string | undefined;
 	const hasMessageResult =
@@ -3150,7 +3171,8 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * settle (see {@link AgentSession.setIrcWakeTurnObserver}).
  *
  * The turn's output reaches the parent as an async job when the parent's
- * message woke the turn or the turn yielded, and the other waking peers via
+ * message woke the turn, the turn yielded, or a user prompt completed a
+ * message result, and the other waking peers via
  * {@link relayWakeTurnOutput}; the relay is registered as a pending reply on
  * the session up front so a `send await:true` waiter holds its "stopped
  * without replying" verdict until the relay has been delivered.
@@ -3257,6 +3279,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const unsubscribeTurn = turnMonitor.attach(session);
 		const ownerWoken = wakeSources(records, id).some(source => source.from === ownerId);
 		if (ownerWoken) registerWakeJob();
+		// A focused-session user prompt is the operator driving this agent (#14428):
+		// like a parent follow-up, its message-result reply is the agent's new result.
+		const userPrompted = records.some(record =>
+			record.role === "user" ? record.attribution === "user" : record.role === "developer" && record.userInitiated,
+		);
 		return async turnError => {
 			unsubscribeTurn();
 			const activeSession = turnMonitor.takeActiveSession();
@@ -3323,7 +3350,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					parentToolCallId: options.parentToolCallId,
 					detached: true,
 					followUpTurn: true,
-					publishMessageResult: ownerWoken,
+					publishMessageResult: ownerWoken || userPrompted,
 					// A cancelled wake job must not replace the accepted result.
 					signal: jobCancel.signal,
 					sessionFile,
@@ -3336,11 +3363,25 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					error: caught instanceof Error ? caught.message : String(caught),
 				});
 			} finally {
+				// A user-driven message result is already complete: enqueue its
+				// delivery without reserving an execution slot (which may be full).
+				const messageResult = userPrompted && options.structured === false && result?.outputPath !== undefined;
+				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
+					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+					try {
+						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
+					} catch (error) {
+						logger.warn("User-resumed subagent result delivery failed", {
+							id,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
 				// Once registered, the wake job carries this turn's outcome to the
 				// parent whatever it is: the yield result, the failure that
 				// superseded it, or, for a turn that never yielded, the answer a
 				// relay would have carried.
-				if (wakeJob && yielded && result) {
+				if (wakeJob && (yielded || messageResult) && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					const structured = result.structuredOutput;
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
@@ -3546,8 +3587,10 @@ export interface FollowUpTurnOptions {
 	parentToolCallId?: string;
 	/**
 	 * When set, a turn that yields or completes a successful, non-empty message
-	 * result (re)writes `<artifactsDir>/<id>.md` so `agent://<id>` tracks the latest
-	 * completion. Structured turns without a yield leave the existing artifact intact.
+	 * result when requested by the parent (re)writes `<artifactsDir>/<id>.md` so
+	 * `agent://<id>` tracks the latest completion. Structured turns without a
+	 * yield and failed, empty, or cancelled message-result turns leave the
+	 * existing artifact intact.
 	 */
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
@@ -3733,6 +3776,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 /** Inputs of a subagent's rendered system prompt, fixed at spawn. */
 interface SubagentPromptInputs {
 	id: string;
+	model?: string;
 	agentSystemPrompt: string;
 	context: string;
 	planReference: string;
@@ -3762,6 +3806,7 @@ interface SubagentSessionSpec {
 		| "resolveServiceTierByFamily"
 		| "onFirstChatDispatch"
 	>;
+	preparedSession?: Pick<PreparedSeanceSession, "promptSuffix">;
 	prompt: SubagentPromptInputs;
 }
 
@@ -3827,7 +3872,8 @@ function buildSubagentSessionOptions(
 			// Per-spawn text (context, worktree, IRC roster) goes after the trailing
 			// `<project-context>` block so spawns of the same agent share the static
 			// prompt prefix as a cache hit.
-			return [...defaultPrompt, subagentPrompt];
+			const seancePrompt = spec.preparedSession?.promptSuffix(inputs.model);
+			return [...defaultPrompt, subagentPrompt, ...(seancePrompt ? [seancePrompt] : [])];
 		},
 	};
 }
@@ -3971,6 +4017,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 	} = options;
+	const preparedSession = options.preparedSession;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const structured = options.structured !== false;
 	const startTime = Date.now();
@@ -4018,10 +4065,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// spawn's owner is its parent subagent) and lands on the child's
 	// `modelRoles.advisor`. The expanded pattern is also what the session
 	// contract persists, so cold revival under root settings reuses it.
-	const advisorSelection = resolveAgentAdvisorSelection({
-		settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
-		agentAdvisor: agent.advisor,
-	});
+	const advisorSelection = preparedSession
+		? undefined
+		: resolveAgentAdvisorSelection({
+				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
+				agentAdvisor: agent.advisor,
+			});
 	const advisorRolePattern = advisorSelection?.model
 		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
 		: undefined;
@@ -4053,6 +4102,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const softRequestBudgetNotice = cfgTaskSoftRequestBudgetNotice.get(settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
+	const restrictToolNames = options.restrictToolNames === true || preparedSession !== undefined;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 
 	// Add tools if specified. Unstructured runs never get `yield`, even when
@@ -4090,6 +4140,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 	// Inbound steering works without messaging; outbound peer coordination requires write.
 	const ircEnabled =
+		!preparedSession &&
 		options.enableIrc !== false &&
 		isIrcEnabled(subagentSettings, childDepth) &&
 		(toolNames === undefined || toolNames.includes("write"));
@@ -4135,6 +4186,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	let unsubscribe: (() => void) | null = null;
 	let registryAbortUnsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
+	let pendingSessionManager: Promise<SessionManager> | undefined;
+	let openedSessionManager: SessionManager | undefined;
+	let untrackedSession: AgentSession | undefined;
+	let pendingSessionDisposal: Promise<void> | undefined;
 	const wakeOptions: IrcWakeTurnMonitorOptions = {
 		id,
 		index,
@@ -4316,13 +4371,26 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
-			const sessionManagerPromise = sessionFile
-				? SessionManager.open(sessionFile, undefined, undefined, {
-						initialCwd: effectiveCwd,
-						parentSession: options.sessionFile ?? undefined,
+			const fork = preparedSession?.fork;
+			if (fork && !subtaskSessionFile) {
+				throw new Error("The prepared session fork requires a persisted child session file.");
+			}
+			const sessionManagerPromise = fork
+				? SessionManager.forkFrom(fork.sourceFile, effectiveCwd, undefined, undefined, {
+						seance: true,
 						suppressBreadcrumb: true,
+						sessionFile: subtaskSessionFile,
+						resetInheritedCost: true,
+						repairInterruptedTail: true,
 					})
-				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+				: sessionFile
+					? SessionManager.open(sessionFile, undefined, undefined, {
+							initialCwd: effectiveCwd,
+							parentSession: options.sessionFile ?? undefined,
+							suppressBreadcrumb: true,
+						})
+					: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+			if (preparedSession) pendingSessionManager = sessionManagerPromise;
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
@@ -4333,10 +4401,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn.
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern = resolveAgentPrewalkPattern({
-				settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-				agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-			});
+			const prewalkPattern = preparedSession
+				? undefined
+				: resolveAgentPrewalkPattern({
+						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+					});
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
@@ -4360,7 +4430,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
-			const restrictToolNames = options.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 
@@ -4408,7 +4477,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						options.parentPromptCacheKey === undefined
 							? undefined
 							: `${options.parentPromptCacheKey}:${agent.name}`,
-					cwd: worktree ?? cwd,
+					cwd: effectiveCwd,
 					additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 					authStorage,
 					modelRegistry,
@@ -4431,7 +4500,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					toolNames,
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
-					restrictToolNames: options.restrictToolNames,
+					restrictToolNames,
 					requireYieldTool: structured,
 					contextFiles: options.contextFiles,
 					skills: options.skills,
@@ -4467,9 +4536,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					customTools: options.customTools,
 					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
+					// Seance isolation overrides every inherited field above in one place.
+					...(preparedSession ? seanceIsolationOptions(effectiveCwd) : {}),
 				},
+				preparedSession: preparedSession ? { promptSuffix: preparedSession.promptSuffix } : undefined,
 				prompt: {
 					id,
+					model: progress.resolvedModel,
 					agentSystemPrompt: agent.systemPrompt,
 					context: options.context?.trim() ?? "",
 					planReference: options.planReference?.content ?? "",
@@ -4484,13 +4557,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
-			if (options.parentArtifactManager) {
+			if (preparedSession) openedSessionManager = sessionManager;
+			if (options.parentArtifactManager && !preparedSession) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
 			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile);
 
-			const hasExistingModelRole = sessionManager.getLastModelChangeRole() !== undefined;
+			// A seance fork inherits the source's model roles; they describe the
+			// source run, not this consult, so the consult still pins its own chain.
+			const hasExistingModelRole = !preparedSession && sessionManager.getLastModelChangeRole() !== undefined;
 			// Subscribe before the builder mints proxies so a manager change during
 			// session startup is replayed on bind instead of lost.
 			const mcpFollower = mcpManager
@@ -4512,12 +4588,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					}),
 				);
 				({ session } = await awaitAbortable(sessionPromise));
+				if (preparedSession) untrackedSession = session;
 			} catch (err) {
 				mcpFollower?.dispose();
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
 				// a cancelled subagent cannot leak them.
-				void sessionPromise?.then(created => created.session.dispose()).catch(() => {});
+				if (preparedSession) {
+					pendingSessionDisposal = sessionPromise
+						?.then(created => created.session.dispose())
+						.then(
+							() => {},
+							() => {},
+						);
+				} else {
+					void sessionPromise?.then(created => created.session.dispose()).catch(() => {});
+				}
 				throw err;
 			}
 			mcpFollower?.bind(session);
@@ -4536,6 +4622,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
+			if (preparedSession) untrackedSession = undefined;
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
 			const registry = AgentRegistry.global();
@@ -4564,7 +4651,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					sessionFile,
 					spec: sessionSpec,
 					settings: captureSubagentSettings(settings, subagentSettings),
-					parentArtifactManager: options.parentArtifactManager,
+					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
 					keepTodo: prewalk !== undefined,
 					wake: wakeOptions,
 					agentName: agent.name,
@@ -4775,7 +4862,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false) {
+				if (options.keepAlive !== false && (!preparedSession || readyAt !== undefined)) {
 					attachIrcWakeTurnMonitor(session, wakeOptions);
 				}
 				await finalizeSubagentLifecycle({
@@ -4783,7 +4870,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
-					keepAlive: options.keepAlive !== false,
+					keepAlive: options.keepAlive !== false && (!preparedSession || readyAt !== undefined),
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
@@ -4809,6 +4896,62 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						logger.warn("Subagent async job cleanup exceeded its deadline after session shutdown", {
 							id,
 							pendingJobIds: reap.pendingJobIds,
+						});
+					}
+				}
+			}
+			if (preparedSession && untrackedSession) {
+				const incompleteSession = untrackedSession;
+				untrackedSession = undefined;
+				const disposal = Promise.resolve().then(() => incompleteSession.dispose());
+				pendingSessionDisposal = disposal.then(
+					() => {},
+					() => {},
+				);
+				try {
+					await untilAborted(AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now())), () => disposal);
+				} catch (cleanupError) {
+					if (Date.now() >= cleanupDeadlineAt) {
+						deferCleanup(disposal);
+					} else {
+						logger.warn("Incomplete subagent session disposal failed", {
+							id,
+							error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+						});
+					}
+				}
+			}
+			if (preparedSession && readyAt === undefined) {
+				const removeFailedFork = (async () => {
+					await pendingSessionDisposal;
+					if (deferredSessionShutdown) await deferredSessionShutdown;
+					let manager = openedSessionManager;
+					if (!manager && pendingSessionManager) {
+						manager = await pendingSessionManager.catch(() => undefined);
+					}
+					if (manager) {
+						const ownedSessionFile = manager.getSessionFile();
+						if (ownedSessionFile) await manager.dropSession(ownedSessionFile);
+					}
+				})().catch(cleanupError => {
+					logger.warn("Failed to remove incomplete prepared session fork", {
+						id,
+						sessionFile: openedSessionManager?.getSessionFile(),
+						error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+					});
+				});
+				try {
+					await untilAborted(
+						AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now())),
+						() => removeFailedFork,
+					);
+				} catch (cleanupError) {
+					if (Date.now() >= cleanupDeadlineAt) {
+						deferCleanup(removeFailedFork);
+					} else {
+						logger.warn("Incomplete prepared session fork cleanup failed", {
+							id,
+							error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
 						});
 					}
 				}

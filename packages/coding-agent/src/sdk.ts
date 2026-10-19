@@ -28,6 +28,7 @@ import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
@@ -634,6 +635,8 @@ export interface CreateAgentSessionOptions {
 	deferredPrewalk?: { target: string; patterns: string[] };
 	/** Host-owned display sink for non-fatal startup prewalk warnings. */
 	onPrewalkWarning?: (warning: string) => void;
+	/** Keep `prewalk.auto` away from the startup session (`--no-prewalk`); `/new` lifts it. */
+	suppressAutoPrewalk?: boolean;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
 
@@ -2115,13 +2118,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? resolveProvisionalAutoLevel(resolvedModel)
 				: resolveThinkingLevelForModel(resolvedModel, effectiveThinkingLevel),
 		);
-		// Fire-and-forget TLS+H2 handshake to the model's host so it overlaps
-		// with the rest of session setup (extension/skill load, tool registry,
-		// system prompt build). Without this, the first `fetch(...)` pays the
-		// full handshake serially — 100–300 ms transcontinental for
-		// api.anthropic.com from a residential IP. Every mode benefits
-		// (interactive, print, rpc, acp).
-		preconnectModelHost(model.baseUrl);
+		// Fire-and-forget connection warm-up so the handshake overlaps the rest
+		// of session setup (extension/skill load, tool registry, system prompt
+		// build). Effective for endpoints known before any request (official
+		// Anthropic); others warm once a request has revealed their real origin.
+		// Every mode benefits (interactive, print, rpc, acp).
+		void prewarmModelConnection(model);
 	}
 
 	// Re-derives the thinking level whenever startup settles on a different
@@ -2319,6 +2321,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			},
 			restrictToolNames,
+			get seanceSourceArtifactsDir() {
+				return sessionManager.getSeanceSourceArtifactsDir() ?? undefined;
+			},
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
@@ -2830,7 +2835,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// model: any value derived from the earlier fallback model's
 						// `thinking.defaultLevel` must not become sticky.
 						adoptThinkingForModel(restoredModel);
-						preconnectModelHost(restoredModel.baseUrl);
+						void prewarmModelConnection(restoredModel);
 						return true;
 					}
 				}
@@ -3164,7 +3169,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					);
 					modelFallbackMessage = `Fallback: ${usageFallbackReason.from} -> ${target}\n${usageFallbackReason.reason}`;
 				}
-				preconnectModelHost(selectedModel.baseUrl);
+				void prewarmModelConnection(selectedModel);
 				break;
 			}
 			if (!model) {
@@ -3209,7 +3214,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// `pickInitialThinkingLevel` closes over `defaultRoleSpec`,
 				// so the role's explicit selector (e.g. `:max`) now applies.
 				adoptThinkingForModel(resolvedDefaultModel);
-				preconnectModelHost(resolvedDefaultModel.baseUrl);
+				void prewarmModelConnection(resolvedDefaultModel);
 				return true;
 			};
 
@@ -3283,7 +3288,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						restoredSessionThinkingLevel = retryFallback.originalThinkingLevel;
 					}
 					adoptThinkingForModel(resolved.model);
-					preconnectModelHost(resolved.model.baseUrl);
+					void prewarmModelConnection(resolved.model);
 					return true;
 				}
 				return false;
@@ -4683,6 +4688,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,
+			suppressAutoPrewalk: options.suppressAutoPrewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
@@ -5516,22 +5522,5 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 		}
 		throw error;
-	}
-}
-
-/**
- * Best-effort preconnect to the model's API host. Bun's `fetch.preconnect`
- * primes DNS + TCP + TLS + H2 so the first real request reuses the warm
- * connection. Errors are swallowed: preconnect is an optimization, never a
- * hard dependency.
- */
-function preconnectModelHost(baseUrl: string | undefined): void {
-	if (!baseUrl) return;
-	const preconnect = (globalThis.fetch as typeof fetch & { preconnect?: (url: string) => void }).preconnect;
-	if (typeof preconnect !== "function") return;
-	try {
-		preconnect(baseUrl);
-	} catch {
-		// Best effort.
 	}
 }

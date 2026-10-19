@@ -333,7 +333,9 @@ import type {
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
+	SessionPickHandler,
 	ShowStatusOptions,
+	SelectOnlyModelSelectorOptions,
 	SubmittedUserInput,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -385,6 +387,7 @@ import {
 	cfgTuiRenderMermaid,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
+	cfgTuiCompleteScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
@@ -421,6 +424,7 @@ const cfgLiveUiSettings = combine({
 	showHardwareCursor: cfgShowHardwareCursor,
 	"tui.maxInlineImages": cfgTuiMaxInlineImages,
 	"tui.resizeScrollback": cfgTuiResizeScrollback,
+	"tui.completeScrollback": cfgTuiCompleteScrollback,
 	"tui.imeSafeCursor": cfgTuiImeSafeCursor,
 	autocompleteMaxVisible: cfgAutocompleteMaxVisible,
 	"spelling.typoDetection": cfgSpellingTypoDetection,
@@ -2107,7 +2111,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// signal arriving mid-Ctrl+C no-ops instead of racing a second dispose.
 		this.#signalTeardown = createSessionTeardown({
 			getDraftText: () => this.#inputController.getDraftText(),
-			beginDispose: () => this.session.beginDispose(),
+			beginDispose: () => {
+				this.session.beginDispose();
+				this.statusLine.dispose();
+			},
 			saveDraft: text => this.sessionManager.saveDraft(text),
 			disposeSession: async reason => {
 				await this.#btwController.dispose();
@@ -2421,6 +2428,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			// so that paint does not build it on the JS thread. Fresh sessions skip it
 			// and pay the cost lazily on the first highlight, if any.
 			if (this.session.messages.length > 0) void warmHighlighter();
+			// Open the model API connection while the user reads the first frame.
+			this.session.prewarmModelConnection();
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				this.#inputController.prewarmTinyTitleModel();
 			}
@@ -2480,6 +2489,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.subscribe(event => {
 				if (event.type === "model_changed") {
 					this.#scheduleComposerStatusPersist();
+					this.session.prewarmModelConnection();
 				}
 				if (event.type === "config_warnings_changed") {
 					this.#syncConfigWarningHeader();
@@ -3491,6 +3501,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			showHardwareCursor: cfgShowHardwareCursor.get(this.settings),
 			maxInlineImages: cfgTuiMaxInlineImages.get(this.settings),
 			resizeScrollback: cfgTuiResizeScrollback.get(this.settings),
+			completeScrollback: cfgTuiCompleteScrollback.get(this.settings),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(this.settings),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(this.settings),
 			spellingTypoDetection: cfgSpellingTypoDetection.get(this.settings),
@@ -3532,6 +3543,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				"showHardwareCursor",
 				"tui.maxInlineImages",
 				"tui.resizeScrollback",
+				"tui.completeScrollback",
 				"tui.imeSafeCursor",
 				"autocompleteMaxVisible",
 				"spelling.typoDetection",
@@ -7229,7 +7241,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		const cmd = [...resolveCliEntryCmd(), ...restartArgv(process.argv.slice(2), this.#resumableSessionId())];
+		const sessionFile = this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined;
+		const cmd = [
+			...resolveCliEntryCmd(),
+			...restartArgv(process.argv.slice(2), sessionFile ? path.resolve(sessionFile) : undefined),
+		];
 		await postmortem.cleanup();
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
@@ -8314,7 +8330,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showGitTui(revision);
 	}
 
-	showModelSelector(options?: { temporaryOnly?: boolean }): void {
+	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void {
 		this.#selectorController.showModelSelector(options);
 	}
 
@@ -8342,8 +8358,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showThinkingSelector();
 	}
 
-	showSessionSelector(source?: ForeignSessionSource): void {
-		void this.#selectorController.showSessionSelector(source);
+	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void {
+		void this.#selectorController.showSessionSelector(source, onSelect);
 	}
 
 	async handleResumeSession(sessionPath: string): Promise<void> {

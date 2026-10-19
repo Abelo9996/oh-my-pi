@@ -3,7 +3,6 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { Image, renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
-import { clipSixel } from "@oh-my-pi/pi-tui/render/sixel";
 import {
 	type CellDimensions,
 	getCellDimensions,
@@ -12,7 +11,6 @@ import {
 	setTerminalImageProtocol,
 	TERMINAL,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
-import { wrapTmuxPassthrough } from "@oh-my-pi/pi-tui/tmux";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
 withoutTerminalMultiplexer();
@@ -75,28 +73,22 @@ function trackSixelRaster(term: VirtualTerminal): {
 } {
 	const state = { stale: 0, paints: 0, scrolls: 0, pixelRows: [] as number[] };
 	const realWrite = term.write.bind(term);
-	let displayMode = false;
-	const writeText = (text: string): void => {
-		for (const mode of text.matchAll(/\x1b\[\?80([hl])/g)) displayMode = mode[1] === "h";
-		realWrite(text);
-	};
 	vi.spyOn(term, "write").mockImplementation((data: string) => {
 		let offset = 0;
 		for (const match of data.matchAll(SIXEL)) {
-			writeText(data.slice(offset, match.index));
+			realWrite(data.slice(offset, match.index));
 			offset = match.index + match[0].length;
 			const cursor = term.getCursor();
-			const origin = displayMode ? { row: 0, col: 0 } : cursor;
 			const pixels = sixelPixels(match[0]);
 			const bands = 1 + [...match[0].matchAll(/-/g)].length;
 			const allocatedPixels = Math.max(12, bands * 6);
-			const overflow = allocatedPixels - (term.rows - origin.row) * CELL.heightPx;
-			const scrolls = displayMode ? 0 : Math.max(0, Math.ceil(overflow / CELL.heightPx));
+			const overflow = allocatedPixels - (term.rows - cursor.row) * CELL.heightPx;
+			const scrolls = Math.max(0, Math.ceil(overflow / CELL.heightPx));
 			if (scrolls > 0) {
 				state.scrolls += scrolls;
 				realWrite(`\x1b[${term.rows};1H${"\n".repeat(scrolls)}`);
 			}
-			const originRow = origin.row - scrolls;
+			const originRow = cursor.row - scrolls;
 			const screen = term.getViewport();
 			const cells = new Map<number, Set<number>>();
 			state.pixelRows = [];
@@ -109,7 +101,7 @@ function trackSixelRaster(term: VirtualTerminal): {
 					const row = Math.floor(screenPixel / CELL.heightPx);
 					let columns = cells.get(row);
 					if (!columns) cells.set(row, (columns = new Set()));
-					columns.add(origin.col + Math.floor(x / CELL.widthPx));
+					columns.add(cursor.col + Math.floor(x / CELL.widthPx));
 				}
 			}
 			let paint = "";
@@ -122,7 +114,7 @@ function trackSixelRaster(term: VirtualTerminal): {
 			state.paints++;
 			realWrite(`${paint}\x1b[${cursor.row + 1};${cursor.col + 1}H`);
 		}
-		writeText(data.slice(offset));
+		realWrite(data.slice(offset));
 	});
 	return state;
 }
@@ -213,32 +205,6 @@ describe("SIXEL block repaint", () => {
 		}
 	});
 
-	it("keeps pixel colors when clipping across six-pixel bands", () => {
-		const source = '\x1bP0;1q"1;1;3;24#1;2;100;0;0#2;2;0;0;100#1!3T$#2!3j-!3F$#1!3w-!3~$#2!3?-!3Z$#1!3c\x1b\\';
-		for (const hidden of [1, 5, 6, 7, 20]) {
-			for (const leading of [0, 1, 5, 20]) {
-				const clipped = clipSixel(source, hidden, leading);
-				expect(clipped).not.toBeNull();
-				expect(sixelPixels(clipped!)).toEqual([
-					...Array.from({ length: leading }, () => Array<string>(3).fill("")),
-					...sixelPixels(source).slice(hidden),
-				]);
-			}
-		}
-		expect(clipSixel('\x1bPq"1;1;3;24#1~\x1b[99A\x1b\\', 1)).toBeNull();
-		const wrapped = clipSixel(wrapTmuxPassthrough(source), 7);
-		expect(wrapped).not.toBeNull();
-		expect(sixelPixels(wrapped!.slice(7, -2).replaceAll("\x1b\x1b", "\x1b"))).toEqual(sixelPixels(source).slice(7));
-	});
-
-	it("crops the native encoder's band stream without losing visible pixels", () => {
-		const source = natives.encodeSixel(new Uint8Array(Buffer.from(BASE64_ONE_PIXEL_PNG, "base64")), 9, 78);
-		const clipped = clipSixel(source, CELL.heightPx);
-		expect(clipped).not.toBeNull();
-		expect(sixelPixels(source).some(row => row.some(Boolean))).toBe(true);
-		expect(sixelPixels(clipped!)).toEqual(sixelPixels(source).slice(CELL.heightPx));
-	});
-
 	it("bounds forced SIXEL repaints below committed history without scrolling on a partial bottom band", async () => {
 		deterministicSixel();
 		const term = new VirtualTerminal(40, 12);
@@ -311,48 +277,91 @@ describe("SIXEL block repaint", () => {
 		});
 	}
 
-	it("clamps an impossible bottom band on a two-row Windows Terminal page", async () => {
-		deterministicSixel();
-		const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-		const session = Bun.env.WT_SESSION;
-		Object.defineProperty(process, "platform", { ...platform, value: "win32" });
-		Bun.env.WT_SESSION = "sixel-display-mode-test";
-		const term = new VirtualTerminal(40, 2);
+	for (const clippedRows of [1, 2, 3]) {
+		it(`keeps a real Image within its ${4 - clippedRows} visible rows after top clipping`, async () => {
+			const encodeSixel = spyOn(natives, "encodeSixelAsync");
+			const term = new VirtualTerminal(40, 8);
+			const raster = trackSixelRaster(term);
+			const tui = new TUI(term);
+			const graphic = new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: text => text },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget: tui.imageBudget, imageKey: `clipped-${clippedRows}` },
+				{ widthPx: 40, heightPx: 80 },
+			);
+			let clip = false;
+			let repaint = false;
+			tui.setFrameProvider({
+				renderFrame: size => ({
+					viewport: [
+						...graphic
+							.render(size.columns)
+							.slice(clip ? clippedRows : 0)
+							.map((line, index, lines) => (repaint && index === lines.length - 1 ? `${line}\x1b[0m` : line)),
+						"following text",
+						"another untouched line",
+					],
+				}),
+				acknowledgeHistory() {},
+			});
+			try {
+				tui.start();
+				await settle(term);
+				await encodeSixel.mock.results[0]?.value;
+				await settle(term);
+				expect(raster.paints).toBeGreaterThan(0);
+				expect(term.getViewport()[4]?.trimEnd()).toBe("following text");
+
+				clip = true;
+				tui.requestRender();
+				await settle(term);
+				const paints = raster.paints;
+				expect(paints).toBeGreaterThan(1);
+				// Change only a harmless suffix on the real Image line so it is
+				// repainted while following text stays byte-identical and skipped.
+				// An uncropped raster now overwrites that previously painted text.
+				repaint = true;
+				tui.requestRender();
+				await settle(term);
+				expect(raster.paints).toBeGreaterThan(paints);
+				const viewport = term.getViewport();
+				expect(viewport.flatMap((line, row) => (line.includes(RASTER) ? [row] : []))).toEqual(
+					Array.from({ length: 4 - clippedRows }, (_, row) => row),
+				);
+				expect(viewport[4 - clippedRows]?.trimEnd()).toBe("following text");
+				expect(viewport[5 - clippedRows]?.trimEnd()).toBe("another untouched line");
+			} finally {
+				tui.stop();
+			}
+		});
+	}
+
+	it("drops a top-clipped SIXEL the cropper cannot parse instead of failing the frame", async () => {
+		const term = new VirtualTerminal(40, 8);
 		const raster = trackSixelRaster(term);
 		const tui = new TUI(term);
-		const image = graphic(tui, "short-page", 3);
-		const nextImage = graphic(tui, "next-page", 1);
-		let next = false;
+		// A palette definition after drawing is outside the cropper's grammar.
+		const foreign = '\x1bP0;1;0q"1;1;40;80#1;2;100;0;0#1!40~#2;2;0;100;0#2!40~\x1b\\';
+		const block = ["", "", "", `\x1b7\x1b[3A${foreign}\x1b8`];
+		let clip = false;
 		tui.setFrameProvider({
-			renderFrame: size => ({
-				viewport: next
-					? ["above", ...nextImage.render(size.columns)]
-					: renderForScrollback(() => image.render(size.columns)).slice(1),
-			}),
+			renderFrame: () => ({ viewport: [...block.slice(clip ? 2 : 0), "following text"] }),
 			acknowledgeHistory() {},
 		});
 		try {
 			tui.start();
 			await settle(term);
-			expect(raster.scrolls).toBe(0);
-			expect(raster.pixelRows).toEqual(Array.from({ length: 40 }, (_, row) => row));
-			expect(term.getViewport().map(line => line.trimEnd())).toEqual([RASTER.repeat(4), RASTER.repeat(4)]);
-			tui.requestRender(true);
-			await settle(term);
-			expect(raster.scrolls).toBe(0);
-			expect(term.getViewport().map(line => line.trimEnd())).toEqual([RASTER.repeat(4), RASTER.repeat(4)]);
-			next = true;
+			const paints = raster.paints;
+			expect(paints).toBeGreaterThan(0);
+
+			clip = true;
 			tui.requestRender();
 			await settle(term);
-			expect(raster.scrolls).toBe(0);
-			expect(raster.pixelRows).toEqual(Array.from({ length: 18 }, (_, row) => CELL.heightPx + row));
-			expect(term.getViewport()[0]?.trimEnd()).toBe("above");
-			expect(term.getViewport()[1]?.trimEnd()).toBe(RASTER.repeat(4));
+			expect(raster.paints).toBe(paints);
+			expect(term.getViewport()[2]?.trimEnd()).toBe("following text");
 		} finally {
 			tui.stop();
-			Object.defineProperty(process, "platform", platform);
-			if (session === undefined) delete Bun.env.WT_SESSION;
-			else Bun.env.WT_SESSION = session;
 		}
 	});
 });

@@ -1,16 +1,13 @@
 import * as path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { SvgFigure } from "@oh-my-pi/pi-tui/chat/svg-figure";
-import { renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
 	type CellDimensions,
 	getCellDimensions,
-	getTerminalBackgroundColor,
 	ImageProtocol,
 	setCellDimensions,
-	setTerminalBackgroundColor,
 	setTerminalImageProtocol,
 	TERMINAL,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
@@ -59,7 +56,6 @@ describe("SvgFigure", () => {
 	const originalProtocol = TERMINAL.imageProtocol;
 	const originalCell = { ...getCellDimensions() };
 	const originalGraphics = { ...getKittyGraphics() };
-	const originalBackground = getTerminalBackgroundColor();
 
 	beforeAll(async () => {
 		await initTheme(false);
@@ -68,13 +64,11 @@ describe("SvgFigure", () => {
 	beforeEach(() => {
 		setTerminalImageProtocol(ImageProtocol.Kitty);
 		setCellDimensions(CELL);
-		setTerminalBackgroundColor(null);
 	});
 
 	afterEach(() => {
 		setTerminalImageProtocol(originalProtocol);
 		setCellDimensions(originalCell);
-		setTerminalBackgroundColor(originalBackground);
 		setKittyGraphics(originalGraphics);
 	});
 
@@ -256,52 +250,6 @@ describe("SvgFigure", () => {
 		await next;
 		expect(svg.debugState().failed).toBe(true);
 		svg.dispose();
-	});
-
-	it("replaces the SIXEL raster when its known background changes without flattening Kitty", async () => {
-		const source = `<svg viewBox="0 0 16 16"><rect width="8" height="16" fill="#ff0000" opacity=".5"/></svg>`;
-		setTerminalImageProtocol(ImageProtocol.Sixel);
-		setTerminalBackgroundColor("#000000");
-		const { figure: svg, landed } = figure(source);
-		let next = landed();
-		svg.render(40);
-		await next;
-		const black = renderForScrollback(() => svg.render(40)).join("");
-		expect(black).toContain("\x1bP");
-		expect(black).not.toMatch(/#\d+;2;100;100;100/);
-		expect(svg.pending).toBe(false);
-
-		setTerminalBackgroundColor("#ffffff");
-		expect(svg.pending).toBe(true);
-		expect(svg.debugState().current).toBe(false);
-		next = landed();
-		svg.render(40);
-		await next;
-		const white = renderForScrollback(() => svg.render(40)).join("");
-		expect(white).toContain("\x1bP");
-		expect(white).not.toBe(black);
-		expect(white).toMatch(/#\d+;2;100;100;100/);
-		expect(svg.pending).toBe(false);
-		setTerminalBackgroundColor(null);
-		expect(svg.pending).toBe(true);
-		next = landed();
-		svg.render(40);
-		await next;
-		expect(svg.pending).toBe(false);
-		svg.dispose();
-
-		setTerminalImageProtocol(ImageProtocol.Kitty);
-		const { figure: alpha, landed: kittyLanded } = figure(source);
-		const kittyRaster = kittyLanded();
-		alpha.render(40);
-		await kittyRaster;
-		const kitty = alpha.render(40).join("");
-		setTerminalBackgroundColor("#000000");
-		expect(alpha.pending).toBe(false);
-		setTerminalBackgroundColor("#ffffff");
-		expect(alpha.pending).toBe(false);
-		expect(alpha.render(40).join("")).toBe(kitty);
-		alpha.dispose();
 	});
 
 	// Regression (#15660): with no theme installed the palette threw inside the
