@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the npm release-age integration test failing before package resolution with an empty global prefix.
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
