@@ -2,15 +2,8 @@
 
 ## [Unreleased]
 
-### Breaking Changes
-
-- SDK callers passing `model` to `runStructuredSubagent()` must pass `hostModel` instead: `model` is now the per-call selector, gated by `task.perCallModel` and limited to operator-configured models ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
-- Project agents (`.omp/agents/`, project-scope plugins) no longer route by their frontmatter `model`, `prewalk` or `advisor`: they run on the parent's model with no prewalk or advisor unless `task.agentModelOverrides`, `task.agentPrewalk` or `task.agentAdvisor` configures them, and the `/agents` hub shows those effective values. Move routing into those settings, or into a user-level agent in `~/.omp/agent/agents/` ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
-- A per-call `model` must be one exact `provider/model-id[:level]` string (role aliases, `@default`, arrays and globs are rejected) and conflicts with a `task.agentModelOverrides` entry; `task.perCallModelFallbacks` now defaults to `off`, so per-call workers fail rather than switch to chain models unless you set `select` or `runtime` ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
-
 ### Added
 
-- Added `task.perCallModel` (`off` by default, `unpinned`, `on`, `eval`) for operator-approved per-call model selection in task items and eval `agent()`/`workpool()`; `eval` leaves ordinary task routing unchanged. `task.perCallModelAllow` controls approved models, and `task.perCallModelFallbacks` controls selection and retry access to fallback models ([#7982](https://github.com/can1357/oh-my-pi/issues/7982), [#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix), [#15641](https://github.com/can1357/oh-my-pi/pull/15641) by [@andrebrait](https://github.com/andrebrait))
 - Added DeepSeek as a web search engine (`web/deepseek`), using DeepSeek's new Search API with your existing `DEEPSEEK_API_KEY` or stored `deepseek` credential
 - Added `el.selectText(text, { prefix?, suffix?, select? })` to the macOS `computer` tool: it selects text (or places a caret) in a background app's text field without taking focus, moving the pointer or sending keys, so typing into that field replaces it ([#15175](https://github.com/can1357/oh-my-pi/pull/15175) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `{ takeover: true }` to computer-use `win.move`, so a hover that a window refuses in the background can be retried in the foreground ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
