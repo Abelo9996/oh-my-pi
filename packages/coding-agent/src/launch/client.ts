@@ -337,6 +337,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	#bindSocket(socket: IpcConnection): void {
+		if (this.#closed) {
+			socket.destroy();
+			return;
+		}
 		this.#socket = socket;
 		socket.start(
 			line => this.#onLine(line),

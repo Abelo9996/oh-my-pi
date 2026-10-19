@@ -15,7 +15,7 @@ import { AgentRegistry } from "../../src/registry/agent-registry";
 import { IrcBus } from "../../src/irc/bus";
 
 async function withBroker(
-	run: (client: clients.DaemonBrokerClient, session: ToolSession) => Promise<void>,
+	run: (client: clients.DaemonBrokerClient, session: ToolSession, runtimeDir: string) => Promise<void>,
 ): Promise<void> {
 	using root = TempDir.createSync("@omp-broker-discovery-");
 	const projectDir = path.join(root.path(), "project");
@@ -54,7 +54,7 @@ async function withBroker(
 	try {
 		await listening.promise;
 		vi.spyOn(clients, "daemonClientForProject").mockResolvedValue(client);
-		await run(client, session);
+		await run(client, session, runtimeDir);
 	} finally {
 		vi.restoreAllMocks();
 		await client.request({ op: "shutdown" }).catch(() => undefined);
@@ -65,12 +65,12 @@ async function withBroker(
 }
 
 function holdConnection() {
-	const connected = Promise.withResolvers<void>();
+	const connected = Promise.withResolvers<IpcConnection>();
 	const release = Promise.withResolvers<void>();
 	const connect = IpcConnection.connect.bind(IpcConnection);
 	vi.spyOn(IpcConnection, "connect").mockImplementationOnce(async (endpoint, options) => {
 		const connection = await connect(endpoint, options);
-		connected.resolve();
+		connected.resolve(connection);
 		await release.promise;
 		return connection;
 	});
@@ -223,6 +223,31 @@ describe("broker discovery during wait and request cancellation", () => {
 				await Promise.allSettled([cancelled, sibling]);
 			}
 		}));
+	test("closing a client destroys a native connection delivered after its caller cancelled", () =>
+		withBroker(async (_client, session, runtimeDir) => {
+			const closing = await clients.createDaemonBrokerClient(session.cwd, { runtimeDir });
+			const gate = holdConnection();
+			const controller = new AbortController();
+			const cancelled = closing.request({ op: "list" }, controller.signal);
+			const outcome = cancelled.catch((error: unknown) => error);
+			const sibling = closing.request({ op: "ping" });
+			let connection: IpcConnection | undefined;
+			try {
+				connection = await gate.connected;
+				controller.abort();
+				expect(await outcome).toMatchObject({ message: "Daemon broker request aborted" });
+				closing.close();
+				gate.release();
+				await expect(sibling).rejects.toThrow("Daemon broker client is closed");
+				expect(connection.closed).toBe(true);
+			} finally {
+				closing.close();
+				gate.release();
+				connection?.destroy();
+				await Promise.allSettled([cancelled, sibling]);
+			}
+		}));
+
 	test("successful empty discovery reports no work", () =>
 		withBroker(async (_client, session) => {
 			await expect(new WaitTool(session).execute("wait-empty", {})).rejects.toThrow("Nothing to wait for");
