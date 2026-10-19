@@ -9,7 +9,7 @@ import {
 	worthCharting,
 } from "@oh-my-pi/pi-tui/charts/chart-plan";
 import { renderChartSvg } from "@oh-my-pi/pi-tui/charts/chart-svg";
-import { analyzeTable, parseCell } from "@oh-my-pi/pi-tui/charts/table-data";
+import { analyzeTable, cellStatus, parseCell } from "@oh-my-pi/pi-tui/charts/table-data";
 import { svgFigurePalette } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { prepareSvg } from "@oh-my-pi/pi-tui/chat/svg-source";
 import {
@@ -288,6 +288,31 @@ describe("parseCell", () => {
 		expect(parseCell("1 2345")).toMatchObject({ value: 1, fit: "prose" });
 	});
 
+	// Regression (#16331): `9 Oct` and `3–4 paź` read as day numbers, and `paź` split into `pa` + `ź`.
+	it("reads day-first dates as dates and keeps counts of nouns and non-ASCII words as numbers", () => {
+		for (const date of [
+			"9 Oct",
+			"3–4 paź",
+			"31 paź – 1 lis",
+			"5 lis (zmiana), potem 14–15 lis",
+			"3.–4. Okt.",
+			"9 окт.",
+		]) {
+			expect(parseCell(date).kind).toBe("date");
+		}
+		expect(parseCell("3 decks")).toMatchObject({ value: 3, fit: "note" });
+		expect(parseCell("3 out of 5")).toMatchObject({ value: 3, fit: "prose" });
+		expect(parseCell("12 żółwi")).toMatchObject({ value: 12, fit: "note" });
+		expect(parseCell("3–4 zł")).toMatchObject({ value: 3, upper: 4, figure: "3–4 zł" });
+	});
+
+	// Regression (#16331): `ok.` (Polish "about") before a date read as a passing status.
+	it("does not read a status word abbreviated before a number as a verdict", () => {
+		expect(cellStatus("ok. 5–6 gru")).toBeUndefined();
+		expect(cellStatus("ok")).toBe("good");
+		expect(cellStatus("3 ok")).toBe("good");
+	});
+
 	it("reads a lone m as millions unless the column holds other durations", () => {
 		const millions = analyze("| k | v |\n|---|---|\n| a | 3.3m |\n| b | 1.2m |\n| c | 0.4m |");
 		expect(millions.measures[0]!.dim).toBe("count");
@@ -379,6 +404,15 @@ describe("analyzeTable", () => {
 		expect(analysis.measures[0]!.cells.map(cell => cell.kind === "number" && cell.value)).toEqual([
 			386, 1988, 7715, 17_083, 31_489,
 		]);
+	});
+
+	// Regression (#16331): day-first dates became measures and charted day numbers from different months on one axis.
+	it("reads columns of day-first dates as temporal, leaving nothing to plot", () => {
+		const analysis = analyze(
+			"| Osoba | Termin 1 | Termin 2 | Następny termin |\n|---|---|---|---|\n| A | 3–4 paź | 9 paź | 7–8 lis |\n| B | 10–11 paź | 16 paź | 5 lis (zmiana), potem 14–15 lis |\n| C | 17–18 paź | 23 paź | 21–22 lis |\n| D | 24–25 paź | 30 paź | 28–29 lis |\n| E | 31 paź – 1 lis | 6 lis | ok. 5–6 gru |",
+		);
+		expect(analysis.columns.map(column => column.role)).toEqual(["label", "temporal", "temporal", "temporal"]);
+		expect(analysis.measures).toEqual([]);
 	});
 });
 

@@ -10,6 +10,7 @@
 
 - Fixed the composer caret drifting one cell left per pasted image or video chip in terminals that draw the chip icon as a wide emoji (JetBrains terminal); the `unicode` preset now uses `📷`/`🎬` chip icons ([#16270](https://github.com/can1357/oh-my-pi/issues/16270))
 - Fixed Tern hiding user text sent with `/skill:<name>` inside a collapsed skill card; only the loaded skill prompt is hidden ([#16311](https://github.com/can1357/oh-my-pi/issues/16311))
+- Fixed table charts plotting day numbers from day-first dates (`9 Oct`, `3–4 paź`, `9. Okt.`); such columns now read as dates like `Oct 9`, units and nouns with non-ASCII letters (`zł`, `paź`) stay whole, and `ok.` before a number no longer reads as a passing status ([#16331](https://github.com/can1357/oh-my-pi/issues/16331))
 
 ## [18.12.2] - 2026-10-18
 
