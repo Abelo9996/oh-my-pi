@@ -233,14 +233,14 @@ export const cfgMnemopiLlmMode = register({
 		group: "Mnemopi",
 		label: "Mnemopi LLM Mode",
 		description:
-			"Use no LLM, the online tiny model (the TINY role from /models, else @smol), or a remote OpenAI-compatible endpoint",
+			"Use no LLM, the MEMORY role from /models (falling back to TINY, then @smol), or a remote OpenAI-compatible endpoint",
 		condition: "mnemopiActive",
 		options: [
 			{ value: "none", label: "None", description: "Disable Mnemopi LLM-backed extraction" },
 			{
 				value: "smol",
-				label: "Online (tiny)",
-				description: "Use the online tiny model (the TINY role from /models, else @smol)",
+				label: "Managed (memory role)",
+				description: "Use the MEMORY role from /models (falling back to TINY, then @smol)",
 			},
 			{ value: "remote", label: "Remote", description: "Use the Mnemopi remote LLM settings below" },
 		],
