@@ -181,6 +181,40 @@ describe("reset usage picker", () => {
 		selector.handleNativeEvent(act("close"));
 		expect(spent).toEqual(["a@x.so", "cancel"]);
 	});
+
+	it("explains a failed reset lookup instead of claiming the account has no usable resets", () => {
+		const empty: ResetUsageAccount = {
+			label: "d@x.so",
+			provider: "anthropic",
+			providerLabel: "Claude Max",
+			availableCount: 0,
+			redeemableCount: 0,
+			target: { credentialId: 20, provider: "anthropic" },
+			active: false,
+		};
+		const failed: ResetUsageAccount = {
+			...empty,
+			label: "c@x.so",
+			target: { credentialId: 19, provider: "anthropic" },
+			error: "Failed to load saved resets",
+		};
+		const spent: string[] = [];
+		const selector = new ResetUsageSelectorComponent(
+			[failed, empty],
+			account => spent.push(account.label),
+			() => {},
+		);
+		const subtitleAfterActivating = (key: string) => {
+			selector.handleNativeEvent(at("activate", key));
+			return JSON.stringify(sheet(selector.describe(pickerCx)).props.subtitle);
+		};
+
+		const failedSubtitle = subtitleAfterActivating("anthropic:19:");
+		expect(failedSubtitle).toContain("Failed to load saved resets");
+		expect(failedSubtitle).not.toContain("no saved resets usable");
+		expect(subtitleAfterActivating("anthropic:20:")).toContain("no saved resets usable right now");
+		expect(spent).toEqual([]);
+	});
 });
 
 describe("hook selector picker", () => {

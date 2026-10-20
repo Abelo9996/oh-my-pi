@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/usage reset` telling you an account had no saved resets usable right now when its saved resets failed to load; selecting it now shows the load error and that nothing was spent ([#16487](https://github.com/can1357/oh-my-pi/issues/16487))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
