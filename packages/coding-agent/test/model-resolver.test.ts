@@ -1907,6 +1907,19 @@ describe("resolveCliModel", () => {
 		expect(offResult.thinkingLevel).toBe("off");
 	});
 
+	test("strips :max from Bedrock inference-profile ARNs before choosing the model", () => {
+		const profileArn = "arn:aws:bedrock:us-east-2:123456789012:inference-profile/global.openai.gpt-6-luna";
+		const template = createBedrockDefaultModel();
+		const result = resolveCliModel({
+			cliModel: `amazon-bedrock/${profileArn}:max`,
+			modelRegistry: { getAll: () => [template], getAvailable: () => [template] },
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe(profileArn);
+		expect(result.thinkingLevel).toBe(Effort.Max);
+	});
+
 	test("inherits provider-scoped guardrail, transport, and header overrides onto an ARN model, but not the template's prompt-cache checkpoints", () => {
 		const templateModel = createBedrockDefaultModel({
 			transport: "pi-native",
