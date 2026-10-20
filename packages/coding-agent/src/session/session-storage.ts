@@ -205,8 +205,14 @@ export interface SessionStorage {
 	 * to prefix/suffix marker evidence.
 	 */
 	hasAssistantTurn?(path: string): Promise<boolean>;
-	/** Locate the first complete user message beyond a bounded head read, if any. */
-	findFirstUserMessageLine(path: string): Promise<string | undefined>;
+	/**
+	 * First complete `message` record with a user role, read on line
+	 * boundaries past any bounded head window and stopping at the first
+	 * assistant record. Lets listings preview a prompt that follows large
+	 * leading entries (memory recall, attachments). Optional: listings on
+	 * backends without it keep the prefix-only preview.
+	 */
+	findFirstUserMessageLine?(path: string): Promise<string | undefined>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	/** Streaming {@link writeTextAtomic}, optional on the same terms as {@link writeLinesSync}. */

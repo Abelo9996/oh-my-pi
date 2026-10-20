@@ -410,12 +410,16 @@ export function isAssistantMessageLine(line: string): boolean {
 	return record.type === "message" && record.message?.role === "assistant";
 }
 
-/** Find the first complete user message record without parsing unrelated large entries. */
+/**
+ * Find the first complete user message record, stopping at the first assistant
+ * record: a prompt that opens the conversation always precedes the first reply,
+ * so the scan never reads past it.
+ */
 export async function findFirstUserMessageLine(
 	lines: AsyncIterable<string> | Iterable<string>,
 ): Promise<string | undefined> {
 	for await (const line of lines) {
-		if (!line.includes('"message"') || !line.includes('"user"')) continue;
+		if (!line.includes('"message"') || !(line.includes('"user"') || line.includes('"assistant"'))) continue;
 		let entry: unknown;
 		try {
 			entry = JSON.parse(line);
@@ -424,6 +428,7 @@ export async function findFirstUserMessageLine(
 		}
 		if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) continue;
 		if (entry.message.role === "user") return line;
+		if (entry.message.role === "assistant") return undefined;
 	}
 	return undefined;
 }

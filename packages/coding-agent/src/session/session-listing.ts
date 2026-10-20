@@ -467,7 +467,7 @@ async function scanSessionFile(
 
 		if (!firstMessage && size > SESSION_LIST_PREFIX_BYTES) {
 			try {
-				const line = await storage.findFirstUserMessageLine(file);
+				const line = await storage.findFirstUserMessageLine?.(file);
 				if (line) {
 					const entry: { message?: Message } = JSON.parse(line);
 					const messageText = entry.message && textContent(entry.message.content, " ");

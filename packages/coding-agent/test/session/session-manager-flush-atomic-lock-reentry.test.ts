@@ -22,7 +22,6 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { findFirstUserMessageLine } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	SessionWriteConflictError,
@@ -94,10 +93,6 @@ class BackgroundFailureStorage implements SessionStorage {
 
 	async readTextSlices(path: string): Promise<[string, string]> {
 		return [this.#files.get(path) ?? "", ""];
-	}
-
-	async findFirstUserMessageLine(path: string): Promise<string | undefined> {
-		return findFirstUserMessageLine((await this.readText(path)).split("\n"));
 	}
 
 	async writeText(path: string, content: string): Promise<void> {
