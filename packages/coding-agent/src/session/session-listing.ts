@@ -393,10 +393,9 @@ function getSessionListWorkerCount(fileCount: number): number {
 }
 
 /**
- * Scan a single session file into a {@link SessionInfo}. Always reads the 4 KB
- * header/first-message prefix; only reads the 32 KB tail window (and derives
- * {@link SessionStatus}) when `withStatus` is set — the recent/most-recent
- * lookups skip it.
+ * Scan a single session file into a {@link SessionInfo}. Reads a 4 KB prefix
+ * and, if the first user prompt lies beyond it, streams to the first complete
+ * user record. Only reads the 32 KB tail when `withStatus` is set.
  */
 async function scanSessionFile(
 	file: string,
@@ -463,6 +462,22 @@ async function scanSessionFile(
 						}
 					}
 				}
+			}
+		}
+
+		if (!firstMessage && size > SESSION_LIST_PREFIX_BYTES) {
+			try {
+				const line = await storage.findFirstUserMessageLine(file);
+				if (line) {
+					const entry: { message?: Message } = JSON.parse(line);
+					const messageText = entry.message && textContent(entry.message.content, " ");
+					if (messageText) {
+						firstMessage = messageText;
+						allMessages.push(messageText);
+					}
+				}
+			} catch {
+				// A failed supplemental scan leaves the bounded prefix evidence intact.
 			}
 		}
 

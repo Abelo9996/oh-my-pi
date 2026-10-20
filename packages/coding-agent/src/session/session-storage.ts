@@ -12,7 +12,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import { isAssistantMessageLine } from "./session-entries";
+import { findFirstUserMessageLine, isAssistantMessageLine } from "./session-entries";
 import {
 	overlayTitleSlotContent,
 	parseTitleSlotFromContent,
@@ -205,6 +205,8 @@ export interface SessionStorage {
 	 * to prefix/suffix marker evidence.
 	 */
 	hasAssistantTurn?(path: string): Promise<boolean>;
+	/** Locate the first complete user message beyond a bounded head read, if any. */
+	findFirstUserMessageLine(path: string): Promise<string | undefined>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	/** Streaming {@link writeTextAtomic}, optional on the same terms as {@link writeLinesSync}. */
@@ -1067,6 +1069,15 @@ export class FileSessionStorage implements SessionStorage {
 		]);
 	}
 
+	async findFirstUserMessageLine(path: string): Promise<string | undefined> {
+		const fileHandle = await fsp.open(path, "r");
+		try {
+			return await findFirstUserMessageLine(fileHandle.readLines());
+		} finally {
+			await fileHandle.close();
+		}
+	}
+
 	async hasAssistantTurn(path: string): Promise<boolean> {
 		const fileHandle = await fsp.open(path, "r");
 		try {
@@ -1690,6 +1701,12 @@ export class MemorySessionStorage implements SessionStorage {
 		const entry = this.#files.get(path);
 		if (!entry) return Promise.reject(memoryFileNotFound(path));
 		return Promise.resolve([sliceChunksHead(entry, prefixBytes), sliceChunksTail(entry, suffixBytes)]);
+	}
+
+	findFirstUserMessageLine(path: string): Promise<string | undefined> {
+		const entry = this.#files.get(path);
+		if (!entry) return Promise.reject(memoryFileNotFound(path));
+		return findFirstUserMessageLine(materializeMemoryEntry(entry).split("\n"));
 	}
 
 	async hasAssistantTurn(path: string): Promise<boolean> {

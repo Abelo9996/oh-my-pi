@@ -5,7 +5,7 @@ import { gzipSync } from "node:zlib";
 import { runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { mergeSessionRanking, rankSessionSearchMatches } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { listSessions, type SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getHistoryDbPath, getSessionsDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function makeSession(id: string, overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -107,6 +107,59 @@ describe("slotted session headers", () => {
 		} finally {
 			await tempDir.remove().catch(() => {});
 		}
+	});
+});
+
+describe("session picker preview", () => {
+	it("finds the first prompt and makes it searchable after a long memory recall", async () => {
+		const tempDir = TempDir.createSync("@test-session-preview-");
+		try {
+			const sessionDir = path.join(tempDir.path(), "sessions");
+			await Bun.write(
+				path.join(sessionDir, "recall.jsonl"),
+				[
+					JSON.stringify({ type: "session", id: "recall", cwd: "/repo", timestamp: "2026-10-20T00:00:00Z" }),
+					JSON.stringify({ type: "custom", customType: "memory_recall", data: "x".repeat(70_000) }),
+					JSON.stringify({ type: "message", message: { role: "user", content: "Find the deployment runbook" } }),
+					JSON.stringify({
+						type: "message",
+						message: { role: "assistant", content: "Here it is", stopReason: "stop" },
+					}),
+					"",
+				].join("\n"),
+			);
+
+			const sessions = await listSessions(sessionDir, new FileSessionStorage());
+			expect(sessions[0]?.firstMessage).toBe("Find the deployment runbook");
+			expect(ids(rankSessionSearchMatches(sessions, "deployment runbook"))).toEqual(["recall"]);
+		} finally {
+			await tempDir.remove();
+		}
+	});
+
+	it("reads prompt text following a large image in the first user record", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionDir = "/sessions/project";
+		storage.writeTextSync(
+			`${sessionDir}/image.jsonl`,
+			[
+				JSON.stringify({ type: "session", id: "image", cwd: "/repo", timestamp: "2026-10-20T00:00:00Z" }),
+				JSON.stringify({
+					type: "message",
+					message: {
+						role: "user",
+						content: [
+							{ type: "image", data: "x".repeat(8000), mimeType: "image/png" },
+							{ type: "text", text: "Explain this architecture" },
+						],
+					},
+				}),
+				"",
+			].join("\n"),
+		);
+
+		const sessions = await listSessions(sessionDir, storage);
+		expect(sessions[0]?.firstMessage).toBe("Explain this architecture");
 	});
 });
 

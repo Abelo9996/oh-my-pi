@@ -8,6 +8,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
@@ -407,4 +408,22 @@ export function isAssistantMessageLine(line: string): boolean {
 		return false;
 	}
 	return record.type === "message" && record.message?.role === "assistant";
+}
+
+/** Find the first complete user message record without parsing unrelated large entries. */
+export async function findFirstUserMessageLine(
+	lines: AsyncIterable<string> | Iterable<string>,
+): Promise<string | undefined> {
+	for await (const line of lines) {
+		if (!line.includes('"message"') || !line.includes('"user"')) continue;
+		let entry: unknown;
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) continue;
+		if (entry.message.role === "user") return line;
+	}
+	return undefined;
 }
