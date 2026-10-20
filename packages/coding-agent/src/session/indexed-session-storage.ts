@@ -9,7 +9,7 @@ import {
 	type SessionStorageWriteOptions,
 	type WriteTextAtomicOptions,
 } from "./session-storage";
-import { isAssistantMessageLine } from "./session-entries";
+import { findFirstOpeningPromptLine, isAssistantMessageLine } from "./session-entries";
 import { enoent } from "./session-storage-errors";
 import {
 	overlayTitleSlotContent,
@@ -279,6 +279,10 @@ export class IndexedSessionStorage implements SessionStorage {
 		const [prefix, suffix] = await this.#backend.readSlices(path, prefixLimit, suffixLimit);
 		const title = titleUpdateForIndex(entry);
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
+	}
+
+	async findFirstOpeningPromptLine(path: string): Promise<string | undefined> {
+		return findFirstOpeningPromptLine((await this.readText(path)).split("\n"));
 	}
 
 	async hasAssistantTurn(path: string): Promise<boolean> {

@@ -8,6 +8,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import { skillPromptTitleInput } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
@@ -413,4 +414,53 @@ export function isAssistantMessageLine(line: string): boolean {
 		return false;
 	}
 	return record.type === "message" && record.message?.role === "assistant";
+}
+
+/** User-invoked skill chip from a persisted entry, without its expanded prompt body. */
+export function skillInvocationFromEntry(entry: {
+	type?: unknown;
+	customType?: unknown;
+	attribution?: unknown;
+	details?: unknown;
+}): string | undefined {
+	if (entry.type !== "custom_message" || entry.customType !== "skill-prompt" || entry.attribution === "agent") {
+		return undefined;
+	}
+	const details = entry.details;
+	if (!details || typeof details !== "object" || !("name" in details) || typeof details.name !== "string") {
+		return undefined;
+	}
+	if (!details.name.trim()) return undefined;
+	return (
+		skillPromptTitleInput({
+			name: details.name,
+			args: "args" in details && typeof details.args === "string" ? details.args : undefined,
+		}) || undefined
+	);
+}
+
+/** First complete user prompt record, whether a plain message or a `/skill:` invocation. */
+export async function findFirstOpeningPromptLine(
+	lines: AsyncIterable<string> | Iterable<string>,
+): Promise<string | undefined> {
+	for await (const line of lines) {
+		if (!line.includes('"skill-prompt"') && (!line.includes('"message"') || !line.includes('"user"'))) continue;
+		let entry: {
+			type?: string;
+			customType?: string;
+			attribution?: string;
+			details?: unknown;
+			message?: { role?: string };
+		};
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (!entry || typeof entry !== "object") continue;
+		if (skillInvocationFromEntry(entry) || (entry.type === "message" && entry.message?.role === "user")) {
+			return line;
+		}
+	}
+	return undefined;
 }

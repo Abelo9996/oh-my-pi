@@ -12,7 +12,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import { isAssistantMessageLine } from "./session-entries";
+import { findFirstOpeningPromptLine, isAssistantMessageLine } from "./session-entries";
 import {
 	overlayTitleSlotContent,
 	parseTitleSlotFromContent,
@@ -205,6 +205,12 @@ export interface SessionStorage {
 	 * to prefix/suffix marker evidence.
 	 */
 	hasAssistantTurn?(path: string): Promise<boolean>;
+	/**
+	 * First complete user prompt record, including a user-invoked skill, across
+	 * line boundaries beyond the bounded listing prefix. Optional for backends
+	 * that cannot scan beyond the prefix.
+	 */
+	findFirstOpeningPromptLine?(path: string): Promise<string | undefined>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	/** Streaming {@link writeTextAtomic}, optional on the same terms as {@link writeLinesSync}. */
@@ -1066,6 +1072,14 @@ export class FileSessionStorage implements SessionStorage {
 			utf8Decoder.decode(tail),
 		]);
 	}
+	async findFirstOpeningPromptLine(path: string): Promise<string | undefined> {
+		const fileHandle = await fsp.open(path, "r");
+		try {
+			return await findFirstOpeningPromptLine(fileHandle.readLines());
+		} finally {
+			await fileHandle.close();
+		}
+	}
 
 	async hasAssistantTurn(path: string): Promise<boolean> {
 		const fileHandle = await fsp.open(path, "r");
@@ -1690,6 +1704,11 @@ export class MemorySessionStorage implements SessionStorage {
 		const entry = this.#files.get(path);
 		if (!entry) return Promise.reject(memoryFileNotFound(path));
 		return Promise.resolve([sliceChunksHead(entry, prefixBytes), sliceChunksTail(entry, suffixBytes)]);
+	}
+	findFirstOpeningPromptLine(path: string): Promise<string | undefined> {
+		const entry = this.#files.get(path);
+		if (!entry) return Promise.reject(memoryFileNotFound(path));
+		return findFirstOpeningPromptLine(materializeMemoryEntry(entry).split("\n"));
 	}
 
 	async hasAssistantTurn(path: string): Promise<boolean> {

@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Fixed session picker previews showing the second prompt or `(no messages)` for sessions started with `/skill:<name>`; skill invocations and their arguments are now searchable ([#16502](https://github.com/can1357/oh-my-pi/issues/16502))
 - Fixed agents misreading `computer.windows()` results on their first call ([#16299](https://github.com/can1357/oh-my-pi/pull/16299) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed GitLab merge request reads rendering `[object Promise]` instead of the description ([#16477](https://github.com/can1357/oh-my-pi/pull/16477) by [@adi-IL](https://github.com/adi-IL))
 - Fixed `/restart` losing the active named profile and failing to resume its session ([#15742](https://github.com/can1357/oh-my-pi/pull/15742) by [@sapran](https://github.com/sapran))

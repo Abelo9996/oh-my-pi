@@ -5,7 +5,7 @@ import { gzipSync } from "node:zlib";
 import { runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { mergeSessionRanking, rankSessionSearchMatches } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { listSessions, type SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getHistoryDbPath, getSessionsDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function makeSession(id: string, overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -106,6 +106,86 @@ describe("slotted session headers", () => {
 			expect(await Bun.file(path.join(getSessionsDir(root), "project", "legacy-name.jsonl")).exists()).toBe(false);
 		} finally {
 			await tempDir.remove().catch(() => {});
+		}
+	});
+});
+
+describe("skill-started session previews", () => {
+	it("previews a skill invocation instead of the follow-up and indexes its arguments", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionDir = "/sessions/skill-preview";
+		storage.writeTextSync(
+			`${sessionDir}/skill.jsonl`,
+			[
+				JSON.stringify({ type: "session", id: "skill", cwd: "/repo", timestamp: "2026-10-20T00:00:00Z" }),
+				JSON.stringify({
+					type: "custom_message",
+					customType: "skill-prompt",
+					attribution: "user",
+					content: "Internal skill instructions",
+					details: { name: "model-selection", args: "compare haiku", path: "/skills/model-selection" },
+				}),
+				JSON.stringify({ type: "message", message: { role: "assistant", content: "Done" } }),
+				JSON.stringify({ type: "message", message: { role: "user", content: "second prompt" } }),
+				"",
+			].join("\n"),
+		);
+
+		const sessions = await listSessions(sessionDir, storage);
+		expect(sessions[0]?.firstMessage).toBe("/skill:model-selection compare haiku");
+		expect(ids(rankSessionSearchMatches(sessions, "compare haiku"))).toEqual(["skill"]);
+		expect(sessions[0]?.allMessagesText).not.toContain("Internal skill instructions");
+	});
+
+	it("ignores injected skill prompts before the first user message", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionDir = "/sessions/injected-skill";
+		storage.writeTextSync(
+			`${sessionDir}/injected.jsonl`,
+			[
+				JSON.stringify({ type: "session", id: "injected", cwd: "/repo", timestamp: "2026-10-20T00:00:00Z" }),
+				JSON.stringify({
+					type: "custom_message",
+					customType: "skill-prompt",
+					attribution: "agent",
+					content: "Internal skill instructions",
+					details: { name: "internal-skill", args: "not user input" },
+				}),
+				JSON.stringify({ type: "message", message: { role: "user", content: "actual first prompt" } }),
+				"",
+			].join("\n"),
+		);
+
+		const sessions = await listSessions(sessionDir, storage);
+		expect(sessions[0]?.firstMessage).toBe("actual first prompt");
+		expect(ids(rankSessionSearchMatches(sessions, "internal-skill"))).toEqual([]);
+	});
+
+	it("previews a skill without arguments even when its body extends past the prefix", async () => {
+		const tempDir = TempDir.createSync("@test-skill-preview-");
+		try {
+			const sessionDir = path.join(tempDir.path(), "sessions");
+			await Bun.write(
+				path.join(sessionDir, "long-skill.jsonl"),
+				[
+					JSON.stringify({ type: "session", id: "long-skill", cwd: "/repo", timestamp: "2026-10-20T00:00:00Z" }),
+					JSON.stringify({
+						type: "custom_message",
+						customType: "skill-prompt",
+						content: "Expanded skill body ".repeat(400),
+						details: { name: "model-selection", path: "/skills/model-selection", lineCount: 400 },
+					}),
+					JSON.stringify({ type: "message", message: { role: "assistant", content: "Done" } }),
+					"",
+				].join("\n"),
+			);
+
+			const sessions = await listSessions(sessionDir, new FileSessionStorage());
+			expect(sessions[0]?.firstMessage).toBe("/skill:model-selection");
+			expect(ids(rankSessionSearchMatches(sessions, "/skill:model-selection"))).toEqual(["long-skill"]);
+			expect(sessions[0]?.allMessagesText).not.toContain("Expanded skill body");
+		} finally {
+			await tempDir.remove();
 		}
 	});
 });

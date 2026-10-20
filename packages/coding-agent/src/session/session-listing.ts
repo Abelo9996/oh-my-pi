@@ -8,6 +8,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
+import { skillInvocationFromEntry } from "./session-entries";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
@@ -393,10 +394,9 @@ function getSessionListWorkerCount(fileCount: number): number {
 }
 
 /**
- * Scan a single session file into a {@link SessionInfo}. Always reads the 4 KB
- * header/first-message prefix; only reads the 32 KB tail window (and derives
- * {@link SessionStatus}) when `withStatus` is set — the recent/most-recent
- * lookups skip it.
+ * Scan a single session file into a {@link SessionInfo}. Reads a 4 KB prefix,
+ * and scans for the opening prompt if its record extends beyond that window.
+ * Only reads the 32 KB tail when `withStatus` is set.
  */
 async function scanSessionFile(
 	file: string,
@@ -442,10 +442,25 @@ async function scanSessionFile(
 		let shortSummary: string | undefined;
 
 		for (let i = 1; i < entries.length; i++) {
-			const entry = entries[i] as { type?: string; message?: Message; shortSummary?: string };
+			const entry = entries[i] as {
+				type?: string;
+				message?: Message;
+				shortSummary?: string;
+				customType?: string;
+				attribution?: string;
+				details?: unknown;
+			};
 
 			if (entry.type === "compaction" && typeof entry.shortSummary === "string") {
 				shortSummary = entry.shortSummary;
+			}
+
+			if (!firstMessage) {
+				const invocation = skillInvocationFromEntry(entry);
+				if (invocation) {
+					firstMessage = invocation;
+					allMessages.push(invocation);
+				}
 			}
 
 			if (entry.type === "message" && entry.message) {
@@ -463,6 +478,32 @@ async function scanSessionFile(
 						}
 					}
 				}
+			}
+		}
+
+		if (!firstMessage && size > SESSION_LIST_PREFIX_BYTES) {
+			try {
+				const line = await storage.findFirstOpeningPromptLine?.(file);
+				if (line) {
+					const entry: {
+						type?: string;
+						message?: Message;
+						customType?: string;
+						attribution?: string;
+						details?: unknown;
+					} = JSON.parse(line);
+					const messageText =
+						skillInvocationFromEntry(entry) ??
+						(entry.type === "message" && entry.message?.role === "user"
+							? textContent(entry.message.content, " ")
+							: undefined);
+					if (messageText) {
+						firstMessage = messageText;
+						allMessages.push(messageText);
+					}
+				}
+			} catch {
+				// A failed supplemental scan leaves the bounded prefix evidence intact.
 			}
 		}
 
