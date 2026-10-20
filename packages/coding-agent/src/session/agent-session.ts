@@ -1153,6 +1153,9 @@ export class AgentSession implements SettingsScope {
 	 *  incremented, so `isStreaming` alone cannot tell a host that a submission is admitted. */
 	#admittedSubmissionCount = 0;
 	#admittedSubmissionsSettled: PromiseWithResolvers<void> | undefined;
+	/** Steers accepted before async message preparation has placed them on the agent queue. */
+	#pendingSteeringCount = 0;
+	#pendingSteeringSettled: PromiseWithResolvers<void> | undefined;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
 	// checks in #handleAgentEvent) still fire on the original schedule — only the
@@ -3207,13 +3210,12 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * True while steering input sits in the agent queue, not yet injected into
-	 * the conversation. The task executor checks it at a terminal `yield` so a
-	 * steer that landed during that final step extends the run instead of
-	 * stranding behind the run's end.
+	 * True while steering input is being prepared or sits in the agent queue.
+	 * The task executor checks this at a terminal `yield` so an admitted steer
+	 * extends the run even before async preparation has queued its message.
 	 */
 	hasQueuedSteering(): boolean {
-		return this.agent.peekSteeringQueue().length > 0;
+		return this.#pendingSteeringCount > 0 || this.agent.peekSteeringQueue().length > 0;
 	}
 
 	/** True while a submission has been admitted but has not yet started a turn, queued, or bailed. */
@@ -6510,6 +6512,10 @@ export class AgentSession implements SettingsScope {
 			// The agent loop stops before abort() finishes unwinding; only its last
 			// step schedules the turn that delivers a queued steer (interrupt-and-send).
 			await Promise.all(this.#abortUnwinds);
+			if (this.#pendingSteeringCount > 0) {
+				this.#pendingSteeringSettled ??= Promise.withResolvers<void>();
+				await this.#pendingSteeringSettled.promise;
+			}
 			await this.#advisors.waitForPendingCardEvents();
 			// Core subscribers run asynchronously. Retry recovery can still be
 			// rewriting entries before it publishes auto_retry_end.
@@ -6520,7 +6526,8 @@ export class AgentSession implements SettingsScope {
 				!this.agent.state.isStreaming &&
 				this.#inFlightEventHandlers.size === 0 &&
 				this.#abortUnwinds.size === 0 &&
-				this.#postPromptTasks.size === 0
+				this.#postPromptTasks.size === 0 &&
+				this.#pendingSteeringCount === 0
 			) {
 				return;
 			}
@@ -8682,19 +8689,28 @@ export class AgentSession implements SettingsScope {
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
 	async steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
-		if (text.startsWith("/")) {
-			this.#throwIfExtensionCommand(text);
-		}
+		this.#pendingSteeringCount++;
+		try {
+			if (text.startsWith("/")) {
+				this.#throwIfExtensionCommand(text);
+			}
 
-		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		// Stamp before image preprocessing so a queued image steer measures from
-		// the operator's submission, not after the vision-model description.
-		const submittedAt = Date.now();
-		await this.#queueUserMessage(expandedText, images, "steer", {
-			timestamp: submittedAt,
-			attribution: options?.attribution,
-			rawText: text,
-		});
+			const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
+			// Stamp before image preprocessing so a queued image steer measures from
+			// the operator's submission, not after the vision-model description.
+			const submittedAt = Date.now();
+			await this.#queueUserMessage(expandedText, images, "steer", {
+				timestamp: submittedAt,
+				attribution: options?.attribution,
+				rawText: text,
+			});
+		} finally {
+			if (--this.#pendingSteeringCount === 0 && this.#pendingSteeringSettled) {
+				const settled = this.#pendingSteeringSettled;
+				this.#pendingSteeringSettled = undefined;
+				settled.resolve();
+			}
+		}
 	}
 
 	/**

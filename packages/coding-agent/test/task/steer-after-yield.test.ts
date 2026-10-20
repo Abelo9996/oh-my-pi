@@ -22,6 +22,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -61,11 +62,12 @@ afterEach(async () => {
 	await removeWithRetries(root);
 });
 
-it("settles a follow-up turn on the yield that answers a steer queued behind its final yield", async () => {
+it("settles on the steered yield even when message preparation outlasts the earlier yield", async () => {
 	const authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("mock", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage);
 	const yields: string[] = [];
+	let steeringStarted = false;
 	const mock = createMockModel({
 		handler: context => {
 			if (!(context.tools ?? []).some(tool => tool.name === "yield")) return { content: ["label"] };
@@ -76,6 +78,7 @@ it("settles a follow-up turn on the yield that answers a steer queued behind its
 			} else if (lastUser.includes("continue")) {
 				data = "pre-steer";
 				// The parent steers while the worker is already emitting its final yield.
+				steeringStarted = true;
 				void AgentRegistry.global().get(AGENT_ID)?.session?.steer(STEER, undefined, { attribution: "agent" });
 			}
 			yields.push(data);
@@ -117,7 +120,22 @@ it("settles a follow-up turn on the yield that answers a steer queued behind its
 		});
 		expect(first.exitCode).toBe(0);
 
+		const preSteerYieldEnded = Promise.withResolvers<void>();
+		const session = AgentRegistry.global().get(AGENT_ID)?.session;
+		if (!session) throw new Error("worker session missing");
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "tool_execution_end" && event.toolName === "yield") {
+				queueMicrotask(() => preSteerYieldEnded.resolve());
+			}
+		});
+		const normalizeImages = imageLoading.normalizeModelContextImages;
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async (images, options) => {
+			if (steeringStarted && images === undefined) await preSteerYieldEnded.promise;
+			return normalizeImages(images, options);
+		});
+
 		const result = await runSubagentFollowUpTurn({ id: AGENT_ID, agent: AGENT, message: "continue", artifactsDir });
+		unsubscribe();
 
 		const ref = AgentRegistry.global().get(AGENT_ID);
 		expect({
