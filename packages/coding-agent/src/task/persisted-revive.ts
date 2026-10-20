@@ -95,12 +95,13 @@ export function createPersistedSubagentReviverFactory(
 	const registry = AgentRegistry.global();
 	return async ref => {
 		const sessionFile = ref.sessionFile;
-		if (!sessionFile) return undefined;
+		if (!sessionFile) return { reason: "it has no transcript file" };
 		const peek = await SessionManager.peekSessionInit(sessionFile);
-		// No persisted contract (pre-session_init file) or the recorded workspace
-		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
+		// Unreadable file, no persisted contract (pre-session_init file), or the
+		// recorded workspace is gone (moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
-		if (!peek?.init) return undefined;
+		if (!peek) return { reason: "its transcript file is missing or unreadable" };
+		if (!peek.init) return { reason: "its transcript has no persisted session contract" };
 		let restoredSeance: RestoredSeanceSession | undefined;
 		if (peek.seanceSource !== undefined) {
 			try {
@@ -114,9 +115,9 @@ export function createPersistedSubagentReviverFactory(
 					sessionFile,
 					error: error instanceof Error ? error.message : String(error),
 				});
-				return undefined;
+				return { reason: "its seance source could not be restored" };
 			}
-			if (!restoredSeance) return undefined;
+			if (!restoredSeance) return { reason: "its seance source could not be restored" };
 		}
 		const seanceOptions = restoredSeance ? seanceIsolationOptions(restoredSeance.cwd) : {};
 		// Isolated runs are never resumable: their worktree is merged + cleaned,
@@ -125,11 +126,12 @@ export function createPersistedSubagentReviverFactory(
 		// probe below, so gate on the stamped contract instead — otherwise a
 		// restart + peer message revives the agent outside isolation, in the
 		// parent cwd, contradicting the delivery notice.
-		if (peek.init.isolated) return undefined;
+		if (peek.init.isolated) return { reason: "it ran isolated, and isolated runs are not resumable by design" };
+		const workspace = restoredSeance?.cwd ?? peek.cwd;
 		try {
-			await fs.stat(restoredSeance?.cwd ?? peek.cwd);
+			await fs.stat(workspace);
 		} catch {
-			return undefined;
+			return { reason: `its workspace ${workspace} no longer exists` };
 		}
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than

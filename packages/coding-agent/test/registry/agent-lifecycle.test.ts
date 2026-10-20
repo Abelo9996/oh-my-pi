@@ -381,11 +381,13 @@ describe("AgentLifecycleManager", () => {
 			status: "parked",
 		});
 		lifecycle.setPersistedSubagentReviverFactory(
-			async () => undefined,
+			async () => ({ reason: "its workspace /gone no longer exists" }),
 			() => TTL,
 		);
 
-		await expect(lifecycle.ensureLive("7-Sub")).rejects.toThrow(/cannot be revived.*no reviver registered/);
+		const wake = lifecycle.ensureLive("7-Sub");
+		await expect(wake).rejects.toThrow(/cannot be resumed: its workspace \/gone no longer exists.*history:\/\/7-Sub/);
+		await expect(wake).rejects.not.toThrow(/no reviver registered/);
 	});
 
 	it("a failed cold revive is not sticky: the next ensureLive re-runs the factory", async () => {
@@ -847,11 +849,11 @@ describe("AgentLifecycleManager", () => {
 		});
 		expect(await lifecycle.release("Refused-Sub", killed, { tombstone: true })).toBe(true);
 		lifecycle.setPersistedSubagentReviverFactory(
-			async () => undefined,
+			async () => ({ reason: "it ran isolated" }),
 			() => 0,
 		);
 
-		await expect(lifecycle.ensureLive("Refused-Sub")).rejects.toThrow(/cannot be resumed/);
+		await expect(lifecycle.ensureLive("Refused-Sub")).rejects.toThrow(/cannot be resumed: it ran isolated/);
 		expect(registry.get("Refused-Sub")).toBe(killed);
 		expect(killed.status).toBe("aborted");
 		expect(await Bun.file(`${workerSessionFile}.tombstone`).exists()).toBe(true);

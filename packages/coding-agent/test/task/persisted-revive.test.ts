@@ -262,7 +262,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(initialize).toHaveBeenCalledTimes(1);
@@ -305,7 +305,7 @@ describe("persisted subagent revival", () => {
 			authStorage,
 			modelRegistry,
 		})(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 
 		// The policy changes after the durable ref is discovered. Revival must
 		// consult the live owner now, not retain an ambient/transcript snapshot.
@@ -368,7 +368,7 @@ describe("persisted subagent revival", () => {
 			authStorage,
 			modelRegistry,
 		})(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 
 		let revived: AgentSession | undefined;
 		try {
@@ -417,7 +417,7 @@ describe("persisted subagent revival", () => {
 			status: "parked",
 		});
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		// The real monitor ran and installed its observer...
@@ -449,7 +449,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(capturedOptions?.restrictToolNames).toBe(true);
@@ -481,7 +481,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(capturedOptions?.toolNames).toEqual(["read", "yield"]);
@@ -503,7 +503,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(capturedOptions?.toolNames).toEqual(["read", "write", "yield"]);
@@ -523,7 +523,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(capturedOptions?.restrictToolNames).toBeUndefined();
@@ -533,19 +533,30 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.customTools).toBeUndefined();
 	});
 
-	it("leaves isolated sessions transcript-only even when the workspace still exists", async () => {
+	it("refuses to wake an isolated session by design even when the workspace still exists", async () => {
 		// Isolated runs are never resumable: the worktree is merged + cleaned,
 		// and the parent is told messaging is impossible. A retained workspace
 		// (capture/persist failure) still passes the cwd probe, so the stamped
 		// contract — not directory existence — must gate revival. Otherwise a
 		// restart + Hub message revives the agent in the parent cwd, outside
-		// isolation.
+		// isolation. The refusal must name that contract, not read like a
+		// missing registration (#16448).
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
 		const cwd = makeTempDir("@pi-isolated-revive-");
 		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { isolated: true });
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		expect(reviver).toBeUndefined();
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const lifecycle = AgentLifecycleManager.global();
+		lifecycle.setPersistedSubagentReviverFactory(createFactory(cwd), () => 0);
+		try {
+			const wake = lifecycle.ensureLive(ref.id);
+			await expect(wake).rejects.toThrow(/cannot be resumed: it ran isolated.*history:\/\/persisted-restricted/);
+			await expect(wake).rejects.not.toThrow(/no reviver registered/);
+			expect(ref.session).toBeNull();
+		} finally {
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+		}
 	});
 
 	it("restores the persisted agent definition name on cold revival so agent-scoped rules keep matching", async () => {
@@ -559,7 +570,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		// `ref.displayName` is the registry's generated label ("Persisted
@@ -585,7 +596,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd, undefined, { settings })(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(capturedOptions?.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com|org:org-a"] });
@@ -602,7 +613,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(capturedOptions?.agentName).toBe(ref.displayName);
@@ -618,7 +629,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		// A parked transcript from before "main" was reserved as a definition
@@ -639,7 +650,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		// A parked transcript from before "sub" was reserved as a definition
@@ -666,7 +677,7 @@ describe("persisted subagent revival", () => {
 		for (const sessionFile of [advisedFile, roleAdvisedFile, unadvisedFile]) {
 			const ref = createRef(sessionFile);
 			const reviver = await factory(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
+			if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 			await reviver(ref);
 		}
 
@@ -691,7 +702,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd, undefined, { settings: rootSettings })(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(captured?.getModelRole("advisor")).toBe("anthropic/claude-sonnet-4-5:high");
@@ -708,7 +719,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(capturedOptions?.modelPattern).toEqual(["@review-fast", "anthropic/claude-sonnet-4-5"]);
@@ -732,7 +743,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd, undefined, { settings: parentSettings })(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		const revivedSettings = capturedOptions?.settings;
@@ -756,7 +767,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
@@ -776,7 +787,7 @@ describe("persisted subagent revival", () => {
 
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		const revivedSettings = capturedOptions?.settings;
@@ -828,7 +839,7 @@ describe("persisted subagent revival", () => {
 			status: "parked",
 		});
 		const reviver = await createFactory(cwd, eventBus)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		const observer = handle?.observer();
@@ -882,7 +893,7 @@ describe("persisted subagent revival", () => {
 			status: "parked",
 		});
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
 		// The completed first run already wrote its report to <artifactsDir>/<id>.md
@@ -936,7 +947,7 @@ describe("persisted subagent revival", () => {
 				status: "parked",
 			});
 			const reviver = await createFactory(cwd)(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
+			if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 			await reviver(ref);
 			if (!handle) throw new Error("Expected a revived session");
 			return { ref, handle };
@@ -1361,7 +1372,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		});
 		const ref = { ...createRef(path.join(cwd, "prompt-blocks.jsonl")), id: "prompt-blocks" };
 		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+		if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 		const session = await reviver(ref);
 		await session.prompt("follow-up");
 		await session.waitForIdle();
@@ -1616,7 +1627,7 @@ describe("buildWakeRelayBody", () => {
 			// The factory's lock-free peek succeeds here; the file disappears
 			// before the reviver takes the single-writer lock.
 			const reviver = await createFactory(cwd)(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
+			if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 			await fs.promises.rm(sessionFile);
 
 			await expect(reviver(ref)).rejects.toThrow(/ENOENT/);
@@ -1629,7 +1640,7 @@ describe("buildWakeRelayBody", () => {
 			const sessionFile = await createPersistedSession(cwd);
 			const ref = createRef(sessionFile);
 			const reviver = await createFactory(cwd)(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
+			if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 			// Delete the transcript from inside its own snapshot read: open()
 			// has resolved loadSessionFile but has not adopted the snapshot
 			// yet, so the reviver must fail closed on the fresh state instead
@@ -1660,7 +1671,7 @@ describe("buildWakeRelayBody", () => {
 			await Bun.write(sessionFile, truncated);
 			const ref = createRef(sessionFile);
 			const reviver = await createFactory(cwd)(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
+			if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 
 			await expect(reviver(ref)).rejects.toThrow(/no message history/);
 			// The parked transcript is evidence, not scratch space: untouched.
@@ -1672,7 +1683,7 @@ describe("buildWakeRelayBody", () => {
 			const sessionFile = await createPersistedSession(cwd);
 			const ref = createRef(sessionFile);
 			const reviver = await createFactory(cwd)(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
+			if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 			// The file is replaced after the peek: same messages, no session_init.
 			const withoutInit = `${(await entriesOfType(sessionFile, type => type !== "session_init")).join("\n")}\n`;
 			await Bun.write(sessionFile, withoutInit);

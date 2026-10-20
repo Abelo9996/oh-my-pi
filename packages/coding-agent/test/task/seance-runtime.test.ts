@@ -409,7 +409,7 @@ describe("seance startup contracts", () => {
 				enableLsp: true,
 			});
 			const revive = await createReviver(ref);
-			if (!revive) throw new Error("Expected a cold seance reviver");
+			if (typeof revive !== "function") throw new Error("Expected a cold seance reviver");
 			revived = await revive(ref);
 			expect(revived.sessionManager.getAdditionalDirectories()).toEqual([]);
 
@@ -465,6 +465,6 @@ describe("seance startup contracts", () => {
 			createdAt: 0,
 			lastActivity: 0,
 		});
-		expect(reviver).toBeUndefined();
+		expect(typeof reviver).not.toBe("function");
 	});
 });
