@@ -57,19 +57,25 @@ export function isKnownSkillCommand(ctx: SkillCommandHost, text: string): boolea
 	return ctx.skillCommands.has(getSkillSlashCommandName({ name: parsed.name }));
 }
 
-/** Build the user-attributed custom message for a registered `/skill:<name>` command. */
+/**
+ * Build the user-attributed custom message for a registered `/skill:<name>` command.
+ * `context` (CLI stdin or `@file` text) joins the invocation's args, so the
+ * user-invocation template renders it; it never selects the skill.
+ */
 export async function buildSkillCommandPrompt(
 	ctx: Pick<SkillCommandHost, "skillCommands">,
 	text: string,
 	streamingBehavior: "steer" | "followUp",
 	images?: ImageContent[],
+	context?: string,
 ): Promise<BuiltSkillCommandPrompt | undefined> {
 	const parsed = parseSkillInvocation(text);
 	if (!parsed) return undefined;
 	const skill = ctx.skillCommands.get(getSkillSlashCommandName({ name: parsed.name }));
 	if (!skill) return undefined;
 
-	const built = await buildSkillPromptMessage(skill, parsed, "user");
+	const args = context ? [context.trim(), parsed.args].filter(part => part.length > 0).join("\n") : parsed.args;
+	const built = await buildSkillPromptMessage(skill, { ...parsed, args }, "user");
 	const textBlock: TextContent = { type: "text", text: built.message };
 	const promptContent = images && images.length > 0 ? [textBlock, ...images] : built.message;
 
@@ -94,25 +100,14 @@ export async function submitCliPrompt(
 	options?: { images?: ImageContent[]; streamingBehavior?: "steer" | "followUp"; commandStart?: number },
 ): Promise<void> {
 	const commandStart = options?.commandStart ?? 0;
-	const commandText = commandStart > 0 ? text.slice(commandStart) : text;
 	const skillPrompt = await buildSkillCommandPrompt(
 		ctx,
-		commandText,
+		text.slice(commandStart),
 		options?.streamingBehavior ?? "steer",
 		options?.images,
+		text.slice(0, commandStart),
 	);
 	if (skillPrompt) {
-		if (commandStart > 0) {
-			const prefix = text.slice(0, commandStart);
-			const content = skillPrompt.message.content;
-			if (typeof content === "string") {
-				skillPrompt.message.content = `${content}\n${prefix}`;
-			} else {
-				const first = content[0];
-				if (first?.type !== "text") throw new Error("Skill prompt must start with text");
-				first.text = `${first.text}\n${prefix}`;
-			}
-		}
 		await ctx.session.promptCustomMessage(skillPrompt.message, skillPrompt.options);
 		return;
 	}
