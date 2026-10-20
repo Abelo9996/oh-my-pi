@@ -1979,6 +1979,29 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						}) === true;
 					const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
 					endsRun = wantsTerminate || forcedFinalYield;
+					if (
+						endsRun &&
+						event.toolName === "yield" &&
+						!finalYieldForced &&
+						// A completed work pool has no item left to submit after a steer.
+						!(
+							isRecord(event.result) &&
+							isRecord(event.result.details) &&
+							event.result.details.complete === true
+						) &&
+						activeSession?.hasQueuedSteering?.() === true
+					) {
+						// A steer queued behind this yield is input the model has
+						// not seen. Ending the run would strand it: the abort's
+						// queued-message drain replays it as an unobserved turn whose
+						// yield nobody collects, while the owner sees a finished run
+						// on a still-streaming session (#16490). Let the loop inject
+						// the steer at its next boundary and un-latch this yield so
+						// the run settles on the fresh one it answers with.
+						endsRun = false;
+						yieldCalled = false;
+						yieldAcceptedAt = undefined;
+					}
 					if (endsRun) {
 						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
 							// Terminal yield with owner jobs still pending: park the

@@ -24,7 +24,7 @@ import {
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
 import { validateAgentAccountPools } from "../config/account-pools";
 import { resolveAgentModelSelection } from "../config/model-resolver";
@@ -906,7 +906,9 @@ export class VibeSessionRegistry {
 
 		if (record.turn) {
 			const live = registered?.session;
-			if (live?.isStreaming) {
+			// An aborting turn takes no more steering: a steer queued now replays
+			// after the abort as a turn no job observes. Queue it for the next turn.
+			if (live?.isStreaming && !live.isAborting) {
 				await live.steer(message, undefined, { attribution: "agent" });
 				record.lastActivityAt = Date.now();
 				return { id: record.id, mode: "steered" };
@@ -1400,6 +1402,12 @@ export class VibeSessionRegistry {
 								subagentEventBus: session.subagentEventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
 							});
+					// A steer that landed while the run was ending is replayed by the
+					// worker as a continuation this turn did not drive. Settle after
+					// it: judged mid-stream, the still-`running` ref reads as an
+					// unrecoverable worker (#16490).
+					const worker = this.#registeredAgent(record)?.session;
+					if (worker) await untilAborted(signal, () => worker.waitForIdle());
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {
 					if (error instanceof VibeTurnError) throw error;

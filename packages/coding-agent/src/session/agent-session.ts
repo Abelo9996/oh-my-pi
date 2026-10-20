@@ -3206,6 +3206,16 @@ export class AgentSession implements SettingsScope {
 		return this.#hasPendingAsyncWake();
 	}
 
+	/**
+	 * True while steering input sits in the agent queue, not yet injected into
+	 * the conversation. The task executor checks it at a terminal `yield` so a
+	 * steer that landed during that final step extends the run instead of
+	 * stranding behind the run's end.
+	 */
+	hasQueuedSteering(): boolean {
+		return this.agent.peekSteeringQueue().length > 0;
+	}
+
 	/** True while a submission has been admitted but has not yet started a turn, queued, or bailed. */
 	get hasAdmittedSubmission(): boolean {
 		return this.#admittedSubmissionCount > 0;
