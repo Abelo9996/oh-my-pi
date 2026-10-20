@@ -86,7 +86,7 @@ impl clap::Parser for TimeoutCommand {}
 
 /// Records the external children spawned while running the timed command.
 ///
-/// brush's cancellation token can only SIGKILL a child (see
+/// brush's cancellation token sends TERM then KILL (see
 /// `brush_core::processes::Process::wait`), so delivering the *configured*
 /// signal requires knowing the child's pid/pgid; the shell reports those
 /// through its [`SpawnObserver`] hook.
@@ -272,7 +272,7 @@ impl builtins::Command for TimeoutCommand {
 		if !signalled {
 			// The operand ran in-process (a builtin, say) or the child is
 			// already gone; cancellation is the only remaining lever. For
-			// external children it degrades to SIGKILL — see `Process::wait`.
+			// external children it uses TERM then KILL — see `Process::wait`.
 			child_cancel.cancel();
 		}
 		let mut killed = signal.as_str() == "SIGKILL";
@@ -672,11 +672,11 @@ mod tests {
 	async fn external_child_receives_the_configured_signal() {
 		// Failure mode: the timed-out external child only ever seeing SIGKILL
 		// (the cancel-token path) instead of the configured signal.
-		let result = run_with_deadline("timeout -s TERM 0.050 /bin/sleep 5").await;
+		let result = run_with_deadline("timeout -s TERM 0.050 sleep 5").await;
 		assert_eq!(u8::from(result.exit_code), 124);
 
 		let result =
-			run_with_deadline("timeout --preserve-status 0.050 /bin/sleep 5").await;
+			run_with_deadline("timeout --preserve-status 0.050 sleep 5").await;
 		assert_eq!(u8::from(result.exit_code), 143, "SIGTERM death is 128+15");
 	}
 }

@@ -17,13 +17,6 @@ import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-m
 export { MAIN_AGENT_ID };
 export type { AgentStatus, AgentMetricsSummary };
 
-/** Sidecar marker retained beside a child transcript after an explicit kill. */
-const AGENT_TOMBSTONE_SUFFIX = ".tombstone";
-
-export function getAgentTombstonePath(sessionFile: string): string {
-	return `${sessionFile}${AGENT_TOMBSTONE_SUFFIX}`;
-}
-
 /**
  * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents).
  * - `advisor`: a passive review transcript persisted like a subagent for usage
@@ -56,6 +49,8 @@ export interface AgentHistorySummary {
 	/** Whether the last resolved model was selected by retry fallback routing. */
 	resolvedModelIsFallback?: boolean;
 	metrics?: AgentMetricsSummary;
+	/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
+	directCost?: number;
 	readOnly?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;
@@ -87,6 +82,16 @@ export interface AgentRef {
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
+
+/**
+ * Whether messaging `ref` resumes it: a live `idle` agent, or a `parked` or
+ * killed one whose transcript is on disk. Task summaries use it to tell the
+ * parent to resume a stopped agent instead of redoing its work.
+ */
+export function isResumable(ref: AgentRef | undefined): boolean {
+	if (ref?.status === "idle") return true;
+	return (ref?.status === "parked" || ref?.status === "aborted") && ref.sessionFile !== null;
+}
 
 export type RegistryEvent =
 	| { type: "registered"; ref: AgentRef }
@@ -176,6 +181,29 @@ export class AgentRegistry {
 		return current === expected && current.status === "parked" && !current.session ? current : undefined;
 	}
 
+	/**
+	 * Start a fresh `parked` generation for a killed (`aborted`, detached) ref so
+	 * {@link AgentLifecycleManager.ensureLive} can rebuild it from its transcript.
+	 * The killed ref object is retired, not mutated, so delayed work bound to it
+	 * still fails every expected-ref check. Returns undefined when `expected` is
+	 * no longer this id's detached tombstone.
+	 */
+	reopen(id: string, expected: AgentRef): AgentRef | undefined {
+		const current = this.#refs.get(id);
+		if (current !== expected || current.status !== "aborted" || current.session) return undefined;
+		return this.register({
+			id,
+			displayName: current.displayName,
+			kind: current.kind,
+			parentId: current.parentId,
+			session: null,
+			sessionFile: current.sessionFile,
+			status: "parked",
+			createdAt: current.createdAt,
+			history: current.history,
+		});
+	}
+
 	/** Attach transcript-derived identity and telemetry without changing lifecycle state. */
 	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean {
 		const ref = this.#refs.get(id);
@@ -183,6 +211,22 @@ export class AgentRegistry {
 		const definedHistory = Object.fromEntries(
 			Object.entries(history).filter(([, value]) => value !== undefined),
 		) as AgentHistorySummary;
+		const previousDirectCost = ref.history?.directCost;
+		const incomingDirectCost = definedHistory.directCost;
+		// Both writes are cumulative snapshots of this exact transcript. A delayed
+		// scan must not replace a newer park-time snapshot; unscoped updates retain
+		// their normal last-write semantics.
+		if (
+			expectedSessionFile !== undefined &&
+			typeof previousDirectCost === "number" &&
+			Number.isFinite(previousDirectCost) &&
+			previousDirectCost >= 0 &&
+			typeof incomingDirectCost === "number" &&
+			Number.isFinite(incomingDirectCost) &&
+			incomingDirectCost >= 0
+		) {
+			definedHistory.directCost = Math.max(previousDirectCost, incomingDirectCost);
+		}
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });
 		return true;
@@ -194,8 +238,9 @@ export class AgentRegistry {
 		if (!this.#matchesExpected(ref, expected)) {
 			return this.#rejectStatusUpdate(id, status, "session-ownership-changed");
 		}
-		// `aborted` is terminal: delayed progress/revival work from the killed
-		// generation must never transition the tombstone back to a live status.
+		// `aborted` is terminal for its generation: delayed progress/revival work
+		// from the killed ref must never transition it back to a live status. A
+		// deliberate revival goes through `reopen`, which mints a new ref.
 		if (ref.status === "aborted") {
 			return status === "aborted" || this.#rejectStatusUpdate(id, status, "aborted-is-terminal");
 		}
@@ -299,7 +344,13 @@ export class AgentRegistry {
 		// createAgentSession after an explicit kill.
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
 		ref.session = session;
-		if (sessionFile !== undefined) ref.sessionFile = sessionFile;
+		if (sessionFile !== undefined) {
+			// A replacement transcript starts a new cumulative-cost identity.
+			if (ref.sessionFile !== sessionFile && ref.history?.directCost !== undefined) {
+				ref.history = { ...ref.history, directCost: undefined };
+			}
+			ref.sessionFile = sessionFile;
+		}
 		ref.lastActivity = Date.now();
 		return true;
 	}

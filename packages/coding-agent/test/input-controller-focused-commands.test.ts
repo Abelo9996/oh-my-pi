@@ -1,16 +1,24 @@
 /**
  * Focused subagent views are chat-only, except for viewer-scoped commands: `/btw`
  * asks a side question about the focused transcript, `/export` writes the focused
- * agent's own transcript (with its nested subagents), and `/usage` reports
- * account-wide limits. Everything else still requires returning to main.
+ * agent's own transcript (with its nested subagents), `/jobs` lists the focused
+ * agent's background jobs, `/usage` reports account-wide limits, and the model and
+ * thinking controls (`/model`, `/switch`, `/effort`, their keys) act on the focused
+ * agent's session. Everything else, and mutating forms such as `/usage reset` and
+ * `/jobs kill`, still requires returning to main.
  *
  * Failure mode if this regresses: these commands silently do nothing (or steer the
- * agent) in a focused view, or `/export` writes the main session instead of the viewed one.
+ * agent) in a focused view, `/export` writes the main session instead of the viewed
+ * one, or a model/thinking change lands on the main session instead of the agent.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
+import { beginSettingsTest, restoreSettingsTestState } from "./helpers/settings-test-state";
 
 function createFocusedContext() {
 	let editorText = "";
@@ -58,8 +66,9 @@ function createFocusedContext() {
 		handleUsageCommand: vi.fn(async () => {}),
 		handleExportCommand: vi.fn(async () => {}),
 		handleBtwCommand: vi.fn(async () => {}),
+		handleJobsCommand: vi.fn(async () => {}),
 		showResetUsageSelector: vi.fn(async () => {}),
-		withLocalSubmission: async <T>(_text: string, fn: () => Promise<T>) => fn(),
+		withLocalSubmission: vi.fn(async <T>(_text: string, fn: () => Promise<T>) => fn()),
 	};
 	return { ctx: ctx as unknown as InteractiveModeContext, raw: ctx, editor, prompt };
 }
@@ -78,10 +87,46 @@ describe("focused subagent view slash commands", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("continues the focused session with a synthetic directive for . and c", async () => {
+		for (const shortcut of [".", "c"]) {
+			const { prompt, editor, raw } = await submit(shortcut);
+			expect(prompt).toHaveBeenCalledWith(manualContinuePrompt, {
+				synthetic: true,
+				userInitiated: true,
+			});
+			expect(editor.clearDraft).toHaveBeenCalledWith(shortcut);
+			expect(raw.withLocalSubmission).not.toHaveBeenCalled();
+		}
+	});
+
+	it("restores a focused continue shortcut when the target is busy", async () => {
+		const { ctx, raw, editor, prompt } = createFocusedContext();
+		prompt.mockRejectedValueOnce(new AgentBusyError());
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+		await ctx.editor.onSubmit?.(".");
+
+		expect(editor.getText()).toBe(".");
+		expect(raw.showError).toHaveBeenCalledTimes(1);
+		expect(prompt).toHaveBeenCalledWith(manualContinuePrompt, { synthetic: true, userInitiated: true });
+	});
+
 	it("runs /usage from the focused view", async () => {
 		const { raw, prompt } = await submit("/usage");
 		expect(raw.handleUsageCommand).toHaveBeenCalledTimes(1);
 		expect(prompt).not.toHaveBeenCalled();
+	});
+
+	it("runs /jobs from the focused view", async () => {
+		for (const [text, full] of [
+			["/jobs", false],
+			["/jobs full", true],
+		] as const) {
+			const { raw, prompt } = await submit(text);
+			expect(raw.handleJobsCommand).toHaveBeenCalledTimes(1);
+			expect(raw.handleJobsCommand).toHaveBeenCalledWith({ full });
+			expect(prompt).not.toHaveBeenCalled();
+		}
 	});
 
 	it("runs /export with its arguments from the focused view", async () => {
@@ -96,6 +141,72 @@ describe("focused subagent view slash commands", () => {
 		expect(prompt).not.toHaveBeenCalled();
 	});
 
+	it("sets the focused agent's thinking level with /effort, leaving the main session alone", async () => {
+		const focused = createFocusedContext();
+		const setFocusedThinking = vi.fn();
+		const setMainThinking = vi.fn();
+		Object.assign(focused.raw.viewSession, {
+			model: { provider: "anthropic", id: "claude-sonnet", reasoning: true },
+			getAvailableEffortSelectors: () => ["off", "auto", "low", "medium", "high"],
+			setThinkingLevel: setFocusedThinking,
+		});
+		Object.assign(focused.raw.session, { setThinkingLevel: setMainThinking });
+		const controller = new InputController(focused.ctx);
+		controller.setupEditorSubmitHandler();
+		focused.editor.setText("/effort high");
+		await focused.ctx.editor.onSubmit?.("/effort high");
+
+		expect(setFocusedThinking).toHaveBeenCalledWith("high");
+		expect(setMainThinking).not.toHaveBeenCalled();
+		expect(focused.prompt).not.toHaveBeenCalled();
+	});
+
+	it("opens the model selector for /model aliases from the focused view", async () => {
+		const focused = createFocusedContext();
+		const showModelSelector = vi.fn();
+		Object.assign(focused.raw, { showModelSelector });
+		const controller = new InputController(focused.ctx);
+		controller.setupEditorSubmitHandler();
+		focused.editor.setText("/models");
+		await focused.ctx.editor.onSubmit?.("/models");
+
+		expect(showModelSelector).toHaveBeenCalledTimes(1);
+		expect(focused.prompt).not.toHaveBeenCalled();
+		expect(focused.editor.getText()).toBe("");
+	});
+
+	it("cycles the focused agent's thinking level and role model, not the main session's", async () => {
+		const focused = createFocusedContext();
+		const focusedCycleThinking = vi.fn(() => "high");
+		const focusedCycleRoles = vi.fn(async () => ({ role: "slow" }));
+		const mainCycleThinking = vi.fn(() => "low");
+		const mainCycleRoles = vi.fn(async () => ({ role: "default" }));
+		Object.assign(focused.raw.viewSession, {
+			cycleThinkingLevel: focusedCycleThinking,
+			cycleRoleModels: focusedCycleRoles,
+		});
+		Object.assign(focused.raw.session, { cycleThinkingLevel: mainCycleThinking, cycleRoleModels: mainCycleRoles });
+		Object.assign(focused.raw, {
+			statusLine: { invalidate: vi.fn() },
+			updateEditorBorderColor: vi.fn(),
+			showModelCycleTrack: vi.fn(),
+		});
+		const controller = new InputController(focused.ctx);
+		const settingsState = beginSettingsTest();
+		try {
+			await Settings.init({ inMemory: true });
+			controller.cycleThinkingLevel();
+			await controller.cycleRoleModel("forward");
+		} finally {
+			restoreSettingsTestState(settingsState);
+		}
+
+		expect(focusedCycleThinking).toHaveBeenCalledTimes(1);
+		expect(focusedCycleRoles).toHaveBeenCalledTimes(1);
+		expect(mainCycleThinking).not.toHaveBeenCalled();
+		expect(mainCycleRoles).not.toHaveBeenCalled();
+	});
+
 	it("keeps other commands gated to the main session, draft intact", async () => {
 		const { editor, prompt } = await submit("/compact");
 		expect(editor.getText()).toBe("/compact");
@@ -107,6 +218,15 @@ describe("focused subagent view slash commands", () => {
 			const { raw, editor } = await submit(text);
 			expect(raw.showResetUsageSelector).not.toHaveBeenCalled();
 			expect(raw.handleUsageCommand).not.toHaveBeenCalled();
+			expect(editor.getText()).toBe(text);
+		}
+	});
+
+	it("keeps the mutating /jobs kill form gated to the main session", async () => {
+		for (const text of ["/jobs kill all", "/jobs kill job-1"]) {
+			const { raw, editor } = await submit(text);
+			expect(raw.handleJobsCommand).not.toHaveBeenCalled();
+			expect(raw.showStatus).toHaveBeenCalled();
 			expect(editor.getText()).toBe(text);
 		}
 	});

@@ -23,7 +23,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
-import type { Browser } from "puppeteer-core";
+import type { Browser, CDPSession } from "puppeteer-core";
 import { daemonRuntimeDir } from "../../launch/paths";
 
 /** Identifies one shared-browser daemon's target registry. */
@@ -107,6 +107,27 @@ export async function forgetSharedTarget(scope: SharedTargetScope, targetId: str
 	if (!owned?.delete(targetId)) return;
 	await chain(dir, () => flush(dir)).catch(err =>
 		logger.debug("Failed to update shared-browser target ownership", {
+			error: err instanceof Error ? err.message : String(err),
+		}),
+	);
+}
+
+/**
+ * Drop every target this process still claims in `scope`. For when the whole
+ * shared browser is confirmed gone — the broker reported its daemon in a
+ * terminal state after a stop — which takes the targets that could not be
+ * closed with it; the records are dead weight that would otherwise be
+ * rewritten on every later write until this process exits. Only call this on
+ * that confirmation: while the browser lives, the records are the only handle
+ * a later reap has on its orphaned targets.
+ */
+export async function forgetSharedTargets(scope: SharedTargetScope): Promise<void> {
+	const dir = registryDir(scope);
+	const owned = ownedByDir.get(dir);
+	if (!owned || owned.size === 0) return;
+	owned.clear();
+	await chain(dir, () => flush(dir)).catch(err =>
+		logger.debug("Failed to clear shared-browser target ownership", {
 			error: err instanceof Error ? err.message : String(err),
 		}),
 	);
@@ -219,6 +240,28 @@ export async function closeCdpTarget(browser: Browser, targetId: string): Promis
 		}
 	} finally {
 		await session.detach().catch(() => undefined);
+	}
+}
+
+/**
+ * {@link closeCdpTarget} for the omp relay, over a channel that answers browser-level `Target.*`
+ * commands. The relay's `Target.getTargets` lists only tabs it can drive right now, not those of a
+ * disconnected browser or with a dismissed debugger, so absence is read from `Target.getTargetInfo`:
+ * it looks the id up among every tab the extensions reported, and answers an unknown id with the
+ * browser target.
+ */
+export async function closeRelayTarget(channel: Pick<CDPSession, "send">, targetId: string): Promise<boolean> {
+	try {
+		const result = await channel.send("Target.closeTarget", { targetId });
+		if (result.success) return true;
+	} catch {
+		// Closed already (the worker's own close), or the extension cannot answer.
+	}
+	try {
+		const { targetInfo } = await channel.send("Target.getTargetInfo", { targetId });
+		return targetInfo.targetId !== targetId;
+	} catch {
+		return false;
 	}
 }
 

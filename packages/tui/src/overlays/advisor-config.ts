@@ -34,7 +34,16 @@ import { sanitizeDisplayWarnings } from "../render/render-utils";
 import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { HookEditorComponent } from "./hook-editor";
-import { buildBrowserItems, ModelBrowser, type ModelBrowserSource, sortModelItems } from "./model-browser";
+import {
+	buildBrowserItems,
+	MODEL_PICKER_COLUMNS,
+	ModelBrowser,
+	type ModelBrowserItem,
+	type ModelBrowserSource,
+	type ModelPickerCatalogue,
+	type ModelPickerOrder,
+	sortModelItems,
+} from "./model-browser";
 import { bottomBorder, divider, dividerSplit, PanelRows, row, topBorder, topBorderSplit } from "../chrome/overlay-box";
 import { isLayoutMouseRoutable } from "../components/layout/geometry";
 import { SplitPane } from "../components/layout/split-pane";
@@ -42,7 +51,22 @@ import { Stack } from "../components/layout/stack";
 import type { TspPrefsProps, TspPrefsRow, TspSpan } from "@oh-my-pi/pi-wire";
 import { col, node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
-import { actionHint, hintsRow, type NativeHint, overlayCard } from "../native/overlay";
+import { actionBar, actionButton, actionHint, hintsRow, type NativeHint, overlayCard } from "../native/overlay";
+import {
+	CLOSE_ACTION,
+	pickerAction,
+	pickerEvent,
+	routeSelectListPicker,
+	type SelectPickerOptions,
+	selectListPicker,
+} from "../native/picker";
+import { getThinkingLevelMetadata, parseThinkingLevel } from "../thinking";
+
+export const ADVISOR_REVIEW_MODES = ["turn", "agent-end"] as const;
+export const ADVISOR_SYNC_BACKLOG_MODES = ["off", "1", "3", "5", "strict"] as const;
+
+export type AdvisorReviewMode = (typeof ADVISOR_REVIEW_MODES)[number];
+export type AdvisorSyncBacklog = (typeof ADVISOR_SYNC_BACKLOG_MODES)[number];
 
 /** One advisor declared in `WATCHDOG.yml`; its instructions specialize the shared baseline. */
 export interface AdvisorConfig {
@@ -56,6 +80,9 @@ export interface AdvisorConfig {
 	enabled?: boolean;
 	/** Maximum non-blocker notes per advisor prompt update (default 4); blockers are exempt. */
 	maxNotesPerUpdate?: number;
+	reviewMode?: AdvisorReviewMode;
+	reviewInterval?: number;
+	syncBacklog?: AdvisorSyncBacklog;
 }
 
 /** Which level a `WATCHDOG.yml` lives at: the project root or the user agent dir. */
@@ -115,6 +142,7 @@ export interface AdvisorConfigDeps {
 	externalEditor?: (text: string) => Promise<string | null>;
 	scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	availableToolNames: string[];
+	syncBacklog?: AdvisorSyncBacklog;
 	/** Formatted advisor-role model shown on the seeded default row (e.g. "anthropic/claude-..."). */
 	defaultModelLabel?: string;
 }
@@ -192,13 +220,78 @@ function formatAdvisorTools(tools: readonly string[] | undefined, emptyLabel: st
 	return tools.length > 0 ? tools.join(", ") : emptyLabel;
 }
 
+/** Choice value for "no per-advisor override"; matches no {@link ADVISOR_SYNC_BACKLOG_MODES} entry. */
+const SYNC_BACKLOG_INHERIT = "inherit";
+
+/** The tools list's terminal-only "Done" row; the picker applies with its own action instead. */
+const TOOLS_DONE = "__done";
+
+/**
+ * A picker editor as a component of its own: a component's root picker stays
+ * where it is described, the prefs page's editor slot, where a picker
+ * described inside the page would be hoisted into `layer` under the sheet.
+ */
+class EditorSheet implements Component {
+	node: NativeNode | undefined;
+	readonly #route: (event: NativeUiEvent) => void;
+
+	constructor(route: (event: NativeUiEvent) => void) {
+		this.#route = route;
+	}
+
+	render(): readonly string[] {
+		return [];
+	}
+
+	describe(): NativeNode | null {
+		return this.node ?? null;
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		this.#route(event);
+	}
+}
+
+/** Whether two memo dependency lists hold the same values by identity. */
+function sameDeps(a: readonly unknown[], b: readonly unknown[]): boolean {
+	return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+/** One-line cadence label: mode plus interval. */
+function formatReviewCadence(advisor: AdvisorConfig): string {
+	const reviewInterval = advisor.reviewInterval ?? 1;
+	return `${advisor.reviewMode ?? "turn"} · every ${reviewInterval} eligible update${reviewInterval === 1 ? "" : "s"}`;
+}
+
+/** Picker description for one explicit catch-up policy value. */
+function describeSyncBacklogMode(mode: AdvisorSyncBacklog): string {
+	switch (mode) {
+		case "off":
+			return "Never wait for this advisor's backlog.";
+		case "strict":
+			return "Wait for all of this advisor's scheduled reviews; no wall-clock cap.";
+		default:
+			return `Wait until fewer than ${mode} scheduled reviews remain (30s cap).`;
+	}
+}
+
 /** Soft-wrap plain text to `width`, returning at least one (possibly empty) line. */
 function wrap(text: string, width: number): string[] {
 	if (!text) return [""];
 	return Bun.wrapAnsi(text, Math.max(1, width), { trim: false }).split("\n");
 }
 
-type Screen = "list" | "detail" | "name" | "model" | "tools" | "thinking" | "instructions";
+type Screen =
+	| "list"
+	| "detail"
+	| "name"
+	| "model"
+	| "tools"
+	| "thinking"
+	| "review-mode"
+	| "review-interval"
+	| "sync-backlog"
+	| "instructions";
 
 /** Footer key hints per screen for the described overlay (the ANSI footer strings carry the same keys). */
 function screenHints(screen: Screen): (NativeHint | undefined)[] {
@@ -220,7 +313,11 @@ function screenHints(screen: Screen): (NativeHint | undefined)[] {
 				actionHint("tui.select.cancel", "back"),
 			];
 		case "thinking":
+		case "review-mode":
+		case "sync-backlog":
 			return [actionHint("tui.select.confirm", "pick"), actionHint("tui.select.cancel", "back")];
+		case "review-interval":
+			return [actionHint("tui.input.submit", "save"), actionHint("tui.select.cancel", "cancel")];
 		case "tools":
 			return [
 				actionHint("tui.select.confirm", "toggle"),
@@ -252,7 +349,15 @@ export class AdvisorConfigOverlayComponent implements Component {
 
 	/** The advisor the detail screen (and its editors) edits; -1 on the roster or the shared instructions. */
 	#detailIndex = -1;
-	#nativePrefs: { signature: string; editor: Component | undefined; node: NativeNode } | undefined;
+	#nativePrefs: { signature: string; editor: NativeNode | undefined; node: NativeNode } | undefined;
+	/** The editor over the prefs page, rebuilt only when one of `deps` changes identity. */
+	#nativeEditor: { deps: readonly unknown[]; node: NativeNode } | undefined;
+	/** The model screen's catalogue and the advisor's current model among it (picker `current`). */
+	#modelItems: ModelBrowserItem[] = [];
+	#modelCurrent: string | undefined;
+	/** Picker sheet options of the current list screen (thinking, review mode, sync backlog, tools). */
+	#sheetOptions: SelectPickerOptions | undefined;
+	readonly #editorSheet = new EditorSheet(event => this.#routeEditorPicker(event));
 	#screen: Screen = "list";
 	/** The interactive element for the current screen. */
 	#active: Component = new SelectList([], 1, getSelectListTheme());
@@ -433,6 +538,44 @@ export class AdvisorConfigOverlayComponent implements Component {
 					control: { k: "action", label: model || this.#defaultModelLabel || "advisor role default", act: "edit" },
 				},
 				{
+					id: "reviewMode",
+					label: "Review mode",
+					hint: "turn reviews every primary turn; agent-end reviews only final yields.",
+					changed: advisor.reviewMode !== undefined ? true : undefined,
+					control: {
+						k: "choice",
+						value: advisor.reviewMode ?? "turn",
+						options: ADVISOR_REVIEW_MODES.map(mode => ({ value: mode, label: mode })),
+						style: "segmented",
+					},
+				},
+				{
+					id: "reviewInterval",
+					label: "Review interval",
+					hint: "Review every Nth eligible update; skipped updates join the next review.",
+					changed: advisor.reviewInterval !== undefined ? true : undefined,
+					control: { k: "number", value: advisor.reviewInterval ?? 1, min: 1, step: 1 },
+				},
+				{
+					id: "syncBacklog",
+					label: "Sync backlog",
+					hint: `Catch-up policy; inherit follows advisor.syncBacklog (currently ${this.#deps.syncBacklog ?? "off"}).`,
+					changed: advisor.syncBacklog !== undefined ? true : undefined,
+					control: {
+						k: "choice",
+						value: advisor.syncBacklog ?? SYNC_BACKLOG_INHERIT,
+						options: [
+							{ value: SYNC_BACKLOG_INHERIT, label: "inherit" },
+							...ADVISOR_SYNC_BACKLOG_MODES.map(mode => ({
+								value: mode,
+								label: mode,
+								detail: describeSyncBacklogMode(mode),
+							})),
+						],
+						style: "menu",
+					},
+				},
+				{
 					id: "tools",
 					label: "Tools",
 					hint: "None means no tools; read, grep and glob are the default.",
@@ -499,9 +642,12 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const overlay =
 			this.#screen === "model" ||
 			this.#screen === "thinking" ||
+			this.#screen === "review-mode" ||
+			this.#screen === "review-interval" ||
+			this.#screen === "sync-backlog" ||
 			this.#screen === "tools" ||
 			this.#screen === "instructions";
-		const editor = overlay ? this.#active : undefined;
+		const editor = overlay ? this.#prefsEditor() : undefined;
 		const focus =
 			this.#screen === "detail" && this.#active instanceof SelectList
 				? (this.#active.getSelectedItem()?.value ?? null)
@@ -520,10 +666,135 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const signature = JSON.stringify(props);
 		const prev = this.#nativePrefs;
 		if (prev && prev.signature === signature && prev.editor === editor) return prev.node;
-		const children: NativeChild[] = editor ? [col([editor], { role: "omp.prefs.editor" })] : [];
+		let children: NativeChild[] = [];
+		if (editor?.k === "picker") {
+			this.#editorSheet.node = editor;
+			children = [this.#editorSheet];
+		} else if (editor) {
+			children = [editor];
+		}
 		const root = node("prefs", props, children);
 		this.#nativePrefs = { signature, editor, node: root };
 		return root;
+	}
+
+	/**
+	 * The editor over the prefs page. Choices are picker sheets on `/model`'s
+	 * anatomy (search, rows, the highlighted model's facts, one primary
+	 * action); the instructions and review-interval editors sit in the page's
+	 * editor card.
+	 */
+	#prefsEditor(): NativeNode {
+		const active = this.#active;
+		const memo = this.#nativeEditor;
+		if (active instanceof ModelBrowser) {
+			const order = active.pickerOrder({ providers: false, rest: active.query.trim() ? "Matches" : "All" });
+			const catalogue = active.pickerItems(this.#modelItems);
+			const preview = active.pickerPreview("compact", this.#modelCurrent);
+			const deps = [active, order, catalogue, preview, active.query, active.cursor, active.pickerSelected];
+			if (memo && sameDeps(memo.deps, deps)) return memo.node;
+			const sheet = this.#modelSheet(active, order, catalogue, preview);
+			this.#nativeEditor = { deps, node: sheet };
+			return sheet;
+		}
+		const options = this.#sheetOptions;
+		if (active instanceof SelectList && options) {
+			const view = active.pickerView();
+			const deps = [active, view.items, view.selected, view.pending, view.query, view.cursor];
+			if (memo && sameDeps(memo.deps, deps)) return memo.node;
+			const props = selectListPicker(active, options);
+			const sheet = node(
+				"picker",
+				this.#screen === "tools"
+					? {
+							...props,
+							items: props.items?.filter(item => item.id !== TOOLS_DONE),
+							actions: [
+								pickerAction("confirm", "Toggle", "enter"),
+								pickerAction("apply", "Apply", "escape", { primary: true, end: true }),
+							],
+						}
+					: props,
+			);
+			this.#nativeEditor = { deps, node: sheet };
+			return sheet;
+		}
+		if (memo && sameDeps(memo.deps, [active])) return memo.node;
+		const content = this.#screen === "review-interval" ? this.#intervalCard(active) : active;
+		const card = col([content], { role: "omp.prefs.editor" });
+		this.#nativeEditor = { deps: [active], node: card };
+		return card;
+	}
+
+	#modelSheet(
+		browser: ModelBrowser,
+		order: ModelPickerOrder,
+		catalogue: ModelPickerCatalogue,
+		preview: readonly NativeChild[],
+	): NativeNode {
+		const name = this.#doc.advisors[this.#detailIndex]?.name || "This advisor";
+		const fallback = this.#defaultModelLabel ?? "the advisor role default";
+		return node(
+			"picker",
+			{
+				title: "Advisor model",
+				subtitle: `${name} reviews with this model. Unset, it uses ${fallback}.`,
+				icon: "model",
+				noun: "models",
+				size: "md",
+				layout: "rows",
+				preview: "below",
+				query: browser.query,
+				cursor: browser.cursor,
+				placeholder: "Search models…",
+				columns: MODEL_PICKER_COLUMNS,
+				...catalogue,
+				order: order.order,
+				...(order.hits ? { hits: order.hits } : {}),
+				selected: browser.pickerSelected,
+				...(this.#modelCurrent ? { current: [this.#modelCurrent] } : {}),
+				total: browser.baseCount,
+				empty: "No models available",
+				actions: [
+					pickerAction("use", "Use for advisor", "enter", { primary: true }),
+					browser.query.length > 0 ? { ...CLOSE_ACTION, label: "Clear search" } : CLOSE_ACTION,
+				],
+			},
+			preview,
+		);
+	}
+
+	/** The review-interval field as a titled card: what the number means, the field, Cancel and Save. */
+	#intervalCard(input: Component): NativeNode {
+		const name = this.#doc.advisors[this.#detailIndex]?.name || "this advisor";
+		return overlayCard("omp.overlay.advisor.interval", `Review interval · ${name}`, [
+			text([span("Review every Nth eligible update; skipped updates join the next review.", "muted")], {
+				wrap: "word",
+			}),
+			input,
+			actionBar([
+				null,
+				actionButton("Cancel", "field-cancel", { keys: "escape" }),
+				actionButton("Save", "field-save", { keys: "enter", tone: "accent" }),
+			]),
+		]);
+	}
+
+	/** A pointer event on the editor's picker sheet, on the path of the key it stands for. */
+	#routeEditorPicker(event: NativeUiEvent): void {
+		const picked = pickerEvent(event);
+		if (!picked) return;
+		const active = this.#active;
+		if (active instanceof ModelBrowser) {
+			if (picked.kind !== "action") active.routePickerItem(picked.item, picked.kind === "activate");
+			else if (picked.act === "close") active.handleCancel();
+			else if (picked.act === "use" && active.pickerSelected) active.routePickerItem(active.pickerSelected, true);
+		} else if (active instanceof SelectList) {
+			// The tools list applies on cancel, like its Esc.
+			if (picked.kind === "action" && picked.act === "apply") active.onCancel?.();
+			else routeSelectListPicker(active, event);
+		}
+		this.#cb.requestRender();
 	}
 
 	/**
@@ -533,6 +804,14 @@ export class AdvisorConfigOverlayComponent implements Component {
 	 * or the page cancels like Esc.
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
+		// The review-interval card's buttons, on its Enter and Esc paths.
+		if (event.type === "action" && (event.act === "field-save" || event.act === "field-cancel")) {
+			const input = this.#active;
+			if (!(input instanceof Input)) return;
+			if (event.act === "field-save") input.onSubmit?.(input.getValue());
+			else input.onEscape?.();
+			return;
+		}
 		if (event.key !== "") return;
 		const index = this.#pageIndex();
 		switch (event.type) {
@@ -571,6 +850,24 @@ export class AdvisorConfigOverlayComponent implements Component {
 					this.#showDetail(index);
 				} else if (event.item === "name" && typeof event.value === "string" && event.value.trim()) {
 					advisor.name = event.value.trim();
+					this.#dirty = true;
+					this.#showDetail(index);
+				} else if (event.item === "reviewMode" && (typeof event.value === "string" || event.value === null)) {
+					// `turn` is the default, stored as an omitted field; `null` resets to it.
+					const mode = event.value === null ? "turn" : ADVISOR_REVIEW_MODES.find(m => m === event.value);
+					if (!mode) return;
+					advisor.reviewMode = mode === "turn" ? undefined : mode;
+					this.#dirty = true;
+					this.#showDetail(index);
+				} else if (event.item === "reviewInterval" && (typeof event.value === "number" || event.value === null)) {
+					const interval = event.value ?? 1;
+					if (!Number.isSafeInteger(interval) || interval < 1) return;
+					advisor.reviewInterval = interval === 1 ? undefined : interval;
+					this.#dirty = true;
+					this.#showDetail(index);
+				} else if (event.item === "syncBacklog" && (typeof event.value === "string" || event.value === null)) {
+					// The inherit sentinel and `null` match no mode, so the override clears.
+					advisor.syncBacklog = ADVISOR_SYNC_BACKLOG_MODES.find(mode => mode === event.value);
 					this.#dirty = true;
 					this.#showDetail(index);
 				}
@@ -689,6 +986,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 					{ k: "Enabled", v: advisor.enabled === false ? "○ off" : "● on" },
 					{ k: "Model", v: model },
 					{ k: "Tools", v: formatAdvisorTools(advisor.tools, "no tools") },
+					{ k: "Review", v: formatReviewCadence(advisor) },
+					{ k: "Sync backlog", v: this.#syncBacklogLabel(advisor) },
 				],
 			}),
 			text([span("Instructions:", "dim")]),
@@ -822,12 +1121,15 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#advisorPreview(advisor: AdvisorConfig, bodyWidth: number): string[] {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
+		const syncBacklog = this.#syncBacklogLabel(advisor);
 		const lines = [
 			theme.bold(advisor.name || "(unnamed)"),
 			"",
 			`${theme.fg("dim", "Enabled:")} ${advisor.enabled === false ? "○ off" : "● on"}`,
 			`${theme.fg("dim", "Model:")} ${model}`,
 			`${theme.fg("dim", "Tools:")} ${tools}`,
+			`${theme.fg("dim", "Review:")} ${formatReviewCadence(advisor)}`,
+			`${theme.fg("dim", "Sync backlog:")} ${syncBacklog}`,
 			"",
 			theme.fg("dim", "Instructions:"),
 		];
@@ -870,9 +1172,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 
 	// ───────────────────────────── screens ───────────────────────────
 
-	#setScreen(screen: Screen, active: Component, footerHint: string): void {
+	/** `sheet`: how a list screen describes as a picker over the prefs page. */
+	#setScreen(screen: Screen, active: Component, footerHint: string, sheet?: SelectPickerOptions): void {
 		this.#screen = screen;
 		this.#active = active;
+		this.#sheetOptions = sheet;
 		this.#footerHint = footerHint;
 		this.#previewScroll = 0;
 		this.#cb.requestRender();
@@ -893,6 +1197,9 @@ export class AdvisorConfigOverlayComponent implements Component {
 			advisor?.name === "default" &&
 			!advisor.model?.trim() &&
 			advisor.tools === undefined &&
+			advisor.reviewMode === undefined &&
+			advisor.reviewInterval === undefined &&
+			advisor.syncBacklog === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false &&
 			advisor.maxNotesPerUpdate === undefined
@@ -902,7 +1209,12 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#advisorSummary(advisor: AdvisorConfig): string {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
-		return `${model} · ${tools}`;
+		return `${model} · ${tools} · review ${advisor.reviewMode ?? "turn"}/${advisor.reviewInterval ?? 1}`;
+	}
+
+	/** The advisor's explicit catch-up override, else the inherited global policy. */
+	#syncBacklogLabel(advisor: AdvisorConfig): string {
+		return advisor.syncBacklog ?? `${this.#deps.syncBacklog ?? "off"} (inherited)`;
 	}
 
 	#showList(): void {
@@ -1000,6 +1312,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#detailIndex = index;
 		const modelDescription = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const toolsDescription = formatAdvisorTools(advisor.tools, "no tools");
+		const reviewMode = advisor.reviewMode ?? "turn";
+		const reviewInterval = advisor.reviewInterval ?? 1;
 		const items: SelectItem[] = [
 			{ value: "name", label: "Name", description: advisor.name },
 			{
@@ -1008,6 +1322,13 @@ export class AdvisorConfigOverlayComponent implements Component {
 				description: advisor.enabled === false ? "○ off" : "● on",
 			},
 			{ value: "model", label: "Model", description: modelDescription },
+			{ value: "reviewMode", label: "Review mode", description: reviewMode },
+			{ value: "reviewInterval", label: "Review interval", description: String(reviewInterval) },
+			{
+				value: "syncBacklog",
+				label: "Sync backlog",
+				description: this.#syncBacklogLabel(advisor),
+			},
 		];
 		if (advisor.model?.trim()) {
 			items.push({ value: "resetModel", label: "Reset model to advisor-role default" });
@@ -1029,6 +1350,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 	}
 
 	#onDetailSelect(index: number, field: string): void {
+		// Editors opened straight from the prefs page edit this advisor too.
+		this.#detailIndex = index;
 		switch (field) {
 			case "toggleEnabled": {
 				const a = this.#doc.advisors[index];
@@ -1042,6 +1365,15 @@ export class AdvisorConfigOverlayComponent implements Component {
 				return;
 			case "model":
 				this.#showModelPicker(index);
+				return;
+			case "reviewMode":
+				this.#showReviewModePicker(index);
+				return;
+			case "reviewInterval":
+				this.#showReviewIntervalEditor(index);
+				return;
+			case "syncBacklog":
+				this.#showSyncBacklogPicker(index);
 				return;
 			case "tools":
 				this.#showToolsEditor(index, new Set(this.#doc.advisors[index].tools ?? this.#deps.defaultToolNames), 0);
@@ -1097,11 +1429,19 @@ export class AdvisorConfigOverlayComponent implements Component {
 		}
 		const items = buildBrowserItems(models);
 		sortModelItems(items, { mruOrder });
+		// The configured model, whatever thinking suffix it carries, is the picker's current row.
+		const model = this.#doc.advisors[index]?.model?.trim();
+		const current = model
+			? items.find(item => model === item.selector || model.startsWith(`${item.selector}:`))?.selector
+			: undefined;
+		this.#modelItems = items;
+		this.#modelCurrent = current;
 
 		const picker = new ModelBrowser(this.#deps.browserSource, {});
 		picker.setMruOrder(mruOrder);
 		picker.setPerfStats(this.#deps.browserSource.modelPerf);
 		picker.setItems(items);
+		if (current) picker.selectSelector(current);
 		picker.onActivate = item => {
 			const efforts = getSupportedEfforts(item.model);
 			if (efforts.length === 0) {
@@ -1124,6 +1464,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const items: SelectItem[] = [{ value: "", label: "(model default thinking)" }];
 		for (const effort of efforts) items.push({ value: effort, label: effort });
 		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
+		// The level the advisor already runs this model at, when it is this model.
+		const model = this.#doc.advisors[index]?.model?.trim();
+		const current =
+			model === selector ? "" : model?.startsWith(`${selector}:`) ? model.slice(selector.length + 1) : undefined;
+		if (current !== undefined) list.setSelectedValue(current);
 		list.onSelect = item => {
 			// Values are supported efforts or the empty model-default choice.
 			this.#doc.advisors[index].model = item.value ? `${selector}:${item.value}` : selector;
@@ -1135,6 +1480,130 @@ export class AdvisorConfigOverlayComponent implements Component {
 			"thinking",
 			list,
 			`Thinking effort for ${selector} · ${editorKey("tui.select.confirm")} / click pick · ${editorKey("tui.select.cancel")} back`,
+			{
+				title: "Thinking level",
+				subtitle: `How hard ${this.#doc.advisors[index]?.name || "the advisor"} reasons on ${selector}.`,
+				icon: "thinking",
+				noun: "levels",
+				current: current === undefined ? [] : [current],
+				confirm: "Use level",
+				decorate: item => {
+					if (!item.value) return { label: "Model default", detail: "No level; the provider decides." };
+					const level = parseThinkingLevel(item.value);
+					const dot = `thinking${item.value.charAt(0).toUpperCase()}${item.value.slice(1)}`;
+					return {
+						detail: level ? getThinkingLevelMetadata(level).description : undefined,
+						chips: [{ text: "", dot }],
+					};
+				},
+			},
+		);
+	}
+	#showReviewModePicker(index: number): void {
+		const advisor = this.#doc.advisors[index];
+		if (!advisor) {
+			this.#showList();
+			return;
+		}
+		const current = advisor.reviewMode ?? ADVISOR_REVIEW_MODES[0];
+		const items: SelectItem[] = ADVISOR_REVIEW_MODES.map(mode => ({
+			value: mode,
+			label: mode === current ? `${mode} (current)` : mode,
+			description:
+				mode === "turn"
+					? "Review every primary turn (tool-call round)."
+					: "Review only at agent end (once per run).",
+		}));
+		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
+		list.setSelectedIndex(ADVISOR_REVIEW_MODES.indexOf(current));
+		list.onSelect = item => {
+			advisor.reviewMode = item.value === "turn" ? undefined : "agent-end";
+			this.#dirty = true;
+			this.#showDetail(index);
+		};
+		list.onCancel = () => this.#showDetail(index);
+		this.#setScreen(
+			"review-mode",
+			list,
+			`${editorKey("tui.select.confirm")} / click choose review mode · ${editorKey("tui.select.cancel")} back`,
+			{
+				title: "Review mode",
+				subtitle: `When ${advisor.name || "the advisor"} reviews the session.`,
+				icon: "review",
+				noun: "modes",
+				current: [current],
+				decorate: item => ({ label: item.value }),
+			},
+		);
+	}
+
+	#showReviewIntervalEditor(index: number): void {
+		const advisor = this.#doc.advisors[index];
+		if (!advisor) {
+			this.#showList();
+			return;
+		}
+		const input = new Input();
+		input.setValue(String(advisor.reviewInterval ?? 1));
+		input.onSubmit = value => {
+			const interval = Number(value.trim());
+			if (!Number.isSafeInteger(interval) || interval < 1) {
+				this.#cb.notify("Review interval must be a positive integer.");
+				return;
+			}
+			advisor.reviewInterval = interval === 1 ? undefined : interval;
+			this.#dirty = true;
+			this.#showDetail(index);
+		};
+		input.onEscape = () => this.#showDetail(index);
+		this.#setScreen(
+			"review-interval",
+			input,
+			`Type a positive integer · ${editorKey("tui.input.submit")} save · ${editorKey("tui.select.cancel")} cancel`,
+		);
+	}
+
+	#showSyncBacklogPicker(index: number): void {
+		const advisor = this.#doc.advisors[index];
+		if (!advisor) {
+			this.#showList();
+			return;
+		}
+		const global = this.#deps.syncBacklog ?? "off";
+		const current = advisor.syncBacklog;
+		const items: SelectItem[] = [
+			{
+				value: SYNC_BACKLOG_INHERIT,
+				label: current === undefined ? "inherit (current)" : "inherit",
+				description: `Follow the global advisor.syncBacklog setting (currently "${global}").`,
+			},
+			...ADVISOR_SYNC_BACKLOG_MODES.map(mode => ({
+				value: mode,
+				label: mode === current ? `${mode} (current)` : mode,
+				description: describeSyncBacklogMode(mode),
+			})),
+		];
+		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
+		list.setSelectedIndex(current === undefined ? 0 : ADVISOR_SYNC_BACKLOG_MODES.indexOf(current) + 1);
+		list.onSelect = item => {
+			// The inherit sentinel matches no mode, so `find` yields undefined — the override clears.
+			advisor.syncBacklog = ADVISOR_SYNC_BACKLOG_MODES.find(mode => mode === item.value);
+			this.#dirty = true;
+			this.#showDetail(index);
+		};
+		list.onCancel = () => this.#showDetail(index);
+		this.#setScreen(
+			"sync-backlog",
+			list,
+			`${editorKey("tui.select.confirm")} / click choose catch-up policy · ${editorKey("tui.select.cancel")} back`,
+			{
+				title: "Sync backlog",
+				subtitle: `How long the session waits for ${advisor.name || "the advisor"}'s pending reviews.`,
+				icon: "time",
+				noun: "policies",
+				current: [current ?? SYNC_BACKLOG_INHERIT],
+				decorate: item => ({ label: item.value }),
+			},
 		);
 	}
 
@@ -1144,7 +1613,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			value: name,
 			label: `${selected.has(name) ? "[x]" : "[ ]"} ${name}`,
 		}));
-		items.push({ value: "__done", label: "Done" });
+		items.push({ value: TOOLS_DONE, label: "Done" });
 		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
 		list.setSelectedIndex(cursor);
 		let cursorIndex = cursor;
@@ -1152,7 +1621,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			cursorIndex = items.findIndex(i => i.value === item.value);
 		};
 		list.onSelect = item => {
-			if (item.value === "__done") {
+			if (item.value === TOOLS_DONE) {
 				this.#doc.advisors[index].tools = commitTools(selected, all, this.#deps.defaultToolNames);
 				this.#dirty = true;
 				this.#showDetail(index);
@@ -1171,6 +1640,14 @@ export class AdvisorConfigOverlayComponent implements Component {
 			"tools",
 			list,
 			`${editorKey("tui.select.confirm")} / click toggle · select Done or ${editorKey("tui.select.cancel")} to apply (empty = no tools; read/grep/glob = default)`,
+			{
+				title: "Tools",
+				subtitle: `What ${this.#doc.advisors[index]?.name || "the advisor"} may call. None grants no tools; read, grep and glob are the default.`,
+				icon: "tools",
+				noun: "tools",
+				current: [...selected],
+				decorate: item => ({ label: item.value }),
+			},
 		);
 	}
 

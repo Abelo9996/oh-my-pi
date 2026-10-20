@@ -19,6 +19,7 @@ import type {
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import { formatApprovalArguments } from "../tools/approval";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
@@ -108,8 +109,9 @@ function omitUnusedOptionalArgs(args: MCPToolArgs, inputSchema: MCPToolDefinitio
 /**
  * Drop the harness-internal intent field (`INTENT_FIELD`) before forwarding
  * args to an MCP server. The harness injects `i` into every tool's wire
- * schema; the direct model tool-call path strips it via `extractIntent`, but
- * the `eval` `tool.*` bridge and any other in-process caller forwards args
+ * schema; the direct model tool-call path strips it via `extractIntent` and
+ * the `eval` `tool.*` bridge drops it in `callSessionTool`, but other
+ * in-process callers (Task proxies, `ctx.invokeTool`) may still forward args
  * verbatim. Strict-schema servers (Linear, anything with
  * `additionalProperties:false` / Zod `.strict()`) reject every call that
  * carries `i`. The MCP boundary is the authoritative guard so callers don't
@@ -132,6 +134,10 @@ async function resolveOutboundUrlArgs(
 	seen: WeakSet<object> = new WeakSet(),
 ): Promise<unknown> {
 	if (typeof value === "string") {
+		// Only arguments that are themselves URLs: the router's repair of a
+		// cwd-prefixed `…/local://x` path must not rewrite free text that merely
+		// mentions one.
+		if (!extractUriScheme(value)) return value;
 		const router = InternalUrlRouter.instance();
 		const url = router.normalize(value);
 		if (!router.canHandle(url)) return value;
@@ -653,6 +659,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpToolName: string;
 	/** Server name */
 	readonly mcpServerName: string;
+	/** Server-declared read-only behavior for prewalk; approval stays conservative. */
+	readonly mcpReadOnlyHint: boolean | undefined;
 	readonly approval = "write" as const;
 	/** Render completed MCP calls with the result header replacing the pending call header. */
 	readonly mergeCallAndResult = true;
@@ -663,6 +671,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	 * explicit `false`; an omitted flag would leave nothing to preserve.
 	 */
 	readonly strict = false as const;
+	readonly formatApprovalDetails = formatApprovalArguments;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
 	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
@@ -681,6 +690,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
 		this.mcpToolName = tool.name;
 		this.mcpServerName = connection.name;
+		this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
 	}
 
 	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
@@ -776,11 +786,14 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpToolName: string;
 	/** Server name */
 	readonly mcpServerName: string;
+	/** See {@link MCPTool.mcpReadOnlyHint}. */
+	readonly mcpReadOnlyHint: boolean | undefined;
 	readonly approval = "write" as const;
 	/** Render completed MCP calls with the result header replacing the pending call header. */
 	readonly mergeCallAndResult = true;
 	/** See {@link MCPTool.strict}: MCP servers own validation, so stay non-strict. */
 	readonly strict = false as const;
+	readonly formatApprovalDetails = formatApprovalArguments;
 
 	readonly #fallbackProvider: string | undefined;
 	readonly #fallbackProviderName: string | undefined;
@@ -810,6 +823,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
 		this.mcpToolName = tool.name;
 		this.mcpServerName = serverName;
+		this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
 		this.#fallbackProvider = source?.provider;
 		this.#fallbackProviderName = source?.providerName;
 	}

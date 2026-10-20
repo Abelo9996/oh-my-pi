@@ -13,7 +13,9 @@ export function createSessionDefaults() {
 		abort: async () => {},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
+		isParentIrcSteer: () => false,
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
+		addDisposer: () => {},
 	} satisfies Partial<AgentSession>;
 }

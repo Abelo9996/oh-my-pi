@@ -1,9 +1,14 @@
 import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
-import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
+import {
+	resolveOutputMaxColumns,
+	resolveOutputSinkArtifactMaxBytes,
+	resolveOutputSinkHeadBytes,
+} from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector } from "../executor-base";
-import { executeInVmContext, type JsDisplayOutput } from "./context-manager";
+import type { EvalDisplayOutput } from "../types";
+import { executeInVmContext } from "./context-manager";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
@@ -47,12 +52,14 @@ export interface JsResult {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId?: string;
+	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
+	artifactElidedBytes?: number;
 	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;
 	outputLines: number;
 	outputBytes: number;
-	displayOutputs: JsDisplayOutput[];
+	displayOutputs: EvalDisplayOutput[];
 }
 
 function getExecutionTimeoutMs(options: Pick<JsExecutorOptions, "deadlineMs" | "timeoutMs">): number | undefined {
@@ -99,13 +106,14 @@ function formatPackageInstallTimeoutAnnotation(installDeadlineReached: boolean):
 }
 
 export async function executeJs(code: string, options: JsExecutorOptions): Promise<JsResult> {
-	const display = new DisplayOutputCollector<JsDisplayOutput>();
+	const display = new DisplayOutputCollector();
 	const displayOutputs = display.outputs;
 	const outputSink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
 		spillThreshold: DEFAULT_MAX_BYTES,
 		headBytes: resolveOutputSinkHeadBytes(options.session.settings),
+		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(options.session.settings),
 		maxColumns: resolveOutputMaxColumns(options.session.settings),
 		onChunk: chunk => options.onChunk?.(chunk),
 	});
@@ -187,6 +195,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cancelled: false,
 			truncated: summary.truncated,
 			artifactId: summary.artifactId,
+			artifactElidedBytes: summary.artifactElidedBytes,
 			artifactError: summary.artifactError,
 			totalLines: summary.totalLines,
 			totalBytes: summary.totalBytes,
@@ -215,6 +224,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				cancelled: true,
 				truncated: summary.truncated,
 				artifactId: summary.artifactId,
+				artifactElidedBytes: summary.artifactElidedBytes,
 				artifactError: summary.artifactError,
 				totalLines: summary.totalLines,
 				totalBytes: summary.totalBytes,
@@ -232,6 +242,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cancelled: false,
 			truncated: summary.truncated,
 			artifactId: summary.artifactId,
+			artifactElidedBytes: summary.artifactElidedBytes,
 			artifactError: summary.artifactError,
 			totalLines: summary.totalLines,
 			totalBytes: summary.totalBytes,
