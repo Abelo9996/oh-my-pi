@@ -1746,13 +1746,14 @@ describe("per-call model gate and approval", () => {
 		},
 	);
 
-	it("does not let a project agent written mid-session grant or pin its own model", async () => {
+	it("routes and pins a project agent written mid-session by its model without granting that model per call", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-project-model-authority-"));
 		const selector = "anthropic/claude-opus-4-5";
 		const parent = "anthropic/claude-sonnet-4-5";
-		const childSession = { ...gated({ "task.perCallModel": "unpinned" }, parent), cwd: root };
+		const unpinned = { ...gated({ "task.perCallModel": "unpinned" }, parent), cwd: root };
+		const on = { ...gated({ "task.perCallModel": "on" }, parent), cwd: root };
 		try {
-			await resolveEffectiveSubagentPolicy(request({ session: childSession, agent: "task" }));
+			await resolveEffectiveSubagentPolicy(request({ session: unpinned, agent: "task" }));
 			await Bun.write(
 				path.join(root, ".omp", "agents", "worker.md"),
 				[
@@ -1766,14 +1767,16 @@ describe("per-call model gate and approval", () => {
 					"Inspect the repository.",
 				].join("\n"),
 			);
-			const ordinary = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
-			expect(ordinary.modelOverride).toEqual([parent]);
-			expect(ordinary.effectiveAgent.systemPrompt).toContain("Inspect the repository.");
-			expect(ordinary.effectiveAgent.tools).toEqual(["read"]);
-			await expect(
-				resolveEffectiveSubagentPolicy(request({ session: childSession, model: selector })),
-			).rejects.toThrow(/not configured/);
-			const selected = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: parent }));
+			const ordinary = await resolveEffectiveSubagentPolicy(request({ session: unpinned }));
+			expect(ordinary.effectiveAgent.source).toBe("project");
+			expect(ordinary.modelOverride).toEqual([selector]);
+			await expect(resolveEffectiveSubagentPolicy(request({ session: unpinned, model: parent }))).rejects.toThrow(
+				/has its own configured model \(frontmatter\)/,
+			);
+			await expect(resolveEffectiveSubagentPolicy(request({ session: on, model: selector }))).rejects.toThrow(
+				/not configured/,
+			);
+			const selected = await resolveEffectiveSubagentPolicy(request({ session: on, model: parent }));
 			expect(selected.modelOverride).toEqual([parent]);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });

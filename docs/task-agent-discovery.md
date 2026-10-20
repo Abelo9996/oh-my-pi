@@ -48,13 +48,13 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `prewalk: true` starts the subagent on its resolved model and hands off to the default prewalk target (the `smol` role) at its first edit/write, exactly like the session-level `--prewalk`; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`). An unavailable target is skipped instead of failing the spawn. A resolved target is skipped only when both its model identity and its effective thinking mode/level match the starting selection after model clamping; a same-model effort downgrade is a real hand-off and still arms and switches at the first edit/write.
 - `advisor: true` pairs spawned sessions of the agent with an advisor running the model resolved for the `advisor` role; a string value (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern (optional `:level` suffix), applied as the spawned session's `modelRoles.advisor`. The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its advisor strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`); subagents default to no advisor, and the effective opt-in is persisted in `session_init` so cold revival restores it.
 
-Only bundled and user-level agents (`~/.omp/agent/agents/`, user-scope plugins) route by their `model`, `prewalk` and `advisor` frontmatter. A project agent (`.omp/agents/`, project-scope plugins) keeps its prompt, tools and other fields, but those three fields are ignored: it runs on the parent's model with no prewalk or advisor unless settings configure `task.agentModelOverrides`, `task.agentPrewalk` or `task.agentAdvisor` for it. An agent definition written into the repository cannot pick its own model. The `/agents` hub shows the same effective values.
+Agents from every source route by their `model`, `prewalk` and `advisor` frontmatter, and a frontmatter `model` pins the agent under `task.perCallModel: unpinned`. Only a bundled or user-level agent's (`~/.omp/agent/agents/`, user-scope plugins) frontmatter `model` also grants a per-call `model`; a project agent's (`.omp/agents/`, project-scope plugins) never does, so an agent file written into the repository cannot widen what a per-call `model` may select (see [per-call model approval](#model-and-structured-output-precedence)).
 
 ## Role-backed custom agents
 
 OMP discovers user agents from `~/.omp/agent/agents/*.md` and project agents from `.omp/agents/*.md`.
 
-Give a user-level agent a role alias in frontmatter, then dispatch it by name. For model routing, task dispatch sets only `agent`; it does not set a worker model. For a project agent, route it with `task.agentModelOverrides` instead, since its frontmatter `model` is ignored:
+Give the agent a role alias in frontmatter, then dispatch it by name. For model routing, task dispatch sets only `agent`; it does not set a worker model:
 
 `~/.omp/agent/agents/reviewer.md`:
 
@@ -227,7 +227,7 @@ For task dispatch, model precedence is:
 
 1. the call's own `model` (task item / flat call, eval `agent()` / `workpool()`), or a host caller's `hostModel` (SDK, `omp cleanse --model`, `/seance --model`)
 2. `task.agentModelOverrides[agentName]`
-3. the frontmatter `model` list of a bundled or user-level agent (project agents' frontmatter `model` is ignored)
+3. the agent's frontmatter `model` list
 4. the parent's active model, then its configured/default model fallback
 
 Role aliases in `hostModel` and steps 2 and 3 are expanded through `modelRoles`, so `@default:high`
@@ -242,7 +242,7 @@ role aliases, including `@default`.
 | Value | Behavior |
 | --- | --- |
 | `off` (default) | `model` is hidden from the task schema and prompts. A task call that still passes it has it dropped by the schema and runs on the agent's own model; a call that bypasses the schema with one fails preflight. Eval `agent()`/`workpool()` reject it. |
-| `unpinned` | Accepted only for agents that are not pinned by a bundled or user-level frontmatter `model`. A pinned model is any frontmatter `model` other than an absent or parent-inheriting spelling (a bare `@default`, `*`, or `pi/default`, or a selection that expands to nothing, such as `@task` while `modelRoles.task` is unset). This is decided from the configuration alone, not by comparing against the model the parent is running. Project frontmatter never pins. The bundled `task` agent (`@task`) counts as unpinned until `modelRoles.task` is set; `scout` (`@smol`) and `reviewer` (`@slow`) are pinned. |
+| `unpinned` | Accepted only for agents that are not pinned by a frontmatter `model`. A pinned model is any frontmatter `model` other than an absent or parent-inheriting spelling (a bare `@default`, `*`, or `pi/default`, or a selection that expands to nothing, such as `@task` while `modelRoles.task` is unset). This is decided from the configuration alone, not by comparing against the model the parent is running. The bundled `task` agent (`@task`) counts as unpinned until `modelRoles.task` is set; `scout` (`@smol`) and `reviewer` (`@slow`) are pinned. |
 | `on` | Accepted for every agent, including ones with a frontmatter model. |
 | `eval` | Accepted through eval `agent()` and `workpool()` for every agent, including pinned specialists. Ordinary task items behave as `off`. The same approval, allowlist, effort and dispatch checks apply. |
 

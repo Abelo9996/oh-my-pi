@@ -6,7 +6,7 @@ import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../config/model-registry";
-import { resolveAgentAdvisorRolePattern, resolveAgentAdvisorSelection } from "../config/model-resolver";
+import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
@@ -35,7 +35,7 @@ import {
 import { isCompletionProbeEnabled } from "./completion-probe";
 import { discoverAgents, getAgent } from "./discovery";
 import { assertPerCallModelApproved, perCallModelFallbackOverrides } from "./model-approval";
-import { cfgTaskAgentAccountPools, cfgTaskAgentAdvisor, cfgTaskMaxEffort } from "./settings";
+import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
@@ -167,8 +167,9 @@ export function createPersistedSubagentReviverFactory(
 					`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no message history (truncated to header/session_init). The agent was not revived.`,
 				);
 			}
+			// The agent's own model and override grant a per-call worker only while that agent is still discovered.
 			const configuredAgent =
-				(init.perCallModel || init.advisor) && init.agent
+				init.perCallModel && init.agent
 					? getAgent(
 							[
 								...(
@@ -183,15 +184,6 @@ export function createPersistedSubagentReviverFactory(
 							init.agent,
 						)
 					: undefined;
-			const configuredAdvisor = resolveAgentAdvisorSelection({
-				settingsOverride: init.agent ? cfgTaskAgentAdvisor.get(ctx.settings)[init.agent] : undefined,
-			});
-			const advisor =
-				configuredAgent?.source === "bundled" || configuredAgent?.source === "user"
-					? init.advisor
-					: configuredAdvisor
-						? (configuredAdvisor.model ?? "on")
-						: undefined;
 			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
 			// advisor-role model, anything else = the pattern stamped onto this
 			// session's `modelRoles.advisor`. Spawn persists it already expanded
@@ -201,14 +193,14 @@ export function createPersistedSubagentReviverFactory(
 			// createSubagentSettings default).
 			const subagentSettings = createSubagentSettings(ctx.settings, {
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-				...(advisor
+				...(init.advisor
 					? {
 							"advisor.enabled": true,
-							...(advisor !== "on"
+							...(init.advisor !== "on"
 								? {
 										modelRoles: {
 											...ctx.settings.getModelRoles(),
-											advisor: resolveAgentAdvisorRolePattern(advisor, ctx.settings),
+											advisor: resolveAgentAdvisorRolePattern(init.advisor, ctx.settings),
 										},
 									}
 								: undefined),

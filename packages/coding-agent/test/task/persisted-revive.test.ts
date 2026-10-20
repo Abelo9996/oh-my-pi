@@ -839,9 +839,9 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.agentName).not.toBe("sub");
 	});
 
-	it("discards parked project advisor authority unless current operator settings configure it", async () => {
+	it("restores a project agent's parked advisor on cold revival", async () => {
 		const cwd = makeTempDir("@pi-project-advisor-revive-");
-		const discover = vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [
 				{
 					name: "reviewer",
@@ -858,22 +858,13 @@ describe("persisted subagent revival", () => {
 			if (options?.settings) captured.push(options.settings);
 			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
 		});
-		const revive = async (settings: Settings) => {
-			const sessionFile = await createPersistedSession(cwd, undefined, undefined, "moonshot/k3", {
-				agent: "reviewer",
-			});
-			const ref = createRef(sessionFile);
-			const reviver = await createFactory(cwd, undefined, { settings })(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
-			await reviver(ref);
-		};
-		await revive(Settings.isolated());
-		await revive(Settings.isolated({ "task.agentAdvisor": { reviewer: "anthropic/claude-sonnet-4-5" } }));
-		discover.mockResolvedValue({ agents: [], projectAgentsDir: null });
-		await revive(Settings.isolated());
-		expect(cfgAdvisorEnabled.get(captured[0])).toBe(false);
-		expect(captured[1].getModelRole("advisor")).toBe("anthropic/claude-sonnet-4-5");
-		expect(cfgAdvisorEnabled.get(captured[2])).toBe(false);
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, "moonshot/k3", { agent: "reviewer" });
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, { settings: Settings.isolated() })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+		expect(cfgAdvisorEnabled.get(captured[0])).toBe(true);
+		expect(captured[0].getModelRole("advisor")).toBe("moonshot/k3");
 	});
 
 	it("restores the persisted per-agent advisor opt-in on cold revival", async () => {

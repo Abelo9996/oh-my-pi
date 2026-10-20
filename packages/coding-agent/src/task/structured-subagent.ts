@@ -44,7 +44,6 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
-import { getAgentModelConfig } from "./agents";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess, type SubagentToolResult } from "./executor";
 import {
@@ -425,7 +424,6 @@ export async function resolveEffectiveSubagentPolicy(
 	if (agentName === SEANCE_AGENT_NAME && !isBundledSeance(agent)) assertPlanControlsAllowed(request, planMode);
 
 	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
-	const agentModelConfig = getAgentModelConfig(effectiveAgent);
 	// An agent declaring `structured: true` keeps its result contract when the caller opts out (`task.structured` off).
 	const structured = request.structured !== false || effectiveAgent.structured === true;
 	const schema = resolveSchema(request, effectiveAgent, structured);
@@ -473,7 +471,7 @@ export async function resolveEffectiveSubagentPolicy(
 				`Per-call model conflicts with task.agentModelOverrides for agent "${agentName}". Omit model to use the configured override.`,
 			);
 		}
-		const frontmatterPinned = !agentModelInheritsSessionModel(agentModelConfig.model, request.session.settings);
+		const frontmatterPinned = !agentModelInheritsSessionModel(effectiveAgent.model, request.session.settings);
 		if (mode === "unpinned" && frontmatterPinned) {
 			throw new StructuredSubagentError(
 				"preflight",
@@ -496,7 +494,7 @@ export async function resolveEffectiveSubagentPolicy(
 			: {
 					settings: request.session.settings,
 					agentName,
-					agentModel: agentModelConfig.model,
+					agentModel: effectiveAgent.model,
 					agentSource: effectiveAgent.source,
 					parentModelPattern: parentActiveModelPattern,
 				};
@@ -528,7 +526,7 @@ export async function resolveEffectiveSubagentPolicy(
 		requestModel: preparedSeance?.modelPatterns ?? perCallModel ?? request.hostModel,
 		perCallRequest: perCallModel !== undefined,
 		settingsOverride: hasPreparedSeance ? undefined : configuredOverride,
-		agentModel: hasPreparedSeance ? undefined : agentModelConfig.model,
+		agentModel: hasPreparedSeance ? undefined : effectiveAgent.model,
 		settings: request.session.settings,
 		activeModelPattern: hasPreparedSeance ? undefined : parentActiveModelPattern,
 		fallbackModelPattern: hasPreparedSeance ? undefined : request.session.getModelString?.(),

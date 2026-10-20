@@ -313,7 +313,7 @@ export const cfgTaskPerCallModel = register({
 				value: "unpinned",
 				label: "Unpinned",
 				description:
-					"Accept `model` only without a task.agentModelOverrides entry or a bundled/user-level frontmatter model that pins the agent; project frontmatter does not pin a model. Bundled `task` counts until modelRoles.task is set",
+					"Accept `model` only without a task.agentModelOverrides entry or a frontmatter model that pins the agent. Bundled `task` counts until modelRoles.task is set",
 			},
 			{
 				value: "on",

@@ -18,12 +18,6 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
 
-export function getAgentModelConfig(agent: AgentDefinition): Pick<AgentDefinition, "model" | "prewalk" | "advisor"> {
-	return agent.source === "bundled" || agent.source === "user"
-		? { model: agent.model, prewalk: agent.prewalk, advisor: agent.advisor }
-		: {};
-}
-
 interface AgentFrontmatter {
 	name: string;
 	description: string;
