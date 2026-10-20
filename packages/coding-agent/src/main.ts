@@ -84,7 +84,7 @@ import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "@oh-my-pi/pi-tui/setup/setup-version";
 import type * as SetupWizardModule from "./modes/setup";
 import type { SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
-import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
+import { invokeSkillCommandFromText, isKnownSkillCommand, submitCliPrompt } from "./modes/skill-command";
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
@@ -796,6 +796,8 @@ async function runInteractiveMode(
 		}
 	}
 
+	const cliPromptHost = { skillCommands: mode.skillCommands, session };
+
 	if (initialMessage !== undefined) {
 		try {
 			using _keepalive = new EventLoopKeepalive();
@@ -803,7 +805,7 @@ async function runInteractiveMode(
 			// before this dispatch runs (the composer accepts input as soon as the
 			// first turn starts): the CLI message queues into that turn instead of
 			// dying with AgentBusyError.
-			await session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" });
+			await submitCliPrompt(cliPromptHost, initialMessage, { images: initialImages, streamingBehavior: "steer" });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
@@ -813,7 +815,7 @@ async function runInteractiveMode(
 	for (const message of initialMessages) {
 		try {
 			using _keepalive = new EventLoopKeepalive();
-			await session.prompt(message, { streamingBehavior: "steer" });
+			await submitCliPrompt(cliPromptHost, message, { streamingBehavior: "steer" });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);

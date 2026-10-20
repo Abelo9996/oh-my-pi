@@ -11,6 +11,7 @@ import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
+import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
@@ -21,6 +22,7 @@ import {
 	formatPersistenceNotice,
 } from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
+import { submitCliPrompt } from "./skill-command";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 
@@ -276,12 +278,21 @@ async function runPrintModeCore(
 		process.stderr.write("Working...\n");
 		wroteTextWorkingIndicator = true;
 	};
+	const skillCommands = new Map<string, Skill>();
+	if (session.skillsSettings?.enableSkillCommands !== false) {
+		for (const skill of session.skills) {
+			skillCommands.set(getSkillSlashCommandName(skill), skill);
+		}
+	}
+	const cliPromptHost = { skillCommands, session };
 
 	// Send initial message with attachments
 	if (!strictMCPFailure && initialMessage !== undefined) {
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
-		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
+		await logger.time("print:prompt:initial", () =>
+			submitCliPrompt(cliPromptHost, initialMessage, { images: initialImages }),
+		);
 	}
 
 	// Send remaining messages
@@ -289,7 +300,7 @@ async function runPrintModeCore(
 		for (const message of messages) {
 			writeTextWorkingIndicator();
 			if (mode === "text") session.setTextOutputCommitted(false);
-			await logger.time("print:prompt:next", () => session.prompt(message));
+			await logger.time("print:prompt:next", () => submitCliPrompt(cliPromptHost, message));
 		}
 	}
 

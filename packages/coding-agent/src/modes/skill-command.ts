@@ -2,6 +2,7 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { buildSkillPromptMessage, getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
 import type { InteractiveModeContext } from "./types";
+import type { AgentSession } from "../session/agent-session";
 
 type SkillCommandHost = Pick<
 	InteractiveModeContext,
@@ -58,7 +59,7 @@ export function isKnownSkillCommand(ctx: SkillCommandHost, text: string): boolea
 
 /** Build the user-attributed custom message for a registered `/skill:<name>` command. */
 export async function buildSkillCommandPrompt(
-	ctx: SkillCommandHost,
+	ctx: Pick<SkillCommandHost, "skillCommands">,
 	text: string,
 	streamingBehavior: "steer" | "followUp",
 	images?: ImageContent[],
@@ -82,6 +83,22 @@ export async function buildSkillCommandPrompt(
 		},
 		options: { streamingBehavior, queueChipText: text },
 	};
+}
+
+/** Dispatch a CLI prompt through skill expansion or the normal session prompt pipeline. */
+export async function submitCliPrompt(
+	ctx: Pick<SkillCommandHost, "skillCommands"> & {
+		session: Pick<AgentSession, "prompt" | "promptCustomMessage">;
+	},
+	text: string,
+	options?: { images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" },
+): Promise<void> {
+	const skillPrompt = await buildSkillCommandPrompt(ctx, text, options?.streamingBehavior ?? "steer", options?.images);
+	if (skillPrompt) {
+		await ctx.session.promptCustomMessage(skillPrompt.message, skillPrompt.options);
+		return;
+	}
+	await ctx.session.prompt(text, options);
 }
 
 /** Invoke a registered `/skill:<name>` command as a user-attributed custom message. */

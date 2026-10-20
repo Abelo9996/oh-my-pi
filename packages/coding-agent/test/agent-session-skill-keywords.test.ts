@@ -6,7 +6,9 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { renderWorkflowNotice } from "@oh-my-pi/pi-coding-agent/modes/magic-keywords";
+import { submitCliPrompt } from "@oh-my-pi/pi-coding-agent/modes/skill-command";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -129,5 +131,39 @@ describe("AgentSession skill prompt keyword steering", () => {
 			renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: true }),
 		);
 		expect(session.sessionManager.getTurnBudget()).toEqual({ total: 500_000, spent: 0, hard: true });
+	});
+
+	it("expands a hidden skill from a CLI prompt before the model sees it", async () => {
+		const skillPath = path.join(tempDir.path(), "implement", "SKILL.md");
+		await Bun.write(
+			skillPath,
+			"---\nname: implement\ndescription: Implement fixes\ndisable-model-invocation: true\n---\nSKILL BODY MARKER 16506\n",
+		);
+		const skill: Skill = {
+			name: "implement",
+			description: "Implement fixes",
+			filePath: skillPath,
+			baseDir: path.dirname(skillPath),
+			source: "test",
+			hide: true,
+		};
+		const host = { skillCommands: new Map([["skill:implement", skill]]), session };
+		await submitCliPrompt(host, "/skill:implement fix HWINFCI-10640", { streamingBehavior: "steer" });
+		await submitCliPrompt(host, "Explain the change", { streamingBehavior: "steer" });
+
+		expect(observedTurns[0]?.texts.join("\n")).toContain("SKILL BODY MARKER 16506");
+		expect(observedTurns[0]?.texts.join("\n")).toContain("fix HWINFCI-10640");
+		expect(observedTurns[0]?.texts.join("\n")).not.toContain("/skill:implement");
+		expect(observedTurns[1]?.texts).toContain("Explain the change");
+		expect(
+			session.sessionManager
+				.getEntries()
+				.some(
+					entry =>
+						entry.type === "custom_message" &&
+						entry.customType === SKILL_PROMPT_MESSAGE_TYPE &&
+						entry.attribution === "user",
+				),
+		).toBe(true);
 	});
 });

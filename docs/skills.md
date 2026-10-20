@@ -152,9 +152,9 @@ When no tool metadata is supplied, the prompt builder uses the presence of `read
 
 Task tool subagents receive the session's discovered/provided skills list via normal session creation; there is no per-task skill pinning override.
 
-### Interactive `/skill:<name>` commands
+### User-invoked `/skill:<name>` commands
 
-If `skills.enableSkillCommands` is true, interactive mode registers one slash command per discovered skill.
+If `skills.enableSkillCommands` is not false, interactive mode registers one slash command per discovered skill. A CLI positional prompt such as `omp "/skill:implement fix the bug"` (including `-p` and `--mode json`) expands the same skill before sending it to the model; this also applies to a prompt combined with an `@file` attachment and to later positional messages.
 
 `/skill:<name> [args]` behavior:
 
@@ -164,11 +164,11 @@ If `skills.enableSkillCommands` is true, interactive mode registers one slash co
 - reads the skill file directly from `filePath`
 - strips frontmatter
 - wraps the body with skill name, base directory, and optional user arguments, then injects it as a custom message
-- delivery mode follows the **submission keybinding**:
+- interactive-editor delivery mode follows the **submission keybinding**:
   - **Enter** → invokes the skill on the `steer` queue while streaming (matches free-text Enter, which also steers), or as a normal idle prompt when the agent is not streaming
   - **Ctrl+Q / Ctrl+Enter** (default `app.message.followUp` bindings) → invokes the skill on the `followUp` queue while streaming, or as a normal idle prompt when the agent is not streaming
 
-There is no flag, mode-selector, or frontmatter knob to override delivery mode — the keybinding _is_ the choice, identical to free-text routing during streaming. Both submission paths dispatch through `#invokeSkillCommand` in `input-controller.ts`, which delegates to `invokeSkillCommandFromText` in `src/modes/skill-command.ts`.
+In the interactive editor, there is no flag, mode-selector, or frontmatter knob to override delivery mode — the keybinding _is_ the choice, identical to free-text routing during streaming. Both editor submission paths dispatch through `#invokeSkillCommand` in `input-controller.ts`, which delegates to `invokeSkillCommandFromText` in `src/modes/skill-command.ts`.
 
 Invoked skill content is identified by invocation kind, each with its own prompt template (in `src/prompts/skills/`, rendered by `buildSkillPromptMessage` in `src/extensibility/skills.ts`):
 
