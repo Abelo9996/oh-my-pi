@@ -1,8 +1,8 @@
 /**
  * Contract: a `vibe_send` that races the end of a worker's turn never strands
- * the worker. A steer the worker is still answering when its run returns is
- * waited out before the turn settles, and a message sent while the turn is
- * aborting is delivered as the next turn (#16490).
+ * the worker. A continuation the worker is still streaming when its run returns
+ * is waited out before the turn settles, and a message sent while the turn is
+ * aborting or settling is delivered as the next turn (#16490).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -80,29 +80,36 @@ describe("vibe turn settlement around a late steer", () => {
 		return { registry, spawned, release: () => release.resolve() };
 	}
 
-	it("keeps a worker that is still answering a steer at run end resumable", async () => {
+	it("waits out a continuation still streaming at run end and runs a message sent meanwhile as the next turn", async () => {
 		const waiting = Promise.withResolvers<void>();
 		const idle = Promise.withResolvers<void>();
+		const steer = vi.fn(async () => {});
 		const live: Partial<AgentSession> = {
 			isStreaming: true,
+			steer,
 			waitForIdle: () => {
 				waiting.resolve();
 				return idle.promise;
 			},
 		};
 		const { registry, spawned, release } = await spawnWorker(live, "running");
+		const followUp = Promise.withResolvers<FollowUpTurnOptions>();
+		vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			followUp.resolve(options);
+			return resultFor(options);
+		});
 		release();
 		const turn = manager.getJob(spawned.jobId)?.promise;
-		// The run has returned; the worker's steered continuation finishes afterwards.
+		// The run has returned; the worker's continuation finishes afterwards.
 		await Promise.race([waiting.promise, turn]);
+		const sent = await registry.send(parent, { session: spawned.id, message: "during settle" });
 		AgentRegistry.global().setStatus(spawned.id, "idle");
 		idle.resolve();
 		await turn;
 
-		vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockImplementation(async options => resultFor(options));
-		const outcome = await registry.send(parent, { session: spawned.id, message: "next task" });
-
-		expect(outcome.mode).toBe("turn");
+		expect(sent.mode).toBe("queued");
+		expect((await followUp.promise).message).toBe("during settle");
+		expect(steer).not.toHaveBeenCalled();
 	});
 
 	it("delivers a message sent while the turn is aborting as the next turn", async () => {

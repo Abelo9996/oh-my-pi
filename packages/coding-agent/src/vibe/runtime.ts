@@ -131,6 +131,11 @@ interface VibeTurn {
 	trace: VibeTraceEntry[];
 	/** Total completed tool calls (trace may be narrower than this). */
 	toolCount: number;
+	/**
+	 * The run returned but the worker is still streaming a continuation this
+	 * turn does not drive; `vibe_send` queues instead of steering into it.
+	 */
+	settling?: boolean;
 }
 
 interface VibeRecord {
@@ -906,9 +911,11 @@ export class VibeSessionRegistry {
 
 		if (record.turn) {
 			const live = registered?.session;
-			// An aborting turn takes no more steering: a steer queued now replays
-			// after the abort as a turn no job observes. Queue it for the next turn.
-			if (live?.isStreaming && !live.isAborting) {
+			// Steer only into the run this turn drives. An aborting run takes no
+			// more steering (a steer queued now replays after the abort as a turn no
+			// job observes), and a settling turn is waiting out such a continuation.
+			// Both queue for the next turn instead.
+			if (live?.isStreaming && !live.isAborting && !record.turn.settling) {
 				await live.steer(message, undefined, { attribution: "agent" });
 				record.lastActivityAt = Date.now();
 				return { id: record.id, mode: "steered" };
@@ -1402,16 +1409,10 @@ export class VibeSessionRegistry {
 								subagentEventBus: session.subagentEventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
 							});
-					// A steer that landed while the run was ending is replayed by the
-					// worker as a continuation this turn did not drive. Settle after
-					// it: judged mid-stream, the still-`running` ref reads as an
-					// unrecoverable worker (#16490).
-					const worker = this.#registeredAgent(record)?.session;
-					if (worker) await untilAborted(signal, () => worker.waitForIdle());
-					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
+					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result, signal);
 				} catch (error) {
 					if (error instanceof VibeTurnError) throw error;
-					await this.#finishTurn(session, manager, record, ownJobId);
+					await this.#finishTurn(session, manager, record, ownJobId, signal);
 					const reason = error instanceof Error ? error.message : String(error);
 					record.lastActivity = firstLine(`turn failed: ${reason}`);
 					throw new VibeTurnError(
@@ -1432,7 +1433,24 @@ export class VibeSessionRegistry {
 		manager: AsyncJobManager,
 		record: VibeRecord,
 		settledJobId: string,
+		signal: AbortSignal,
 	): Promise<void> {
+		if (!record.killed && !record.suspended) {
+			// A message injected as the run ended (an inbound peer message, an
+			// advisor note) can leave the worker streaming a continuation. Judged
+			// mid-stream, its still-`running` ref reads as an unrecoverable worker
+			// (#16490): wait it out first.
+			const continuing = this.#registeredAgent(record);
+			const live = continuing?.status === "running" ? continuing.session : undefined;
+			if (live?.isStreaming) {
+				if (record.turn) record.turn.settling = true;
+				try {
+					await untilAborted(signal, () => live.waitForIdle());
+				} catch {
+					// Cancelled (kill, shutdown): judge the worker as it stands.
+				}
+			}
+		}
 		record.lastJobId = settledJobId;
 		record.turn = undefined;
 		record.live = undefined;
@@ -1484,8 +1502,9 @@ export class VibeSessionRegistry {
 		settledJobId: string,
 		turnIndex: number,
 		result: SingleResult,
+		signal: AbortSignal,
 	): Promise<string> {
-		await this.#finishTurn(session, manager, record, settledJobId);
+		await this.#finishTurn(session, manager, record, settledJobId, signal);
 		const failed = result.exitCode !== 0 || result.aborted === true;
 		const status = result.aborted ? "aborted" : failed ? "failed" : "completed";
 		record.lastActivity = firstLine(
