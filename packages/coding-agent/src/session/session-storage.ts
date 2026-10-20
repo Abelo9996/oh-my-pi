@@ -207,10 +207,9 @@ export interface SessionStorage {
 	hasAssistantTurn?(path: string): Promise<boolean>;
 	/**
 	 * First complete `message` record with a user role, read on line
-	 * boundaries past any bounded head window and stopping at the first
-	 * assistant record. Lets listings preview a prompt that follows large
-	 * leading entries (memory recall, attachments). Optional: listings on
-	 * backends without it keep the prefix-only preview.
+	 * boundaries past any bounded head window. Lets listings preview a prompt
+	 * that follows large leading entries (memory recall, attachments).
+	 * Optional: listings on backends without it keep the prefix-only preview.
 	 */
 	findFirstUserMessageLine?(path: string): Promise<string | undefined>;
 	writeText(path: string, content: string): Promise<void>;

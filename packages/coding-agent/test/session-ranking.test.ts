@@ -161,6 +161,26 @@ describe("session picker preview", () => {
 		const sessions = await listSessions(sessionDir, storage);
 		expect(sessions[0]?.firstMessage).toBe("Explain this architecture");
 	});
+
+	it("finds a user prompt that follows the first assistant reply", async () => {
+		// `/skill:<name>` opens with a custom_message, so the assistant replies
+		// before the first `message` record with a user role.
+		const storage = new MemorySessionStorage();
+		const sessionDir = "/sessions/project";
+		storage.writeTextSync(
+			`${sessionDir}/skill.jsonl`,
+			[
+				JSON.stringify({ type: "session", id: "skill", cwd: "/repo", timestamp: "2026-10-20T00:00:00Z" }),
+				JSON.stringify({ type: "custom_message", customType: "skill-prompt", content: "x".repeat(8000) }),
+				JSON.stringify({ type: "message", message: { role: "assistant", content: "Done", stopReason: "stop" } }),
+				JSON.stringify({ type: "message", message: { role: "user", content: "Now update the changelog" } }),
+				"",
+			].join("\n"),
+		);
+
+		const sessions = await listSessions(sessionDir, storage);
+		expect(sessions[0]?.firstMessage).toBe("Now update the changelog");
+	});
 });
 
 describe("rankSessionSearchMatches", () => {

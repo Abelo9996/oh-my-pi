@@ -411,15 +411,17 @@ export function isAssistantMessageLine(line: string): boolean {
 }
 
 /**
- * Find the first complete user message record, stopping at the first assistant
- * record: a prompt that opens the conversation always precedes the first reply,
- * so the scan never reads past it.
+ * Find the first complete user message record. Skips the JSON parse for lines
+ * that cannot be one, so large leading entries (memory recall, attachments)
+ * cost a substring check. Does not stop at an assistant record: a session
+ * opened by a `custom_message` (e.g. `/skill:<name>`) gets a reply before its
+ * first user message.
  */
 export async function findFirstUserMessageLine(
 	lines: AsyncIterable<string> | Iterable<string>,
 ): Promise<string | undefined> {
 	for await (const line of lines) {
-		if (!line.includes('"message"') || !(line.includes('"user"') || line.includes('"assistant"'))) continue;
+		if (!line.includes('"message"') || !line.includes('"user"')) continue;
 		let entry: unknown;
 		try {
 			entry = JSON.parse(line);
@@ -428,7 +430,6 @@ export async function findFirstUserMessageLine(
 		}
 		if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) continue;
 		if (entry.message.role === "user") return line;
-		if (entry.message.role === "assistant") return undefined;
 	}
 	return undefined;
 }
