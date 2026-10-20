@@ -38,6 +38,8 @@ export interface PrintModeOptions {
 	initialMessage?: string;
 	/** Images to attach to the initial message */
 	initialImages?: ImageContent[];
+	/** Where the positional prompt begins after stdin and @file text. */
+	initialCommandStart?: number;
 	/** If true, include thinking blocks in text output */
 	printThoughts?: boolean;
 	/** Whether the caller explicitly started the headless plan flow. */
@@ -133,7 +135,15 @@ async function runPrintModeCore(
 	options: PrintModeOptions,
 	signalTeardownActive: () => boolean,
 ): Promise<number> {
-	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
+	const {
+		mode,
+		messages = [],
+		initialMessage,
+		initialImages,
+		initialCommandStart,
+		printThoughts,
+		planYolo = false,
+	} = options;
 	session.disableStopTimeTodoReminders();
 
 	// process.stdout.write is fire-and-forget: a large final record (e.g. a
@@ -291,7 +301,7 @@ async function runPrintModeCore(
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		await logger.time("print:prompt:initial", () =>
-			submitCliPrompt(cliPromptHost, initialMessage, { images: initialImages }),
+			submitCliPrompt(cliPromptHost, initialMessage, { images: initialImages, commandStart: initialCommandStart }),
 		);
 	}
 

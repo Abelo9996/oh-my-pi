@@ -631,6 +631,7 @@ async function runInteractiveMode(
 	subagentEventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
+	initialCommandStart?: number,
 	joinLink?: string,
 	startDeferredStartupWork?: () => void,
 	startupLease?: ComposerLease,
@@ -805,7 +806,11 @@ async function runInteractiveMode(
 			// before this dispatch runs (the composer accepts input as soon as the
 			// first turn starts): the CLI message queues into that turn instead of
 			// dying with AgentBusyError.
-			await submitCliPrompt(cliPromptHost, initialMessage, { images: initialImages, streamingBehavior: "steer" });
+			await submitCliPrompt(cliPromptHost, initialMessage, {
+				images: initialImages,
+				streamingBehavior: "steer",
+				commandStart: initialCommandStart,
+			});
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
@@ -2443,7 +2448,11 @@ export async function runRootCommand(
 							}),
 						)
 					: undefined;
-			const { initialMessage, initialImages } = buildInitialMessage({
+			const {
+				initialMessage,
+				initialImages,
+				commandStart: initialCommandStart,
+			} = buildInitialMessage({
 				parsed: initialArgs,
 				fileText: processedFiles?.text,
 				fileImages: processedFiles?.images,
@@ -2702,6 +2711,7 @@ export async function runRootCommand(
 						subagentEventBus,
 						initialMessage,
 						initialImages,
+						initialCommandStart,
 						parsedArgs.join,
 						startDeferredStartupWork,
 						startupLease,
@@ -2724,6 +2734,7 @@ export async function runRootCommand(
 					messages: initialArgs.messages,
 					initialMessage,
 					initialImages,
+					initialCommandStart,
 					printThoughts: initialArgs.printThoughts,
 					planYolo: parsedArgs.planYolo,
 					mcpManager,

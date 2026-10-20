@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { buildInitialMessage } from "@oh-my-pi/pi-coding-agent/cli/initial-message";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -19,6 +21,16 @@ import {
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+
+function cliArgs(messages: string[]): Args {
+	return {
+		messages,
+		fileArgs: [],
+		unknownFlags: new Map(),
+		unrecognizedFlags: [],
+		invalidFlagValues: [],
+	};
+}
 
 type ObservedSkillTurn = {
 	texts: string[];
@@ -165,5 +177,70 @@ describe("AgentSession skill prompt keyword steering", () => {
 						entry.attribution === "user",
 				),
 		).toBe(true);
+	});
+
+	it("does not invoke a skill mentioned only in attached or piped text", async () => {
+		const implementPath = path.join(tempDir.path(), "implement", "SKILL.md");
+		const reviewPath = path.join(tempDir.path(), "review", "SKILL.md");
+		await Bun.write(implementPath, "---\nname: implement\n---\nIMPLEMENT SKILL BODY\n");
+		await Bun.write(reviewPath, "---\nname: review\n---\nREVIEW SKILL BODY\n");
+		const skillCommands = new Map<string, Skill>([
+			[
+				"skill:implement",
+				{
+					name: "implement",
+					description: "",
+					filePath: implementPath,
+					baseDir: path.dirname(implementPath),
+					source: "test",
+				},
+			],
+			[
+				"skill:review",
+				{
+					name: "review",
+					description: "",
+					filePath: reviewPath,
+					baseDir: path.dirname(reviewPath),
+					source: "test",
+				},
+			],
+		]);
+		const host = { skillCommands, session };
+		const fileText = '<file name="notes.md">\nExample: /skill:implement is documented here.\n</file>\n';
+		const attached = buildInitialMessage({ parsed: cliArgs(["summarize this"]), fileText });
+		if (attached.initialMessage === undefined) throw new Error("expected attached prompt");
+		await submitCliPrompt(host, attached.initialMessage, { commandStart: attached.commandStart });
+		expect(observedTurns[0]?.texts).toContain(attached.initialMessage);
+		expect(
+			session.sessionManager
+				.getEntries()
+				.some(entry => entry.type === "custom_message" && entry.customType === SKILL_PROMPT_MESSAGE_TYPE),
+		).toBe(false);
+
+		const explicit = buildInitialMessage({
+			parsed: cliArgs(["/skill:review check this"]),
+			fileText,
+			stdinContent: "Quoted /skill:implement from stdin",
+		});
+		if (explicit.initialMessage === undefined) throw new Error("expected attached prompt");
+		await submitCliPrompt(host, explicit.initialMessage, { commandStart: explicit.commandStart });
+		const secondTurn = observedTurns[1]?.texts.join("\n");
+		expect(secondTurn).toContain("REVIEW SKILL BODY");
+		expect(secondTurn).toContain(fileText);
+		expect(secondTurn).toContain("Quoted /skill:implement from stdin");
+		expect(secondTurn).not.toContain("IMPLEMENT SKILL BODY");
+		const piped = buildInitialMessage({
+			parsed: cliArgs([]),
+			stdinContent: "Discuss /skill:implement as plain text",
+		});
+		if (piped.initialMessage === undefined) throw new Error("expected piped prompt");
+		await submitCliPrompt(host, piped.initialMessage, { commandStart: piped.commandStart });
+		expect(observedTurns[2]?.texts).toContain(piped.initialMessage);
+		expect(
+			session.sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "custom_message" && entry.customType === SKILL_PROMPT_MESSAGE_TYPE),
+		).toHaveLength(1);
 	});
 });

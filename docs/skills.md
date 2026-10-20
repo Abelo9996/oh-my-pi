@@ -154,7 +154,7 @@ Task tool subagents receive the session's discovered/provided skills list via no
 
 ### User-invoked `/skill:<name>` commands
 
-If `skills.enableSkillCommands` is not false, interactive mode registers one slash command per discovered skill. A CLI positional prompt such as `omp "/skill:implement fix the bug"` (including `-p` and `--mode json`) expands the same skill before sending it to the model; this also applies to a prompt combined with an `@file` attachment and to later positional messages.
+If `skills.enableSkillCommands` is not false, interactive mode registers one slash command per discovered skill. A CLI positional prompt such as `omp "/skill:implement fix the bug"` (including `-p` and `--mode json`) expands the same skill before sending it to the model; this also applies to a prompt combined with an `@file` attachment and to later positional messages. Only positional text selects a skill: `/skill:` tokens in attached files or piped input remain context, not invocations.
 
 `/skill:<name> [args]` behavior:
 

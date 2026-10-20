@@ -85,16 +85,34 @@ export async function buildSkillCommandPrompt(
 	};
 }
 
-/** Dispatch a CLI prompt through skill expansion or the normal session prompt pipeline. */
+/** Dispatch a CLI prompt using only positional text for skill selection; attached text stays in the turn. */
 export async function submitCliPrompt(
 	ctx: Pick<SkillCommandHost, "skillCommands"> & {
 		session: Pick<AgentSession, "prompt" | "promptCustomMessage">;
 	},
 	text: string,
-	options?: { images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" },
+	options?: { images?: ImageContent[]; streamingBehavior?: "steer" | "followUp"; commandStart?: number },
 ): Promise<void> {
-	const skillPrompt = await buildSkillCommandPrompt(ctx, text, options?.streamingBehavior ?? "steer", options?.images);
+	const commandStart = options?.commandStart ?? 0;
+	const commandText = commandStart > 0 ? text.slice(commandStart) : text;
+	const skillPrompt = await buildSkillCommandPrompt(
+		ctx,
+		commandText,
+		options?.streamingBehavior ?? "steer",
+		options?.images,
+	);
 	if (skillPrompt) {
+		if (commandStart > 0) {
+			const prefix = text.slice(0, commandStart);
+			const content = skillPrompt.message.content;
+			if (typeof content === "string") {
+				skillPrompt.message.content = `${content}\n${prefix}`;
+			} else {
+				const first = content[0];
+				if (first?.type !== "text") throw new Error("Skill prompt must start with text");
+				first.text = `${first.text}\n${prefix}`;
+			}
+		}
 		await ctx.session.promptCustomMessage(skillPrompt.message, skillPrompt.options);
 		return;
 	}

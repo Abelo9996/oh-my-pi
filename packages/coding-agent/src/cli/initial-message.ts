@@ -11,12 +11,11 @@ export interface InitialMessageInput {
 export interface InitialMessageResult {
 	initialMessage?: string;
 	initialImages?: ImageContent[];
+	/** Offset where the first positional message begins; preceding text is attachment or stdin data. */
+	commandStart?: number;
 }
 
-/**
- * Combine stdin content, @file text, and the first CLI message into a single
- * initial prompt for non-interactive mode.
- */
+/** Combine startup prompt sources while retaining where positional text begins. */
 export function buildInitialMessage({
 	parsed,
 	fileText,
@@ -35,9 +34,9 @@ export function buildInitialMessage({
 		body += fileText;
 	}
 
-	if (parsed.messages.length > 0) {
-		body += parsed.messages[0];
-		parsed.messages.shift();
+	const commandText = parsed.messages.shift();
+	if (commandText !== undefined) {
+		body += commandText;
 	}
 
 	const initialMessage =
@@ -53,6 +52,7 @@ export function buildInitialMessage({
 
 	return {
 		initialMessage,
+		commandStart: (initialMessage?.length ?? 0) - (commandText?.length ?? 0),
 		initialImages: fileImages && fileImages.length > 0 ? fileImages : undefined,
 	};
 }
