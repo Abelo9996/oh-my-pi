@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed background fact extraction storing only the first 5 facts of a plain-line extractor answer; it now keeps up to 20, matching JSON answers ([#16377](https://github.com/can1357/oh-my-pi/pull/16377) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.11.2] - 2026-10-16
 
 ### Fixed

@@ -2,9 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced native Git diff allocation overhead ([#16349](https://github.com/can1357/oh-my-pi/pull/16349) by [@kyle-elliott](https://github.com/kyle-elliott))
+- Reduced native memory-reranking allocations when candidate text contains repeated words ([#16348](https://github.com/can1357/oh-my-pi/pull/16348) by [@kyle-elliott](https://github.com/kyle-elliott))
+- Reduced allocation overhead when collecting directory grep results, including paginated searches ([#16226](https://github.com/can1357/oh-my-pi/pull/16226) by [@kyle-elliott](https://github.com/kyle-elliott))
+
+## [18.12.3] - 2026-10-19
+
 ### Added
 
 - Added a `hiddenContent` option to `htmlToMarkdown`: `"drop"` (default) omits hidden content, `"reachable"` keeps content the page can reveal such as collapsed sections and inactive tab panels, and `"all"` also keeps `<template>` and `<noscript>` content; other values throw ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
+- Added `normalizePtyDimensions(cols, rows)` to size screen emulators with the same effective dimensions as native PTY sessions ([#16192](https://github.com/can1357/oh-my-pi/pull/16192) by [@C-W-Z](https://github.com/C-W-Z))
+- Added `LineMatcher`, a native multi-pattern line matcher: `matchLines` returns a batch's matches column-wise as typed arrays (line, pattern, and the UTF-16 span of each named group in `groupNames()` order)
+- Added `PipeStreams` and the `streams` option of `Shell.run`: every pipe the run opens keeps a readable copy of its newest megabyte, so a stage's output stays visible while a later stage (`| tail`) holds it back
 
 ### Fixed
 
@@ -17,12 +28,8 @@
 
 ### Added
 
-- Added `normalizePtyDimensions(cols, rows)` to size screen emulators with the same effective dimensions as native PTY sessions ([#16192](https://github.com/can1357/oh-my-pi/pull/16192) by [@C-W-Z](https://github.com/C-W-Z))
 - Added a `refuseMenu` option to `click`, `drag` and `holdMouse`: a macOS background left click on a menu button or popup button, or a drag or hold starting on one, throws `BackgroundUnavailable` before anything is sent ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a `returnFocus` option for window input with `takeover`: on macOS the takeover hands focus back to your app even if you clicked meanwhile, and only a third app you switched to keeps focus ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
-
-- Added `LineMatcher`, a native multi-pattern line matcher: `matchLines` returns a batch's matches column-wise as typed arrays (line, pattern, and the UTF-16 span of each named group in `groupNames()` order)
-- Added `PipeStreams` and the `streams` option of `Shell.run`: every pipe the run opens keeps a readable copy of its newest megabyte, so a stage's output stays visible while a later stage (`| tail`) holds it back
 - Added `DesktopSession.axSelectText` (macOS) to select text in an accessibility element's value by UTF-16 range, refusing missing or ambiguous matches and returning the selection read back ([#15175](https://github.com/can1357/oh-my-pi/pull/15175) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a `menu` item path to `click` options and `axPerform`: a macOS click or action that opens a menu chooses that item, submenus included, and leaves no menu open ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `DesktopSession.axType` and `axKeyChord`, which type into or press keys in one accessibility element; on macOS a field that does not report keyboard focus gets nothing and the error names what has focus; on Windows background input goes straight to the element's own control window and refuses a windowless element ([#15563](https://github.com/can1357/oh-my-pi/pull/15563) by [@will-bogusz](https://github.com/will-bogusz))

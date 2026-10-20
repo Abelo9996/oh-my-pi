@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.12.3] - 2026-10-19
+
 ### Changed
 
 - MiniMax `MiniMax-M3.1-Flash` (the launch id) now gets the always-on `low`–`max` thinking the bundled `MiniMax-M3.1-Flash-Preview` rows have, and omits sampling params (`temperature`, `top_p`, `top_k`) it rejects ([#16315](https://github.com/can1357/oh-my-pi/pull/16315) by [@SaladDay](https://github.com/SaladDay))
