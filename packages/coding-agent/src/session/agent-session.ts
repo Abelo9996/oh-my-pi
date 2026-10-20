@@ -2532,7 +2532,7 @@ export class AgentSession implements SettingsScope {
 		if (this.#asyncJobManager && this.#agentId) {
 			const manager = this.#asyncJobManager;
 			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
-				this.#deliverAsyncJobResult(manager, jobId, text, job),
+				this.#inLogContext(() => this.#deliverAsyncJobResult(manager, jobId, text, job)),
 			);
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId),
@@ -2549,6 +2549,14 @@ export class AgentSession implements SettingsScope {
 		// tool_execution_start, and the wrapper's approval gate.
 		this.agent.beforeToolCall = (ctx, signal) => this.#beforeToolCall(ctx, signal);
 		this.agent.providerSessionState = this.#providerSessionState;
+		// Records this session's work writes name it; the getter follows every
+		// re-key (new session, resume, fork, relocation off a contended file).
+		const sessionManager = this.sessionManager;
+		this.agent.logContext = {
+			get sessionId() {
+				return sessionManager.getSessionId();
+			},
+		};
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
 		this.#modelMentions.syncFromBranch();
@@ -6072,7 +6080,6 @@ export class AgentSession implements SettingsScope {
 			this.#observedSessionId = currentSessionId;
 			if (notifyChange) this.#notifySessionChangeCallbacks();
 		}
-		this.agent.logContext = { sessionId: currentSessionId };
 		const sid = this.#activeProviderSessionId(sessionId);
 		this.agent.sessionId = sid;
 		this.agent.setMetadataResolver((provider: string) =>
@@ -12511,7 +12518,8 @@ export class AgentSession implements SettingsScope {
 
 	/** Delivers an IRC message into this recipient session. */
 	deliverIrcMessage(msg: IrcMessage): Promise<"injected" | "woken"> {
-		return this.#irc.deliver(msg);
+		// The sender's context is active here; the delivery is the recipient's work.
+		return this.#inLogContext(() => this.#irc.deliver(msg));
 	}
 
 	/** Recognizes parent IRC steering at message consumption, without promoting queued requests. */
