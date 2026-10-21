@@ -1804,9 +1804,17 @@ export class TernTab implements InProcessRunTab {
 			frame,
 		);
 		const snapshot = postProcessAriaSnapshot(payload.snapshot, opts, payload.hrefs);
-		if (!opts?.diff || frame) return snapshot;
+		if (!opts?.diff) return snapshot;
 		await this.#refreshState();
-		return diffAriaSnapshot(this.#ariaBaselines, ariaSnapshotBaselineKey(selector, opts), this.#url, snapshot);
+		const key = ariaSnapshotBaselineKey(selector, opts);
+		if (!frame) return diffAriaSnapshot(this.#ariaBaselines, key, this.#url, snapshot);
+		const frameUrl = (await this.frames()).find(info => info.id === frame)?.url ?? "";
+		return diffAriaSnapshot(
+			this.#ariaBaselines,
+			JSON.stringify([frame, key]),
+			JSON.stringify([this.#url, frameUrl]),
+			snapshot,
+		);
 	}
 
 	/** axe-core audit of the main document (run in the isolated world). */
@@ -3126,10 +3134,9 @@ export class TernFrame {
 		return await this.#tab.isVisible(selector, this.#path);
 	}
 
-	/** ARIA snapshot of the frame. */
-	async ariaSnapshot(selector?: string, options?: AriaSnapshotOptions): Promise<string> {
-		const snapshot = await this.#tab.ariaSnapshotIn(selector, options, this.#path);
-		return typeof snapshot === "string" ? snapshot : JSON.stringify(snapshot);
+	/** ARIA snapshot of the frame; `diff` returns a revisioned result. */
+	async ariaSnapshot(selector?: string, options?: AriaSnapshotOptions): Promise<string | AriaSnapshotDiffResult> {
+		return await this.#tab.ariaSnapshotIn(selector, options, this.#path);
 	}
 
 	/** Evaluate in the frame's page world. */

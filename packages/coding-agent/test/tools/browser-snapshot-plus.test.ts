@@ -160,6 +160,40 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser snapshot and readable parity", () 
 		}
 	}, 60_000);
 
+	test("revisions frame snapshots independently across reacquired handles", async () => {
+		const invoke = createHost();
+		const name = `snapshot-frame-diff-${crypto.randomUUID()}`;
+		const content = `${Array.from({ length: 24 }, (_, index) => `<p>Frame content ${index}.</p>`).join("")}<button>Run cell</button>`;
+		const html = `<iframe id="first" srcdoc='${content}'></iframe><iframe id="second" srcdoc='${content}'></iframe>`;
+		await invoke({ action: "open", name, url: `data:text/html,${encodeURIComponent(html)}` });
+		try {
+			const snapshot = async (frame: string) =>
+				valueFrom<{ status: string; revision: number; snapshot?: string; delta?: string }>(
+					await invoke({
+						action: "run",
+						name,
+						code: `return await (await tab.frame(${JSON.stringify(frame)})).ariaSnapshot(undefined, { diff: true });`,
+					}),
+				);
+			const first = await snapshot("#first");
+			expect(first).toMatchObject({ status: "full", revision: 1 });
+			expect(first.snapshot).toContain("Frame content 0.");
+			expect(await snapshot("#first")).toMatchObject({ status: "unchanged", revision: 1 });
+			expect(await snapshot("#second")).toMatchObject({ status: "full", revision: 1 });
+			await invoke({
+				action: "run",
+				name,
+				code: 'await (await tab.frame("#first")).evaluate(() => { document.querySelector("button").textContent = "Run all cells"; });',
+			});
+			const changed = await snapshot("#first");
+			expect(changed).toMatchObject({ status: "delta", revision: 2, baseRevision: 1 });
+			expect(changed.delta).toContain("Run all cells");
+			expect(await snapshot("#second")).toMatchObject({ status: "unchanged", revision: 1 });
+		} finally {
+			await invoke({ action: "close", name, kill: true }).catch(() => undefined);
+		}
+	}, 60_000);
+
 	test("masks password field values in ARIA snapshots like observe() does", async () => {
 		const invoke = createHost();
 		const name = `snapshot-password-${crypto.randomUUID()}`;
