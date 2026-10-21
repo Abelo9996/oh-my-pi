@@ -560,6 +560,8 @@ export type PageSource = "relay" | "connected";
 export interface PageTarget {
 	/** The page URL, as `app.target` takes it (a URL/title substring). */
 	target: string;
+	/** The CDP target id; tells apart pages that share a URL. Omitted when `/json` reports none. */
+	id?: string;
 	title: string;
 	url: string;
 	/** Whether it is the active tab of its Chrome window; only the relay reports it. */
@@ -581,13 +583,14 @@ export function pageTargets(entries: readonly unknown[]): PageTarget[] {
 		};
 		if (!isAdoptableRelayEntry(entry)) continue;
 		const target: PageTarget = { target: entry.url, title: entry.title, url: entry.url };
+		if (entry.id) target.id = entry.id;
 		if (entry.active !== undefined) target.shown = entry.active === "true";
 		targets.push(target);
 	}
 	return targets;
 }
 
-/** The `browser.targets()` listing of `/json` pages: `- "Title" https://… (active)`. */
+/** The `browser.targets()` listing of `/json` pages: `- "Title" https://… (id …, active)`. */
 export function describePageTargets(targets: readonly PageTarget[], source: PageSource): string {
 	if (targets.length === 0) {
 		return source === "relay"
@@ -595,7 +598,10 @@ export function describePageTargets(targets: readonly PageTarget[], source: Page
 			: "The app.cdp_url browser lists no pages to adopt.";
 	}
 	const list = targets
-		.map(entry => `- ${JSON.stringify(entry.title)} ${entry.url}${entry.shown ? " (active)" : ""}`)
+		.map(entry => {
+			const notes = [entry.id ? `id ${entry.id}` : null, entry.shown ? "active" : null].filter(Boolean);
+			return `- ${JSON.stringify(entry.title)} ${entry.url}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`;
+		})
 		.join("\n");
 	const heading = source === "relay" ? "Chrome pages via the relay" : "Pages of the app.cdp_url browser";
 	return `${heading} (adopt one with app.target set to its URL or a title substring):\n${list}`;

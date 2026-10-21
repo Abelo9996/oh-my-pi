@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `browser.targets({ app: { cdp_url } })` refusing to list a debugging-port browser's pages; it now lists each page `app.target` can adopt ([#16620](https://github.com/can1357/oh-my-pi/issues/16620))
+- Fixed `browser.targets({ app: { cdp_url } })` refusing to list a debugging-port browser's pages; it now lists each page `app.target` can adopt, with its CDP target `id` ([#16620](https://github.com/can1357/oh-my-pi/issues/16620))
 
 ## [18.12.5] - 2026-10-21
 

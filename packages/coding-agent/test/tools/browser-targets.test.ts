@@ -156,7 +156,7 @@ describe("browser targets elsewhere", () => {
 });
 
 describe("browser targets on a CDP endpoint", () => {
-	it("lists the pages the endpoint's /json reports, skipping internal ones", async () => {
+	it("lists each page the endpoint's /json reports with its CDP id, skipping internal ones", async () => {
 		for (const key of ENV_KEYS) delete process.env[key];
 		using server = Bun.serve({
 			port: 0,
@@ -164,7 +164,8 @@ describe("browser targets on a CDP endpoint", () => {
 				new URL(request.url).pathname === "/json"
 					? Response.json([
 							{ id: "A1", type: "page", url: "https://mail.example/", title: "Mail" },
-							{ id: "B2", type: "page", url: "https://docs.example/", title: "Docs" },
+							{ id: "B2", type: "page", url: "about:blank", title: "" },
+							{ id: "B3", type: "page", url: "about:blank", title: "" },
 							{ id: "C3", type: "page", url: "devtools://devtools/bundled/inspector.html", title: "DevTools" },
 							{ id: "D4", type: "service_worker", url: "https://mail.example/sw.js", title: "sw" },
 						])
@@ -176,11 +177,12 @@ describe("browser targets on a CDP endpoint", () => {
 			app: { cdp_url: `http://127.0.0.1:${server.port}/` },
 		});
 		expect(value).toStrictEqual([
-			{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/" },
-			{ target: "https://docs.example/", title: "Docs", url: "https://docs.example/" },
+			{ target: "https://mail.example/", id: "A1", title: "Mail", url: "https://mail.example/" },
+			{ target: "about:blank", id: "B2", title: "", url: "about:blank" },
+			{ target: "about:blank", id: "B3", title: "", url: "about:blank" },
 		]);
 		expect(text).toBe(
-			'Pages of the app.cdp_url browser (adopt one with app.target set to its URL or a title substring):\n- "Mail" https://mail.example/\n- "Docs" https://docs.example/',
+			'Pages of the app.cdp_url browser (adopt one with app.target set to its URL or a title substring):\n- "Mail" https://mail.example/ (id A1)\n- "" about:blank (id B2)\n- "" about:blank (id B3)',
 		);
 	});
 
@@ -196,7 +198,7 @@ describe("browser targets on a CDP endpoint", () => {
 });
 
 describe("pageTargets", () => {
-	it("keeps live, non-internal pages with their URL as the target", () => {
+	it("keeps live, non-internal pages with their URL as the target and their CDP id", () => {
 		const entries = [
 			{ id: "a", type: "page", url: "https://mail.example/", title: "Mail", active: "true", discarded: "false" },
 			{ id: "b", type: "page", url: "https://docs.example/", title: "Docs", active: "false", discarded: "false" },
@@ -204,11 +206,13 @@ describe("pageTargets", () => {
 			{ id: "d", type: "page", url: "devtools://devtools/bundled/inspector.html", title: "DevTools" },
 			{ id: "e", type: "service_worker", url: "https://mail.example/sw.js", title: "sw" },
 			{ id: "f", type: "page", title: "no url" },
+			{ type: "page", url: "https://noid.example/", title: "No id" },
 			"garbage",
 		];
-		expect(pageTargets(entries)).toEqual([
-			{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/", shown: true },
-			{ target: "https://docs.example/", title: "Docs", url: "https://docs.example/", shown: false },
+		expect(pageTargets(entries)).toStrictEqual([
+			{ target: "https://mail.example/", id: "a", title: "Mail", url: "https://mail.example/", shown: true },
+			{ target: "https://docs.example/", id: "b", title: "Docs", url: "https://docs.example/", shown: false },
+			{ target: "https://noid.example/", title: "No id", url: "https://noid.example/" },
 		]);
 	});
 });
@@ -266,12 +270,15 @@ describe("browser targets with the relay", () => {
 		]);
 		const tool = session({ "browser.relayUrl": `http://127.0.0.1:${port}` });
 		const { text, value } = await invoke(tool, { action: "targets", timeout: 10, app: { relay: true } });
+		const ids = Array.isArray(value) ? value.map(entry => (isRecord(entry) ? entry.id : undefined)) : [];
+		expect(ids).toHaveLength(2);
+		expect(new Set(ids).size).toBe(2);
 		expect(value).toEqual([
-			{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/", shown: true },
-			{ target: "https://docs.example/", title: "Docs", url: "https://docs.example/", shown: false },
+			{ target: "https://mail.example/", id: ids[0], title: "Mail", url: "https://mail.example/", shown: true },
+			{ target: "https://docs.example/", id: ids[1], title: "Docs", url: "https://docs.example/", shown: false },
 		]);
 		expect(text).toBe(
-			'Chrome pages via the relay (adopt one with app.target set to its URL or a title substring):\n- "Mail" https://mail.example/ (active)\n- "Docs" https://docs.example/',
+			`Chrome pages via the relay (adopt one with app.target set to its URL or a title substring):\n- "Mail" https://mail.example/ (id ${ids[0]}, active)\n- "Docs" https://docs.example/ (id ${ids[1]})`,
 		);
 	}, 20_000);
 });
