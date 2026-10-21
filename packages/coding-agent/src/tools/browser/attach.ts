@@ -663,12 +663,15 @@ async function pickConnectedTarget(
 ): Promise<Page | null> {
 	const pages = entries.filter(entry => entry.type === "page");
 	if (pages.length === 0) return null;
-	if (options.matcher) {
-		const needle = options.matcher.toLowerCase();
-		const selected = pages.find(entry => relayEntryMatches(entry, needle));
+	const matcher = options.matcher;
+	if (matcher) {
+		// An exact CDP target id outranks a URL/title substring that happens to contain it.
+		const needle = matcher.toLowerCase();
+		const selected =
+			pages.find(entry => entry.id === matcher) ?? pages.find(entry => relayEntryMatches(entry, needle));
 		if (!selected) {
-			const summary = pages.map(entry => `- ${entry.title || "(untitled)"}  ${entry.url}`).join("\n");
-			throw new ToolError(`No page target matched ${JSON.stringify(options.matcher)}. Available pages:\n${summary}`);
+			const summary = pages.map(entry => `- ${entry.id}  ${entry.title || "(untitled)"}  ${entry.url}`).join("\n");
+			throw new ToolError(`No page target matched ${JSON.stringify(matcher)}. Available pages:\n${summary}`);
 		}
 		return attachSelectedEntry(browser, targets, selected, options.signal);
 	}

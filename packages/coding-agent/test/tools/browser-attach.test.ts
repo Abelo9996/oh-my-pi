@@ -823,6 +823,21 @@ describe("pickElectronTarget connected CDP path", () => {
 		const error = await rejectionOf(pickElectronTarget(browser, { cdpUrl, matcher: "hung" }));
 		expect((error as Error).message).toContain("https://example.com/hung");
 	});
+
+	it("prefers an exact target id over an earlier URL containing it, and lists ids when nothing matches", async () => {
+		entries = [
+			{ id: "REF", type: "page", title: "Referrer", url: "https://example.com/?from=tab-b" },
+			{ id: "TAB-B", type: "page", title: "Target", url: "https://example.com/b" },
+		];
+		const target = fakePage({ url: entries[1]!.url, title: "Target" });
+		const browser = makeBrowser([
+			makeTarget("REF", fakePage({ url: entries[0]!.url, title: "Referrer" })).target,
+			makeTarget("TAB-B", target).target,
+		]);
+		expect(await pickElectronTarget(browser, { cdpUrl, matcher: "TAB-B" })).toBe(target);
+		const error = await rejectionOf(pickElectronTarget(browser, { cdpUrl, matcher: "missing" }));
+		expect((error as Error).message).toContain("- TAB-B  Target  https://example.com/b");
+	});
 });
 
 describe("pickElectronTarget relay path", () => {
