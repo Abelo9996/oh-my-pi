@@ -550,19 +550,25 @@ function isAdoptableRelayEntry(entry: RelayJsonEntry): boolean {
 	);
 }
 
-/** One of the user's Chrome tabs as `browser.targets()` lists it: `app.target` adopts it by `target` (its URL). */
-export interface RelayTarget {
+/**
+ * Where `browser.targets()` lists pages from a `/json` endpoint: the omp relay (the user's Chrome tabs), or a
+ * browser's own CDP endpoint (`app.cdp_url` or the `browser.cdpUrl` setting).
+ */
+export type PageSource = "relay" | "connected";
+
+/** One page as `browser.targets()` lists it from `/json`: `app.target` adopts it by `target` (its URL). */
+export interface PageTarget {
 	/** The page URL, as `app.target` takes it (a URL/title substring). */
 	target: string;
 	title: string;
 	url: string;
-	/** Whether it is the active tab of its Chrome window. */
-	shown: boolean;
+	/** Whether it is the active tab of its Chrome window; only the relay reports it. */
+	shown?: boolean;
 }
 
-/** The adoptable pages among relay `/json` entries; malformed, discarded, and internal entries are skipped. */
-export function relayTargets(entries: readonly unknown[]): RelayTarget[] {
-	const targets: RelayTarget[] = [];
+/** The adoptable pages among `/json` entries; malformed, discarded, and internal entries are skipped. */
+export function pageTargets(entries: readonly unknown[]): PageTarget[] {
+	const targets: PageTarget[] = [];
 	for (const raw of entries) {
 		if (!isRecord(raw) || raw.type !== "page" || typeof raw.url !== "string") continue;
 		const entry: RelayJsonEntry = {
@@ -574,25 +580,35 @@ export function relayTargets(entries: readonly unknown[]): RelayTarget[] {
 			discarded: typeof raw.discarded === "string" ? raw.discarded : undefined,
 		};
 		if (!isAdoptableRelayEntry(entry)) continue;
-		targets.push({ target: entry.url, title: entry.title, url: entry.url, shown: entry.active === "true" });
+		const target: PageTarget = { target: entry.url, title: entry.title, url: entry.url };
+		if (entry.active !== undefined) target.shown = entry.active === "true";
+		targets.push(target);
 	}
 	return targets;
 }
 
-/** The `browser.targets()` listing of relay pages: `- "Title" https://… (active)`. */
-export function describeRelayTargets(targets: readonly RelayTarget[]): string {
-	if (targets.length === 0) return "The relay lists no Chrome pages to adopt.";
+/** The `browser.targets()` listing of `/json` pages: `- "Title" https://… (active)`. */
+export function describePageTargets(targets: readonly PageTarget[], source: PageSource): string {
+	if (targets.length === 0) {
+		return source === "relay"
+			? "The relay lists no Chrome pages to adopt."
+			: "The app.cdp_url browser lists no pages to adopt.";
+	}
 	const list = targets
 		.map(entry => `- ${JSON.stringify(entry.title)} ${entry.url}${entry.shown ? " (active)" : ""}`)
 		.join("\n");
-	return `Chrome pages via the relay (adopt one with app.target set to its URL or a title substring):\n${list}`;
+	const heading = source === "relay" ? "Chrome pages via the relay" : "Pages of the app.cdp_url browser";
+	return `${heading} (adopt one with app.target set to its URL or a title substring):\n${list}`;
 }
 
-/** The pages of the user's Chrome the relay at `relayJson` can adopt. */
-export async function listRelayTargets(relayJson: string, signal?: AbortSignal): Promise<RelayTarget[]> {
-	const entries = await fetchRelayEntries(relayJson, signal);
-	if (!entries) throw new ToolError(`omp browser relay at ${relayJson} did not list its pages (GET /json failed).`);
-	return relayTargets(entries);
+/** The pages `app.target` can adopt from the `/json` endpoint at `cdpUrl`. */
+export async function listPageTargets(cdpUrl: string, source: PageSource, signal?: AbortSignal): Promise<PageTarget[]> {
+	const entries = await fetchRelayEntries(cdpUrl, signal);
+	if (!entries) {
+		const owner = source === "relay" ? "omp browser relay" : "Browser CDP endpoint";
+		throw new ToolError(`${owner} at ${cdpUrl} did not list its pages (GET /json failed).`);
+	}
+	return pageTargets(entries);
 }
 
 function relayEntryMatches(entry: RelayJsonEntry, needle: string): boolean {

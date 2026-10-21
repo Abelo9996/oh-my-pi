@@ -5,13 +5,14 @@ import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
-import { describeRelayTargets, listRelayTargets, type RelayTarget, resolveSpawnArgs } from "./browser/attach";
+import { describePageTargets, listPageTargets, type PageTarget, resolveSpawnArgs } from "./browser/attach";
 import {
 	acquireBrowser,
 	browserKey,
 	type BrowserKind,
 	type BrowserKindTag,
 	holdBrowser,
+	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "./browser/registry";
 import { ensureChromiumExecutable } from "./browser/launch";
@@ -552,9 +553,10 @@ async function openOnKind(
 
 /**
  * The user's own pages `app.target` can adopt, from the browser an open with
- * `app.target` would drive: a Tern window's browser blocks, or the relay's
- * Chrome pages. The browser is acquired as an open does (the loopback relay
- * starts on demand) and released again.
+ * `app.target` would drive: a Tern window's browser blocks, the relay's Chrome
+ * pages, or the pages a CDP endpoint (`app.cdp_url`) lists. Tern and relay
+ * browsers are acquired as an open does (the loopback relay starts on demand)
+ * and released again; a CDP endpoint lists its pages over HTTP alone.
  */
 async function listTargets(
 	session: ToolSession,
@@ -565,25 +567,31 @@ async function listTargets(
 ): Promise<AgentToolResult<unknown>> {
 	// Resolve as an open naming a target: inside Tern that selects Tern even when the `browser.tern` setting is off.
 	const kind = resolveBrowserKind({ ...params, app: { ...params.app, target: params.app?.target ?? "" } }, session);
-	if (kind.kind !== "tern" && kind.kind !== "relay") {
+	if (kind.kind !== "tern" && kind.kind !== "relay" && kind.kind !== "connected") {
 		throw new ToolError(
-			`No pages to adopt here (the browser would be ${describeKind(kind)}): targets exist only inside a Tern pane (its browser blocks) or with the omp relay (app.relay: true or the browser.relay setting).`,
+			`No pages to adopt here (the browser would be ${describeKind(kind)}): targets exist only inside a Tern pane (its browser blocks), with the omp relay (app.relay: true or the browser.relay setting), or on a browser's CDP endpoint (app.cdp_url).`,
 		);
 	}
 	details.browser = kind.kind;
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const listSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	try {
+		if (kind.kind === "connected") {
+			const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
+			const targets = await untilAborted(listSignal, () => listPageTargets(cdpUrl, "connected", listSignal));
+			details.value = targets;
+			return toolResult(details).text(describePageTargets(targets, "connected")).done();
+		}
 		const browser = await untilAborted(listSignal, () =>
 			acquireBrowser(kind, { cwd: session.cwd, signal: listSignal }),
 		);
 		holdBrowser(browser);
 		try {
-			let targets: TernTarget[] | RelayTarget[];
+			let targets: TernTarget[] | PageTarget[];
 			let text: string;
 			if (kind.kind === "relay") {
-				targets = await untilAborted(listSignal, () => listRelayTargets(kind.cdpUrl, listSignal));
-				text = describeRelayTargets(targets);
+				targets = await untilAborted(listSignal, () => listPageTargets(kind.cdpUrl, "relay", listSignal));
+				text = describePageTargets(targets, "relay");
 			} else if ("tern" in browser) {
 				const blocks = await listTernBlocks(browser.tern, { timeoutMs, signal: listSignal });
 				const taken = ternBlocksTaken();

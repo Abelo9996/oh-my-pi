@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { findFreeCdpPort, relayTargets } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { findFreeCdpPort, pageTargets } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import {
 	DISCARDED_TABS_PROTOCOL_VERSION,
 	type TabSnapshot,
@@ -136,15 +136,66 @@ describe("browser targets in Tern", () => {
 });
 
 describe("browser targets elsewhere", () => {
-	it("explains that targets exist only inside Tern or with the relay", async () => {
+	it("explains that targets exist only inside Tern, with the relay, or on a CDP endpoint", async () => {
 		for (const key of ENV_KEYS) delete process.env[key];
 		const failure = await invoke(session(), { action: "targets", timeout: 5 }).catch((error: unknown) => error);
 		expect(String(failure)).toContain("targets exist only inside a Tern pane");
 		expect(String(failure)).toContain("app.relay: true or the browser.relay setting");
+		expect(String(failure)).toContain("app.cdp_url");
+	});
+
+	it("refuses a browser omp would launch from app.path", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		const failure = await invoke(session(), {
+			action: "targets",
+			timeout: 5,
+			app: { path: "/opt/example/chrome" },
+		}).catch((error: unknown) => error);
+		expect(String(failure)).toContain("No pages to adopt here (the browser would be spawned:");
 	});
 });
 
-describe("relayTargets", () => {
+describe("browser targets on a CDP endpoint", () => {
+	it("lists the pages the endpoint's /json reports, skipping internal ones", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		using server = Bun.serve({
+			port: 0,
+			fetch: request =>
+				new URL(request.url).pathname === "/json"
+					? Response.json([
+							{ id: "A1", type: "page", url: "https://mail.example/", title: "Mail" },
+							{ id: "B2", type: "page", url: "https://docs.example/", title: "Docs" },
+							{ id: "C3", type: "page", url: "devtools://devtools/bundled/inspector.html", title: "DevTools" },
+							{ id: "D4", type: "service_worker", url: "https://mail.example/sw.js", title: "sw" },
+						])
+					: new Response("not found", { status: 404 }),
+		});
+		const { text, value } = await invoke(session(), {
+			action: "targets",
+			timeout: 5,
+			app: { cdp_url: `http://127.0.0.1:${server.port}/` },
+		});
+		expect(value).toStrictEqual([
+			{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/" },
+			{ target: "https://docs.example/", title: "Docs", url: "https://docs.example/" },
+		]);
+		expect(text).toBe(
+			'Pages of the app.cdp_url browser (adopt one with app.target set to its URL or a title substring):\n- "Mail" https://mail.example/\n- "Docs" https://docs.example/',
+		);
+	});
+
+	it("surfaces an endpoint that does not list its pages", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		using server = Bun.serve({ port: 0, fetch: () => new Response("nope", { status: 500 }) });
+		const cdpUrl = `http://127.0.0.1:${server.port}`;
+		const failure = await invoke(session(), { action: "targets", timeout: 5, app: { cdp_url: cdpUrl } }).catch(
+			(error: unknown) => error,
+		);
+		expect(String(failure)).toContain(`Browser CDP endpoint at ${cdpUrl} did not list its pages`);
+	});
+});
+
+describe("pageTargets", () => {
 	it("keeps live, non-internal pages with their URL as the target", () => {
 		const entries = [
 			{ id: "a", type: "page", url: "https://mail.example/", title: "Mail", active: "true", discarded: "false" },
@@ -155,7 +206,7 @@ describe("relayTargets", () => {
 			{ id: "f", type: "page", title: "no url" },
 			"garbage",
 		];
-		expect(relayTargets(entries)).toEqual([
+		expect(pageTargets(entries)).toEqual([
 			{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/", shown: true },
 			{ target: "https://docs.example/", title: "Docs", url: "https://docs.example/", shown: false },
 		]);
