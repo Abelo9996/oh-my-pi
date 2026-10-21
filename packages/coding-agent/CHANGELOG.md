@@ -10,6 +10,7 @@
 - Extensions can start `/live` voice sessions with the audio on their own WebRTC peer, such as a phone browser, through `ctx.startLive({ sdpOffer })`; the RPC `live_connect` command does the same for RPC clients ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
 - Added opt-in extension reply renderers: with `extensionRenderers.assistantText` on, `pi.registerAssistantTextRenderer()` changes how assistant text is drawn (terminal and Tern native view) without touching the session or model context, and `ctx.ui.rerenderMessage(timestamp)` redraws one reply in place ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
 - Added extension link schemes behind the same setting: links using a scheme claimed with `pi.registerLinkScheme()` draw as a dotted-underlined label and raise `link_activate` for that extension when picked with Alt+O (`app.links.hint`) or clicked with `tui.mouse` on; `ctx.ui.getLinkClicksAvailable()` lets a renderer fall back to inline content ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+- `/debug` report bundles now include `session-logs.txt`: every log record written today by the reporting session and its subagents, including records older than the last 1,000 lines of each process log that `logs.txt` keeps ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -17,6 +18,7 @@
 - `PI_INTENT_PROMPT` replaces the system-prompt guidance for the `i` intent field; `PI_INTENT_DESC` replaces its tool-schema description
 - Eval shows printed JSON text (`print(json.dumps(…))`, `console.log(JSON.stringify(…))`) as a collapsible JSON tree, like printed dicts and objects
 - The warning that a saved Codex or Claude rate-limit reset is about to expire now shows once per reset across all conversations and omp windows, and only in its final 6 hours instead of from 24 hours out; the status line keeps counting it down meanwhile
+- Log records written during a session's turns and compaction now carry its `sessionId`, so a subagent's records are told apart from its parent's in the same process log; records that named another kind of id `sessionId` now call it `titleSessionId`, `debugSessionId`, `kernelSessionId`, `acpSessionId` or `providerSessionId` ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -404,14 +406,6 @@
 - Fixed releasing or reaping a browser tab returning while Chromium still listed the page; the close now waits until Chromium reports the tab destroyed ([#16680](https://github.com/can1357/oh-my-pi/pull/16680) by [@H4vC](https://github.com/H4vC))
 - Fixed the advisor prompt forbidding all repeated advice, including real escalations: advisors may now re-raise a prior nit or concern as a blocker once new evidence makes it one ([#13887](https://github.com/can1357/oh-my-pi/issues/13887), [#16484](https://github.com/can1357/oh-my-pi/pull/16484) by [@pjh890321](https://github.com/pjh890321))
 - Fixed Esc no longer interrupting in the TUI after a second MCP OAuth login replaced an unfinished first one ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
-
-### Added
-
-- `/debug` report bundles now include `session-logs.txt`: every log record written today by the reporting session and its subagents, including records older than the last 1,000 lines of each process log that `logs.txt` keeps ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Changed
-
-- Log records written during a session's turns and compaction now carry its `sessionId`, so a subagent's records are told apart from its parent's in the same process log; records that named another kind of id `sessionId` now call it `titleSessionId`, `debugSessionId` or `kernelSessionId` ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.5] - 2026-10-21
 
