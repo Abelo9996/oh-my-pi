@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/review` failing to read uncommitted changes, branch comparisons, and commits in Git reftable repositories ([#16591](https://github.com/can1357/oh-my-pi/issues/16591))
+
 ## [18.12.5] - 2026-10-21
 
 ### Added

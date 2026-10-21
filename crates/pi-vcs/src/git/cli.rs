@@ -37,7 +37,9 @@ pub const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 pub const OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 const TERMINATE_GRACE: Duration = Duration::from_secs(5);
-const TRUNCATION_MARKER: &str = "\n[git subprocess output truncated at the capture limit]\n";
+/// Appended to capped subprocess output; callers must never treat it as complete data.
+pub(crate) const TRUNCATION_MARKER: &str =
+	"\n[git subprocess output truncated at the capture limit]\n";
 
 /// Captured result of a completed git invocation.
 #[derive(Debug, Clone)]

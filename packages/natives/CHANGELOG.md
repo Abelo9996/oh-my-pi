@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Git diff and commit patches failing in reftable repositories ([#16591](https://github.com/can1357/oh-my-pi/issues/16591))
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed

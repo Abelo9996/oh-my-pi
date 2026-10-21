@@ -5,8 +5,9 @@ use std::{fmt::Write as _, io::Write as _, path::Path};
 use gix::bstr::{BStr, BString, ByteSlice};
 
 use super::{
-	GitRepo,
+	GitRepo, cli,
 	open::{load_index_or_empty, status_with_fresh_index},
+	read::literal_pathspec,
 };
 use crate::{
 	error::{Error, Result},
@@ -34,6 +35,40 @@ struct Rendered {
 impl GitRepo {
 	/// Render changes as a git patch.
 	pub fn diff_text(&self, options: &DiffOptions) -> Result<String> {
+		if self.is_reftable() {
+			let mut args = vec![
+				"diff".to_owned(),
+				"--no-ext-diff".to_owned(),
+				"--no-textconv".to_owned(),
+				"--no-color".to_owned(),
+			];
+			if options.binary {
+				args.push("--binary".to_owned());
+			}
+			if let Some(context) = options.context {
+				args.push(format!("--unified={context}"));
+			}
+			if let Some(base) = &options.base {
+				args.push("--end-of-options".to_owned());
+				args.push(base.clone());
+				if let Some(head) = &options.head {
+					args.push(head.clone());
+				}
+			} else if options.cached {
+				args.push("--cached".to_owned());
+			}
+			if !options.files.is_empty() {
+				args.push("--".to_owned());
+				args.extend(options.files.iter().map(|file| literal_pathspec(file)));
+			}
+			let limit = options.max_bytes.unwrap_or(cli::OUTPUT_LIMIT_BYTES);
+			let output = cli::run_sync_capped(self.root(), &args, cli::COMMAND_TIMEOUT, limit)?
+				.into_checked(&args)?;
+			if cli::is_truncated(&output.stdout) {
+				return Err(Error::OutputTooLarge { operation: "diffText", limit });
+			}
+			return Ok(output.stdout);
+		}
 		let repo = self.gix()?;
 		let changes = collect_changes(&repo, options)?;
 		let rendered = render_changes(
@@ -133,6 +168,31 @@ impl GitRepo {
 
 	/// Render a commit header and its patch against its first parent.
 	pub fn show_commit(&self, rev: &str, max_bytes: Option<usize>) -> Result<ShowResult> {
+		if self.is_reftable() {
+			let args = vec![
+				"show".to_owned(),
+				"--format=medium".to_owned(),
+				"-m".to_owned(),
+				"--first-parent".to_owned(),
+				"--no-ext-diff".to_owned(),
+				"--no-textconv".to_owned(),
+				"--no-color".to_owned(),
+				"--end-of-options".to_owned(),
+				rev.to_owned(),
+			];
+			let limit = max_bytes.unwrap_or(cli::OUTPUT_LIMIT_BYTES);
+			let output = cli::run_sync_capped(self.root(), &args, cli::COMMAND_TIMEOUT, limit)?
+				.into_checked(&args)?;
+			let truncated = cli::is_truncated(&output.stdout);
+			if truncated && max_bytes.is_none() {
+				return Err(Error::OutputTooLarge { operation: "showCommit", limit });
+			}
+			let mut bytes = output.stdout.into_bytes();
+			if truncated {
+				bytes.truncate(bytes.len() - cli::TRUNCATION_MARKER.len());
+			}
+			return Ok(ShowResult { bytes, truncated });
+		}
 		let repo = self.gix()?;
 		let id = repo
 			.rev_parse_single(rev)
@@ -1628,6 +1688,98 @@ mod tests {
 		git(dir.path(), &["add", "."]);
 		git(dir.path(), &["commit", "-qm", "initial"]);
 		dir
+	}
+
+	fn reftable_fixture() -> Option<TempDir> {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let output = Command::new("git")
+			.args(["init", "-q", "-b", "main", "--ref-format=reftable"])
+			.current_dir(dir.path())
+			.output()
+			.expect("run git init");
+		if !output.status.success() && String::from_utf8_lossy(&output.stderr).contains("ref-format")
+		{
+			eprintln!("skipping reftable coverage: git does not support --ref-format");
+			return None;
+		}
+		assert!(output.status.success(), "git init: {}", String::from_utf8_lossy(&output.stderr));
+		git(dir.path(), &["config", "user.name", "Diff Test"]);
+		git(dir.path(), &["config", "user.email", "diff@example.com"]);
+		assert_eq!(git(dir.path(), &["rev-parse", "--show-ref-format"]).trim(), "reftable");
+		Some(dir)
+	}
+
+	#[test]
+	fn reftable_review_diffs_cover_worktree_branch_and_commit() {
+		let Some(dir) = reftable_fixture() else {
+			return;
+		};
+		let root = dir.path();
+		fs::write(root.join("tracked.txt"), "original\n").expect("write");
+		git(root, &["add", "tracked.txt"]);
+		git(root, &["commit", "-qm", "initial"]);
+		git(root, &["branch", "base"]);
+		fs::write(root.join("feature.txt"), "feature\n").expect("write");
+		git(root, &["add", "feature.txt"]);
+		git(root, &["commit", "-qm", "feature"]);
+		fs::write(root.join("tracked.txt"), "modified\n").expect("edit");
+		fs::write(root.join("staged.txt"), "staged\n").expect("write");
+		git(root, &["add", "staged.txt"]);
+
+		let repo = std::sync::Arc::new(GitRepo::require(root).expect("discover reftable"));
+		assert!(repo.is_reftable());
+		let vcs = crate::Repo::Git(repo.clone());
+		assert_eq!(
+			vcs.uncommitted_diff(&[]).expect("uncommitted review"),
+			git(root, &["diff", "--no-ext-diff", "--no-textconv", "HEAD"])
+		);
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions {
+					base: Some("base".into()),
+					head: Some("main".into()),
+					..DiffOptions::default()
+				})
+				.expect("branch review"),
+			git(root, &["diff", "--no-ext-diff", "base", "main"])
+		);
+		let commit = repo.show_commit("HEAD", None).expect("commit review");
+		let text = String::from_utf8(commit.bytes).expect("UTF-8 commit");
+		assert!(!commit.truncated);
+		assert!(text.contains("diff --git a/feature.txt b/feature.txt"), "{text}");
+		assert!(text.contains("+feature"), "{text}");
+	}
+
+	#[test]
+	fn reftable_unborn_diff_and_limits_never_return_partial_patches() {
+		let Some(dir) = reftable_fixture() else {
+			return;
+		};
+		let root = dir.path();
+		fs::write(root.join("new.txt"), "new\n").expect("write");
+		git(root, &["add", "new.txt"]);
+		let repo = std::sync::Arc::new(GitRepo::require(root).expect("discover reftable"));
+		let vcs = crate::Repo::Git(repo.clone());
+		assert_eq!(
+			vcs.uncommitted_diff(&[])
+				.expect("unborn review")
+				.trim_start_matches('\n'),
+			git(root, &["diff", "--no-ext-diff", "--cached"])
+		);
+		assert!(matches!(
+			repo.diff_text(&DiffOptions {
+				cached: true,
+				max_bytes: Some(8),
+				..DiffOptions::default()
+			}),
+			Err(Error::OutputTooLarge { operation: "diffText", limit: 8 })
+		));
+		git(root, &["commit", "-qm", "initial"]);
+		let shown = repo
+			.show_commit("HEAD", Some(8))
+			.expect("bounded commit review");
+		assert!(shown.truncated);
+		assert_eq!(shown.bytes.len(), 8);
 	}
 
 	#[test]
