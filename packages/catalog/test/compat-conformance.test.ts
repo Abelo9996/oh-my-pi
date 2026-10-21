@@ -119,4 +119,20 @@ describe("compat rules conformance", () => {
 		}
 		expect(offenders).toEqual([]);
 	});
+
+	// A regeneration from a stale snapshot can silently drop rows whose only
+	// source is a `bundle="always"` seed; selector resolution then cannot see them.
+	test('every bundle="always" seed row is bundled', () => {
+		const seeded: Record<string, { seed?: { bundle: string; models: { id: string }[] } }> = rules.providers;
+		const bundled: Record<string, Record<string, unknown> | undefined> = models;
+		const offenders: string[] = [];
+		for (const provider in seeded) {
+			const seed = seeded[provider].seed;
+			if (seed?.bundle !== "always") continue;
+			for (const model of seed.models) {
+				if (!bundled[provider]?.[model.id]) offenders.push(`${provider}/${model.id}`);
+			}
+		}
+		expect(offenders).toEqual([]);
+	});
 });

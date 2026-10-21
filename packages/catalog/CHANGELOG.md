@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `web/deepseek` failing with "No web search model matches selector"; the DeepSeek Search engine is bundled again ([#16610](https://github.com/can1357/oh-my-pi/issues/16610))
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
