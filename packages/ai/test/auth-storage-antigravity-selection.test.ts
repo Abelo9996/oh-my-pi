@@ -290,7 +290,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 
 		expect(counts.get("api-acct-balanced") ?? 0).toBeGreaterThan(counts.get("api-acct-gemini-hot") ?? 0);
 	});
-	test("heals a stale Argon block from general Gemini limits only when no Argon bucket is reported", async () => {
+	test("heals a stale Argon block from a legacy report's shared Google counter", async () => {
 		if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
 			throw new Error("test setup failed");
 		}

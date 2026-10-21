@@ -85,6 +85,8 @@ interface AntigravityEndpointResult {
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
+/** `UsageReport.metadata.quotaSource` of reports built from `retrieveUserQuotaSummary`. */
+const QUOTA_SUMMARY_SOURCE = "quota-summary";
 
 interface AntigravityWindowDescriptor {
 	id: string;
@@ -406,6 +408,7 @@ function buildQuotaSummaryReport(
 	const metadata: UsageReport["metadata"] = {
 		endpoint,
 		projectId: params.credential.projectId,
+		quotaSource: QUOTA_SUMMARY_SOURCE,
 	};
 	if (params.credential.email) metadata.email = params.credential.email;
 	if (params.credential.accountId) metadata.accountId = params.credential.accountId;
@@ -668,9 +671,22 @@ function getAntigravityCounterLimits(report: UsageReport, counterKey: string): U
 }
 
 /**
+ * Limits gating Gemini 4 Argon. The quota summary meters Argon in its own
+ * `gemini-argon-*` bucket, separately from `gemini-weekly`, so a summary
+ * without that bucket leaves Argon unconstrained. Legacy model-catalog reports
+ * cannot tell the buckets apart and only offer the shared Google counter.
+ */
+function getAntigravityArgonLimits(report: UsageReport): UsageLimit[] {
+	const argonLimits = getAntigravityCounterLimits(report, "google-argon");
+	if (argonLimits.length > 0 || report.metadata?.quotaSource === QUOTA_SUMMARY_SOURCE) return argonLimits;
+	return getAntigravityCounterLimits(report, "google");
+}
+
+/**
  * Scope an Antigravity report to the active model's backend counter, falling
- * back to the general Gemini counter for Argon when its dedicated bucket is
- * absent, then to legacy default counters only when the backend has no limits.
+ * back to legacy default counters only when that backend has no limits.
+ * Gemini 4 Argon is scoped by {@link getAntigravityArgonLimits}.
+ *
  * Exhaustion checks are only safe with a concrete backend counter. A no-model
  * credential lookup (for example image-provider discovery) must not turn one
  * exhausted family into a provider-wide block.
@@ -681,12 +697,9 @@ export function scopeAntigravityLimitsForModel(
 ): UsageLimit[] {
 	const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 	if (!counterKey) return [];
+	if (counterKey === "google-argon") return getAntigravityArgonLimits(report);
 	const backendLimits = getAntigravityCounterLimits(report, counterKey);
 	if (backendLimits.length > 0) return backendLimits;
-	if (counterKey === "google-argon") {
-		const googleLimits = getAntigravityCounterLimits(report, "google");
-		if (googleLimits.length > 0) return googleLimits;
-	}
 	return getAntigravityCounterLimits(report, "default");
 }
 
@@ -719,26 +732,25 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 		const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 		return `counter:${counterKey ?? "unknown"}`;
 	},
-	// One scope per backend counter the report covers, judged by that
-	// counter's own windows. When Argon has no dedicated bucket, it uses
-	// Google's limits; healing must use those same limits for its block scope.
-	// A 429 can carry a retry-after at the weekly reset while Google restores
-	// the quota days earlier.
+	// One scope per backend counter, judged by the same limits ranking uses
+	// for it. A 429 can carry a retry-after at the weekly reset while Google
+	// restores the quota days earlier; the next `/usage` fetch then lifts the
+	// block instead of the account idling until the clock runs out.
 	healableBlockScopes(report) {
-		const counterKeys = new Set<string>();
+		const counterKeys = new Set<string>(["google-argon"]);
 		for (const limit of report.limits) {
 			const counterKey = limit.id.split(":")[1];
 			if (counterKey) counterKeys.add(counterKey.toLowerCase());
 		}
-		const scopes = [...counterKeys].map(counterKey => ({
-			blockScope: `counter:${counterKey}`,
-			limits: getAntigravityCounterLimits(report, counterKey),
-		}));
-		if (!counterKeys.has("google-argon")) {
-			const googleScope = scopes.find(scope => scope.blockScope === "counter:google");
-			if (googleScope) scopes.push({ blockScope: "counter:google-argon", limits: googleScope.limits });
-		}
-		return scopes;
+		return [...counterKeys]
+			.map(counterKey => ({
+				blockScope: `counter:${counterKey}`,
+				limits:
+					counterKey === "google-argon"
+						? getAntigravityArgonLimits(report)
+						: getAntigravityCounterLimits(report, counterKey),
+			}))
+			.filter(scope => scope.limits.length > 0);
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them
 	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo

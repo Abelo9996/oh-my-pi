@@ -202,6 +202,32 @@ describe("antigravity usage provider", () => {
 		]);
 	});
 
+	it("leaves Argon unconstrained when the quota summary reports no Argon bucket", async () => {
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential(), signal: undefined },
+			makeCtx(
+				fakeFetch({
+					groups: [
+						{
+							displayName: "Gemini Models",
+							buckets: [
+								{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.0017 },
+								{ bucketId: "gemini-5h", window: "5h", remainingFraction: 0.9966 },
+							],
+						},
+					],
+				}),
+			),
+		);
+		if (!report) throw new Error("expected usage report");
+		const argon = { modelId: "gemini-4-argon" };
+		expect(scopeAntigravityLimitsForModel(report, argon)).toEqual([]);
+		expect(antigravityRankingStrategy.findWindowLimits(report, argon).primary).toBeUndefined();
+		expect(antigravityRankingStrategy.healableBlockScopes?.(report)?.map(scope => scope.blockScope)).toEqual([
+			"counter:google",
+		]);
+	});
+
 	it("keeps the worst remainingFraction when merging same tier", async () => {
 		const payload = {
 			models: {
