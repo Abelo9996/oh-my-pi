@@ -1198,6 +1198,50 @@ export class PluginManager {
 			}
 		}
 
+		// Marketplace installs live under their own cache roots; the shared
+		// node_modules check above cannot detect a missing dependency there.
+		const registry = await readInstalledPluginsRegistry(getInstalledPluginsRegistryPath());
+		const checkedPaths = new Set<string>();
+		for (const pluginId in registry.plugins) {
+			for (const entry of registry.plugins[pluginId]) {
+				if (checkedPaths.has(entry.installPath)) continue;
+				checkedPaths.add(entry.installPath);
+				let manifest: { dependencies?: Record<string, string> };
+				try {
+					manifest = await Bun.file(path.join(entry.installPath, "package.json")).json();
+				} catch (err) {
+					if (isEnoent(err)) continue;
+					throw err;
+				}
+				const missing: string[] = [];
+				for (const dependency in manifest.dependencies) {
+					if (!fs.existsSync(path.join(entry.installPath, "node_modules", dependency))) {
+						missing.push(dependency);
+					}
+				}
+				if (missing.length === 0) continue;
+				let fixed = false;
+				if (options.fix) {
+					try {
+						const result = await runBunCli(["install", "--ignore-scripts"], entry.installPath);
+						fixed =
+							result.exitCode === 0 &&
+							missing.every(dependency =>
+								fs.existsSync(path.join(entry.installPath, "node_modules", dependency)),
+							);
+					} catch {
+						// A failed repair remains visible as an error in the doctor report.
+					}
+				}
+				checks.push({
+					name: `marketplace:${pluginId}:dependencies`,
+					status: fixed ? "ok" : "error",
+					message: `${fixed ? "Installed missing" : "Missing"} dependencies: ${missing.join(", ")}`,
+					...(options.fix ? { fixed } : {}),
+				});
+			}
+		}
+
 		return checks;
 	}
 

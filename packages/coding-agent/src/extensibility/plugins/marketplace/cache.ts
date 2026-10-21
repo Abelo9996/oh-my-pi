@@ -15,6 +15,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { runBunCli } from "../bun-cli";
 
 import { isValidNameSegment } from "./types";
 
@@ -56,9 +57,8 @@ export function getCachedPluginPath(
 
 /**
  * Copy `sourcePath` into the cache, returning the absolute cache path.
- *
- * Idempotent: if the target already exists it is removed before copying,
- * so a partial previous cache is never silently reused.
+ * Idempotent: installs declared dependencies in a staging directory before
+ * replacing the target, so a failed install cannot publish a broken cache.
  */
 export async function cachePlugin(
 	sourcePath: string,
@@ -77,6 +77,25 @@ export async function cachePlugin(
 	const stagingPath = `${targetPath}.staging-${Date.now()}`;
 	try {
 		await fs.cp(sourcePath, stagingPath, { recursive: true });
+		const manifestPath = path.join(stagingPath, "package.json");
+		let manifest: { dependencies?: Record<string, string> };
+		try {
+			manifest = await Bun.file(manifestPath).json();
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+			manifest = {};
+		}
+		let hasDependencies = false;
+		for (const _dependency in manifest.dependencies) {
+			hasDependencies = true;
+			break;
+		}
+		if (hasDependencies) {
+			const { exitCode, stderr } = await runBunCli(["install", "--ignore-scripts"], stagingPath);
+			if (exitCode !== 0) {
+				throw new Error(`Failed to install dependencies for ${pluginName}: ${stderr}`);
+			}
+		}
 		await fs.rm(targetPath, { recursive: true, force: true });
 		await fs.rename(stagingPath, targetPath);
 	} catch (err) {

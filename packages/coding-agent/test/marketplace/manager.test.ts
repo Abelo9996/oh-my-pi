@@ -290,6 +290,67 @@ describe("MarketplaceManager", () => {
 		expect(installed[0].id).toBe("hello-plugin@test-marketplace");
 	});
 
+	it("installs declared dependencies on install and upgrade before exposing the plugin", async () => {
+		const marketplace = buildNamedMarketplace(path.join(ctx.tmpDir, "marketplace"), "deps-market", "widget");
+		const source = path.join(marketplace, "plugins", "widget");
+		const dependency = path.join(source, "vendor", "local-dep");
+		fs.mkdirSync(dependency, { recursive: true });
+		fs.writeFileSync(path.join(dependency, "package.json"), JSON.stringify({ name: "local-dep", version: "1.0.0" }));
+		fs.writeFileSync(path.join(dependency, "index.js"), "export const value = 42;\n");
+		fs.writeFileSync(
+			path.join(source, "package.json"),
+			JSON.stringify({ name: "widget", version: "1.0.0", dependencies: { "local-dep": "file:./vendor/local-dep" } }),
+		);
+
+		await ctx.manager.addMarketplace(marketplace);
+		const installed = await ctx.manager.installPlugin("widget", "deps-market");
+		const importDependency = async (cachePath: string) =>
+			Bun.spawnSync(["bun", "-e", "import { value } from 'local-dep'; console.log(value)"], {
+				cwd: cachePath,
+				env: { ...Bun.env, BUN_BE_BUN: "1" },
+			});
+		const initial = await importDependency(installed.installPath);
+		expect(initial.exitCode).toBe(0);
+		expect(initial.stdout.toString().trim()).toBe("42");
+
+		fs.writeFileSync(path.join(dependency, "index.js"), "export const value = 43;\n");
+		const upgraded = await ctx.manager.upgradePlugin("widget@deps-market");
+		const afterUpgrade = await importDependency(upgraded.installPath);
+		expect(afterUpgrade.exitCode).toBe(0);
+		expect(afterUpgrade.stdout.toString().trim()).toBe("43");
+
+		fs.rmSync(path.join(upgraded.installPath, "node_modules", "local-dep"), { recursive: true, force: true });
+		const spies = mockPluginManagerPaths(ctx.tmpDir);
+		try {
+			const doctor = new PluginManager(ctx.tmpDir);
+			expect(await doctor.doctor()).toContainEqual({
+				name: "marketplace:widget@deps-market:dependencies",
+				status: "error",
+				message: "Missing dependencies: local-dep",
+			});
+			expect(await doctor.doctor({ fix: true })).toContainEqual({
+				name: "marketplace:widget@deps-market:dependencies",
+				status: "ok",
+				message: "Installed missing dependencies: local-dep",
+				fixed: true,
+			});
+			const repaired = await importDependency(upgraded.installPath);
+			expect(repaired.exitCode).toBe(0);
+			expect(repaired.stdout.toString().trim()).toBe("43");
+		} finally {
+			for (const spy of spies) spy.mockRestore();
+		}
+
+		fs.writeFileSync(
+			path.join(source, "package.json"),
+			JSON.stringify({ name: "widget", version: "1.0.0", dependencies: { missing: "file:./vendor/missing" } }),
+		);
+		await expect(ctx.manager.upgradePlugin("widget@deps-market")).rejects.toThrow(
+			"Failed to install dependencies for widget",
+		);
+		expect((await importDependency(upgraded.installPath)).stdout.toString().trim()).toBe("43");
+	});
+
 	it("installs mixed-case plugin names without duplicating them in the npm plugin list", async () => {
 		const marketplaceDir = path.join(ctx.tmpDir, "mixed-case-marketplace");
 		const noManifestDir = path.join(marketplaceDir, "plugins", "No-Manifest");

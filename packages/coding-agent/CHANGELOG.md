@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Marketplace plugin installs and upgrades now install declared dependencies before activation; `omp plugin doctor` detects and can repair missing cached dependencies ([#16602](https://github.com/can1357/oh-my-pi/issues/16602))
+
 ## [18.12.5] - 2026-10-21
 
 ### Added
