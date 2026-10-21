@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `app.cdp_url` adoption of a healthy browser tab failing or waiting on an unrelated hung tab; unreadable selected tabs now report their URL ([#16621](https://github.com/can1357/oh-my-pi/issues/16621))
+
 ## [18.12.5] - 2026-10-21
 
 ### Added

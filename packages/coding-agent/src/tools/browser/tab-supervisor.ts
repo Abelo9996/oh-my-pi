@@ -1830,6 +1830,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		const picked = await pickElectronTarget(browser.browser, {
 			matcher: opts.target,
 			preferVisible: userDriven && !opts.target,
+			cdpUrl: browser.kind.kind === "connected" ? browser.kind.cdpUrl : undefined,
 			relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
 			signal: opts.signal,
 		});
