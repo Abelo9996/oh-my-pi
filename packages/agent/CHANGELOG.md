@@ -6,6 +6,7 @@
 
 - `PI_INTENT_DESC` replaces the schema description of the injected `i` intent field
 - `AgentTool.approvalRestrictionPaths` reports paths a call reads, so restricted folders cover them without the approval being remembered per path ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal))
+- Added `Agent.logContext`, fields added to every log record written during the agent's runs ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.13.3] - 2026-10-28
 
@@ -47,10 +48,6 @@
 - Fixed native compaction token estimates counting opaque encrypted-state bytes as conversation text ([#16904](https://github.com/can1357/oh-my-pi/pull/16904) by [@eggpeat](https://github.com/eggpeat))
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
 - Fixed compaction failing as a whole, and discarding the completed summary, when the optional short summary fails or returns no answer; the compaction now completes without a short summary, and cancellation still cancels it ([#16942](https://github.com/can1357/oh-my-pi/pull/16942) by [@Mouriya-Emma](https://github.com/Mouriya-Emma))
-
-### Added
-
-- Added `Agent.logContext`, fields added to every log record written during the agent's runs
 
 ## [18.12.4] - 2026-10-20
 
