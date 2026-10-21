@@ -89,6 +89,8 @@ export interface PendingRun {
 	 * cancellation into the still-running `runInProcessTab` body (issue #4499).
 	 */
 	closeAc?: AbortController;
+	/** The worker failed this run and could not restore tab state after it; the tab must be recycled. */
+	recoverTab?: boolean;
 }
 
 interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
@@ -261,6 +263,12 @@ const WORKER_RESETS =
 	"Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals)";
 // What a worker recycle (`recycleTimedOutWorkerTab`) resets, for results that report one.
 const RECYCLE_RESETS = `${WORKER_RESETS}, any open dialog was dismissed, and any page still loading was stopped.`;
+/** Reports the recycle after a run whose request interception could not be reset. */
+function interceptionResetNote(reattached: boolean): string {
+	return reattached
+		? `Browser request interception could not be reset after this run; the tab was reattached to a new worker. ${RECYCLE_RESETS}`
+		: "Browser request interception could not be reset after this run; the tab was closed.";
+}
 const RENDERER_RELOADED_NOTE = `This tab's renderer had crashed, so the tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`;
 const DEBUGGER_DETACH_CAUSE =
 	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu";
@@ -272,7 +280,6 @@ const USER_CANCELLED_DEBUGGER = "canceled_by_user";
 const WORKER_EXIT_REATTACH_TIMEOUT_MS = 10_000;
 // A replacement worker that exits on its own this soon after the previous exit closes the tab instead of looping.
 const WORKER_EXIT_RETRY_WINDOW_MS = 10_000;
-class RecoverableWorkerError extends ToolError {}
 /** A message from a tab worker failed to deserialize; the worker keeps running. */
 class WorkerMessageError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
@@ -1067,12 +1074,7 @@ async function runInTabWithSnapshot(
 					opts.timeoutMs,
 					"Browser request interception cleanup failed; tab killed",
 				);
-				result.displays.push({
-					type: "text",
-					text: reattached
-						? `Browser request interception could not be reset after this run; the tab was reattached to a new worker. ${RECYCLE_RESETS}`
-						: "Browser request interception could not be reset after this run; the tab was closed.",
-				});
+				result.displays.push({ type: "text", text: interceptionResetNote(reattached) });
 			}
 			return result;
 		} catch (error) {
@@ -1147,11 +1149,16 @@ async function runInTabWithSnapshot(
 			}
 			const runTimedOut =
 				error instanceof ToolError && error.message.startsWith("Browser code execution timed out after ");
-			if (runTimedOut || error instanceof RecoverableWorkerError) {
-				const reason = runTimedOut
-					? "Browser code execution timed out; tab killed"
-					: "Browser request interception cleanup failed; tab killed";
-				await recoverWorkerTab(tab, name, opts.timeoutMs, reason);
+			if (runTimedOut) {
+				await recoverWorkerTab(tab, name, opts.timeoutMs, "Browser code execution timed out; tab killed");
+			} else if (pending.recoverTab) {
+				const reattached = await recoverWorkerTab(
+					tab,
+					name,
+					opts.timeoutMs,
+					"Browser request interception cleanup failed; tab killed",
+				);
+				if (error instanceof Error) error.message = `${error.message}\n${interceptionResetNote(reattached)}`;
 			}
 			throw error;
 		}
@@ -1870,6 +1877,7 @@ function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
 			pending.resolve(msg.payload);
 			return;
 		}
+		pending.recoverTab = msg.error.recoverTab;
 		pending.reject(errorFromPayload(msg.error));
 		return;
 	}
@@ -2277,15 +2285,13 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 	}
 	const error = payload.rendererCrashed
 		? new RendererCrashedError(payload.message)
-		: payload.recoverTab
-			? new RecoverableWorkerError(payload.message)
-			: payload.isAbort
-				? new ToolAbortError()
-				: payload.navigationTimeout
-					? new NavigationTimeoutError(payload.message)
-					: payload.isToolError
-						? new ToolError(payload.message)
-						: new Error(payload.message);
+		: payload.isAbort
+			? new ToolAbortError()
+			: payload.navigationTimeout
+				? new NavigationTimeoutError(payload.message)
+				: payload.isToolError
+					? new ToolError(payload.message)
+					: new Error(payload.message);
 	error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
 	return error;

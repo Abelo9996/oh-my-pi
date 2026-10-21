@@ -53,7 +53,7 @@ export class RuntimeDialogController {
 
 	/** Return a JSON-safe snapshot of the pending dialog. */
 	state(): DialogState {
-		const dialog = this.#pending;
+		const dialog = this.#current();
 		if (!dialog) return { open: false };
 		const type = dialog.type();
 		return {
@@ -67,30 +67,44 @@ export class RuntimeDialogController {
 	/** Change the automatic policy and settle an already-pending decision when enabled. */
 	async setPolicy(policy: DialogPolicy | null): Promise<void> {
 		this.#policy = policy ?? undefined;
-		if (!this.#policy || !this.#pending) return;
-		await this.#settle(this.#pending, this.#policy === "accept", undefined);
+		const dialog = this.#current();
+		if (!this.#policy || !dialog) return;
+		await this.#settle(dialog, this.#policy === "accept", undefined);
 	}
 
 	/** Explicitly accept or dismiss the pending confirm or prompt. */
 	async handle(options: { accept: boolean; text?: string }): Promise<void> {
-		const dialog = this.#pending;
+		const dialog = this.#current();
 		if (!dialog) throw new ToolError("tab.handleDialog() found no pending confirm or prompt");
 		await this.#settle(dialog, options.accept, options.text);
 	}
 
+	/**
+	 * Installed when the tab starts, so it runs before any `dialog` listener a run adds. The default
+	 * decision waits for those listeners: a dialog a run's listener accepted or dismissed is the run's.
+	 */
 	readonly #onDialog = (dialog: Dialog): void => {
-		const policy = this.#policy;
-		if (policy) {
-			void this.#settle(dialog, policy === "accept", undefined).catch(error => this.#report(error, policy));
-			return;
-		}
-		const type = dialog.type();
-		if (type === "alert" || type === "beforeunload") {
-			void this.#settle(dialog, true, undefined).catch(error => this.#report(error, "accept"));
-			return;
-		}
-		this.#pending = dialog;
+		queueMicrotask(() => {
+			if (isHandled(dialog)) return;
+			const policy = this.#policy;
+			if (policy) {
+				void this.#settle(dialog, policy === "accept", undefined).catch(error => this.#report(error, policy));
+				return;
+			}
+			const type = dialog.type();
+			if (type === "alert" || type === "beforeunload") {
+				void this.#settle(dialog, true, undefined).catch(error => this.#report(error, "accept"));
+				return;
+			}
+			this.#pending = dialog;
+		});
 	};
+
+	/** The pending confirm or prompt, forgotten once something else, such as a run's own listener, settled it. */
+	#current(): Dialog | undefined {
+		if (this.#pending && isHandled(this.#pending)) this.#pending = undefined;
+		return this.#pending;
+	}
 
 	readonly #onFrameNavigated = (frame: Frame): void => {
 		if (frame === this.#page.mainFrame()) this.#pending = undefined;
@@ -111,4 +125,9 @@ export class RuntimeDialogController {
 			error: error instanceof Error ? error.message : String(error),
 		});
 	}
+}
+
+/** Whether `dialog` was already accepted or dismissed; puppeteer keeps that flag `protected`. */
+function isHandled(dialog: Dialog): boolean {
+	return Reflect.get(dialog, "handled") === true;
 }

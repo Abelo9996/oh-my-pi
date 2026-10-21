@@ -368,6 +368,35 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 		});
 	}, 30_000);
 
+	test("lets a run's own dialog listener settle the dialog, even against the tab's policy", async () => {
+		const invoke = createHost();
+		await invoke({ action: "open", name: "own-dialogs", url: `${baseUrl}/card` });
+		// Before: omp's alert auto-accept won the race and the run's accept failed it as an unhandled rejection.
+		expect(
+			valueOf(
+				await invoke({
+					action: "run",
+					name: "own-dialogs",
+					code: 'page.on("dialog", dialog => dialog.accept()); return await page.evaluate(() => { alert("hi"); return "continued"; });',
+				}),
+			),
+		).toBe("continued");
+
+		const confirmCode =
+			'page.on("dialog", dialog => dialog.accept()); const answer = await page.evaluate(() => confirm("ok?")); return { answer, state: await tab.dialog() };';
+		// Before: the confirm the run accepted stayed pending, so tab.dialog() reported it open.
+		expect(valueOf(await invoke({ action: "run", name: "own-dialogs", code: confirmCode }))).toEqual({
+			answer: true,
+			state: { open: false },
+		});
+
+		await invoke({ action: "call", name: "own-dialogs", chain: [{ method: "setDialogs", args: ["dismiss"] }] });
+		expect(valueOf(await invoke({ action: "run", name: "own-dialogs", code: confirmCode }))).toEqual({
+			answer: true,
+			state: { open: false },
+		});
+	}, 30_000);
+
 	test("scopes helpers to iframe documents in run and direct call paths", async () => {
 		const invoke = createHost();
 		await invoke({ action: "open", name: "frames", url: `${baseUrl}/frames` });

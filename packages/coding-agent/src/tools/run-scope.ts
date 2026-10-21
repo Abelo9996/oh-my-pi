@@ -23,10 +23,16 @@ export function isBrowserRunRejection(reason: unknown, owner: object): boolean {
 	);
 }
 
-/** Returns whether a rejection belongs to the marked browser run or its evaluated source file. */
+/**
+ * Returns whether a rejection belongs to the marked browser run or its evaluated source file.
+ * Callers ask only while the run is active. A non-`Error` value has no stack to attribute, and
+ * library code rejects with `Error`s, so the active run claims it; left unclaimed, it would kill
+ * the tab worker or the host process.
+ */
 export function isBrowserRunOwnedRejection(reason: unknown, owner: object, filename: string): boolean {
 	if (isBrowserRunRejection(reason, owner)) return true;
-	return reason instanceof Error && typeof reason.stack === "string" && reason.stack.includes(filename);
+	if (!(reason instanceof Error)) return true;
+	return typeof reason.stack === "string" && reason.stack.includes(filename);
 }
 
 type FloatingRejectionHandler = (reason: unknown) => void;

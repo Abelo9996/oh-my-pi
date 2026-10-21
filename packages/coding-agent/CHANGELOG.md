@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed browser `tab.run` replacing a run's own error (or its timeout) with "Failed to restore browser request interception"; a run that took over request interception and left a page navigation pending now also ends at once instead of stalling and reattaching the tab ([#16617](https://github.com/can1357/oh-my-pi/issues/16617))
+- Fixed a browser run's own `page.on("dialog")` listener failing with "Cannot accept dialog which is already handled!" and `tab.dialog()` still reporting a confirm the listener had answered ([#16617](https://github.com/can1357/oh-my-pi/issues/16617))
+- Fixed browser runs that throw or leave unawaited a non-`Error` value failing with "[object Object]" or ending the tab worker; the run now fails with the value's message, e.g. a CDP error's `message (code N)` ([#16617](https://github.com/can1357/oh-my-pi/issues/16617))
+
 ## [18.12.5] - 2026-10-21
 
 ### Added

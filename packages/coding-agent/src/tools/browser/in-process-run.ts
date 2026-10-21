@@ -21,7 +21,7 @@ import {
 	withBrowserPromiseCombinatorTracking,
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
-import { cloneSafe, RunOutput } from "./run-output";
+import { cloneSafe, describeThrown, RunOutput } from "./run-output";
 import type { RunResultOk, ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** What a tab facade may use while one run is active. */
@@ -157,7 +157,7 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 	let hasFloatingFailure = false;
 	const recordFloatingFailure = (reason: unknown): void => {
 		if (hasFloatingFailure || postmortem.isExpectedCleanupError(reason)) return;
-		const message = reason instanceof Error ? reason.message : String(reason);
+		const message = describeThrown(reason);
 		if (!runActive) {
 			logger.warn("Unhandled rejection after browser run ended", { runId, error: message });
 			return;
@@ -263,12 +263,10 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 			for (const reason of activeRun.floatingRejections) {
 				logger.warn("Unhandled rejection accompanied a failed in-process browser run", { filename, error: reason });
 			}
-			throw runError;
+			throw runError instanceof Error ? runError : new Error(describeThrown(runError), { cause: runError });
 		}
 		if (activeRun.floatingRejections.length > 0) {
-			const messages = activeRun.floatingRejections.map(reason =>
-				reason instanceof Error ? reason.message : String(reason),
-			);
+			const messages = activeRun.floatingRejections.map(describeThrown);
 			throw new ToolError(`Unhandled rejection (missing await?): ${messages.join("\n[unhandled rejection] ")}`, {
 				rejections: activeRun.floatingRejections,
 			});

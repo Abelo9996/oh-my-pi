@@ -220,7 +220,7 @@ import {
 } from "./frames";
 import { navigateMainFrame, pushState, reloadPage, traverseHistory, type NavigationWaitUntil } from "./navigation";
 
-import { cloneSafe, RunOutput } from "./run-output";
+import { cloneSafe, describeThrown, RunOutput } from "./run-output";
 import { type UploadRoute, UploadStaging } from "./upload-files";
 import {
 	type Observation,
@@ -939,8 +939,6 @@ function redactUrlCredentials(url: string): string {
 	}
 }
 
-class RequestInterceptionCleanupError extends ToolError {}
-
 /** `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
 
@@ -962,9 +960,11 @@ class DebuggerDetachedError extends ToolError {
 
 interface RunPageScope {
 	page: Page;
+	/** Whether the run called `page.setRequestInterception`; only then is interception restored after it. */
+	readonly interceptionChanged: boolean;
 	/** Restore the page's own listener methods and remove every handler this run registered. */
 	detach(): void;
-	/** Return request interception to the tab's persistent route/allowlist state. */
+	/** Return request interception to the tab's persistent route/allowlist state; rejects when that fails or times out. */
 	restoreInterception(): Promise<void>;
 }
 
@@ -1125,6 +1125,9 @@ function createRunPageScope(page: Page, restoreInterception: () => Promise<void>
 
 	return {
 		page,
+		get interceptionChanged() {
+			return interceptionChanged;
+		},
 		detach() {
 			if (onDescriptor) Object.defineProperty(page, "on", onDescriptor);
 			else Reflect.deleteProperty(page, "on");
@@ -1145,26 +1148,16 @@ function createRunPageScope(page: Page, restoreInterception: () => Promise<void>
 		},
 		async restoreInterception() {
 			if (!interceptionChanged) return;
-			try {
-				await withTimeout(
-					restoreInterception(),
-					REQUEST_INTERCEPTION_CLEANUP_TIMEOUT_MS,
-					"Timed out restoring browser request interception",
-				);
-			} catch (error) {
-				throw new RequestInterceptionCleanupError(
-					"Failed to restore browser request interception after browser.run",
-					{
-						error: error instanceof Error ? error.message : String(error),
-					},
-				);
-			}
+			await withTimeout(
+				restoreInterception(),
+				REQUEST_INTERCEPTION_CLEANUP_TIMEOUT_MS,
+				"Timed out restoring browser request interception",
+			);
 		},
 	};
 }
 
 function errorPayload(error: unknown): RunErrorPayload {
-	const recoverTab = error instanceof RequestInterceptionCleanupError || undefined;
 	const navigationTimeout = error instanceof NavigationTimeoutError || undefined;
 	const rendererCrashed = error instanceof RendererCrashedError || undefined;
 	const debuggerDetached =
@@ -1179,7 +1172,6 @@ function errorPayload(error: unknown): RunErrorPayload {
 			stack: error.stack,
 			isToolError: true,
 			isAbort: false,
-			recoverTab,
 			navigationTimeout,
 			rendererCrashed,
 			debuggerDetached,
@@ -1188,7 +1180,7 @@ function errorPayload(error: unknown): RunErrorPayload {
 	if (error instanceof Error) {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: false };
 	}
-	return { name: "Error", message: String(error), isToolError: false, isAbort: false };
+	return { name: "Error", message: describeThrown(error), isToolError: false, isAbort: false };
 }
 
 function replyError(payload: RunErrorPayload): Error {
@@ -1612,7 +1604,7 @@ export class WorkerCore {
 		if (this.#active !== active) {
 			this.#log("warn", "Unhandled rejection after browser run ended", {
 				runId: active.id,
-				error: reason instanceof Error ? reason.message : String(reason),
+				error: describeThrown(reason),
 			});
 			return;
 		}
@@ -1622,7 +1614,7 @@ export class WorkerCore {
 	}
 
 	#floatingRejectionError(reason: unknown): Error {
-		const message = reason instanceof Error ? reason.message : String(reason);
+		const message = describeThrown(reason);
 		const error = new Error(`Unhandled rejection (missing await?): ${message}`, { cause: reason });
 		if (reason instanceof Error) error.name = reason.name;
 		return error;
@@ -2054,23 +2046,23 @@ export class WorkerCore {
 			// Detach first: the stop below fails the cancelled requests, and run handlers that see
 			// those events would touch the aborted run's facade.
 			runPage?.detach();
-			// A cancelled run abandons its main-frame navigation: left loading, it still replaces the
-			// page later and holds up any interception restore below. Stopping is gated on
-			// that navigation because Page.stopLoading also cancels every fetch and subresource
-			// load in flight. A run that merely ended keeps an unawaited goto going.
-			if (ac.signal.aborted && this.#network?.hasPendingMainFrameNavigation()) await this.#stopLoading();
+			// A run that ends with its main-frame navigation still waiting on a response leaves it to
+			// replace the page later, and puppeteer's interception restore does not answer until that
+			// response arrives. Stop it when the run was cancelled or the restore below would wait on it;
+			// a recycle after a failed restore stops it anyway. Stopping is gated on that navigation
+			// because Page.stopLoading also cancels every fetch and subresource load in flight, so a run
+			// that left interception alone keeps an unawaited goto going.
+			if ((ac.signal.aborted || runPage?.interceptionChanged) && this.#network?.hasPendingMainFrameNavigation()) {
+				await this.#stopLoading();
+			}
 			try {
 				await runPage?.restoreInterception();
 			} catch (error) {
-				// A finished run keeps its result; the supervisor still recycles the tab.
-				if (completed && active.floatingRejections.length === 0) {
-					recoverTab = true;
-					this.#log("warn", "Browser tab state could not be restored after a completed run", {
-						error: error instanceof Error ? error.message : String(error),
-					});
-				} else {
-					failure = { error };
-				}
+				// The run's own outcome stands; the supervisor recycles the tab whose state is now unknown.
+				recoverTab = true;
+				this.#log("warn", "Browser request interception could not be restored after a run", {
+					error: describeThrown(error),
+				});
 			}
 			failure = this.#foldFloatingRejections(active, failure);
 			if (this.#active?.id === msg.id) this.#active = null;
@@ -2079,7 +2071,12 @@ export class WorkerCore {
 		if (this.#unanswered !== active) return;
 		if (failure) {
 			this.#unanswered = null;
-			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(failure.error) });
+			this.#transport.send({
+				type: "result",
+				id: msg.id,
+				ok: false,
+				error: { ...errorPayload(failure.error), recoverTab: recoverTab || undefined },
+			});
 			return;
 		}
 		if (completed) {

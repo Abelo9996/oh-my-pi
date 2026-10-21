@@ -131,6 +131,15 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		expect(await run(name, "return await tab.evaluate(() => document.body.dataset.mark);")).toBe("kept");
 	}, 30_000);
 
+	it("fails a run that throws a non-Error value with its message", async () => {
+		const name = "worker-exit-non-error";
+		await open(name, "alive");
+		// Before: a thrown CDP-style error read as "[object Object]".
+		expect(await messageOf(run(name, `throw { code: -32000, message: "Could not find node with given id" };`))).toBe(
+			"Could not find node with given id (code -32000)",
+		);
+	}, 30_000);
+
 	it("does not name an earlier message error as the cause of a later exit", async () => {
 		const name = "worker-exit-stale-cause";
 		// Capture the tab's Bun worker to raise a `messageerror` on it, which leaves the worker running.

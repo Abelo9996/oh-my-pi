@@ -10,10 +10,17 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+/** Holds `/slow` unanswered, leaving a main-frame navigation to it pending, until the suite ends. */
+const slowGate = Promise.withResolvers<void>();
 const server = Bun.serve({
 	port: 0,
-	fetch(request) {
+	idleTimeout: 0,
+	async fetch(request) {
 		const { pathname } = new URL(request.url);
+		if (pathname === "/slow") {
+			await slowGate.promise;
+			return new Response("<!doctype html><title>slow</title>", { headers: { "content-type": "text/html" } });
+		}
 		if (pathname === "/api") {
 			return Response.json({ source: "fixture" }, { headers: { "access-control-allow-origin": "*" } });
 		}
@@ -66,6 +73,7 @@ client.send = (method, ...args) => (method === "Fetch.disable" ? Promise.withRes
 afterAll(async () => {
 	await releaseAllTabs({ kill: true });
 	await disposeAllVmContexts();
+	slowGate.resolve();
 	server.stop(true);
 	await fs.rm(harPath, { force: true });
 });
@@ -271,5 +279,55 @@ return "done";`,
 			}),
 		);
 		expect(next).toEqual({ source: "fixture" });
+	});
+
+	test("keeps a failed run's own error when its interception cannot be reset", async () => {
+		const invoke = createHost();
+		await invoke({ action: "open", name: "failed-stuck-interception", url: `${baseUrl}/` });
+		const failure = await invoke({
+			action: "run",
+			name: "failed-stuck-interception",
+			code: `await page.setRequestInterception(true);
+${STALL_FETCH_DISABLE}
+throw new Error("PRIMARY");`,
+		}).catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(Error);
+		const message = failure instanceof Error ? failure.message : "";
+		expect(message).toStartWith("PRIMARY");
+		expect(message).toContain(
+			"Browser request interception could not be reset after this run; the tab was reattached",
+		);
+		const next = await invoke({ action: "run", name: "failed-stuck-interception", code: `return "next";` });
+		expect(valueOf(next)).toBe("next");
+	});
+
+	test("ends a run at once when it leaves a navigation pending under its own interception", async () => {
+		const invoke = createHost();
+		await invoke({ action: "open", name: "pending-navigation", url: `${baseUrl}/` });
+		const leavePending = `await page.setRequestInterception(true);
+page.on("request", request => request.continue());
+const sent = page.waitForRequest(request => request.url().endsWith("/slow"));
+page.goto(${JSON.stringify(`${baseUrl}/slow`)}).catch(() => {});
+await sent;`;
+		// Before: the interception restore waited on the navigation, then replaced the run's error.
+		const failure = await invoke({
+			action: "run",
+			name: "pending-navigation",
+			code: `${leavePending}
+throw new Error("PRIMARY");`,
+		}).catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(Error);
+		expect(failure instanceof Error ? failure.message : "").toBe("PRIMARY");
+
+		const started = performance.now();
+		const completed = await invoke({
+			action: "run",
+			name: "pending-navigation",
+			code: `${leavePending}
+return "ret";`,
+		});
+		expect(valueOf(completed)).toBe("ret");
+		expect(completed.content).toEqual([]);
+		expect(performance.now() - started).toBeLessThan(5_000);
 	});
 });

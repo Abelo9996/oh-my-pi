@@ -57,6 +57,32 @@ export function safeJsonStringify(value: unknown): string {
 	}
 }
 
+/**
+ * Message for any value a browser run throws or rejects with, for its error result and logs.
+ * A plain `{ code, message, data }` object — what a raw CDP client rejects with — reads as
+ * `message (code N): data` instead of `[object Object]`; other objects read as JSON.
+ */
+export function describeThrown(value: unknown): string {
+	if (value instanceof Error) return value.message;
+	if (typeof value !== "object" || value === null) return String(value);
+	if ("message" in value && typeof value.message === "string") {
+		const code = "code" in value && value.code !== undefined ? ` (code ${String(value.code)})` : "";
+		const data = "data" in value && value.data !== undefined ? `: ${compactJson(value.data)}` : "";
+		return `${value.message}${code}${data}`;
+	}
+	return compactJson(value);
+}
+
+/** One-line JSON for an error detail; values JSON cannot encode (cycles, BigInt) fall back to `Bun.inspect`. */
+function compactJson(value: unknown): string {
+	if (typeof value === "string") return value;
+	try {
+		return JSON.stringify(value) ?? Bun.inspect(value);
+	} catch {
+		return Bun.inspect(value);
+	}
+}
+
 /** Pass a return value across the run boundary: structured-cloneable as-is, else JSON round-trip, else String. */
 export function cloneSafe(value: unknown): unknown {
 	if (value === undefined) return undefined;

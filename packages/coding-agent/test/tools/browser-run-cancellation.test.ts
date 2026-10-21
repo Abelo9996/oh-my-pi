@@ -162,6 +162,11 @@ describe("browser run cancellation", () => {
 		).toBe(true);
 	});
 
+	it("claims a non-Error rejection, which has no stack to attribute, for the active run", () => {
+		// Before: left unclaimed, it ended the tab worker or the host process.
+		expect(isBrowserRunOwnedRejection({ message: "m" }, {}, "browser-run-run-1.js")).toBe(true);
+	});
+
 	it("keeps a later cause-wrapped rejection on the fatal path", async () => {
 		vi.useRealTimers();
 		const script = `
