@@ -67,6 +67,9 @@ const ADVANCE = 0.55;
  */
 const FONT =
 	"Geist, -apple-system, system-ui, 'SF Pro Text', Inter, 'Segoe UI', Roboto, 'Noto Sans', 'DejaVu Sans', Arial, 'Helvetica Neue', sans-serif";
+/** CJK text needs a face with the full-width punctuation and Han glyphs in the same run. */
+const CJK_FONT = "'Noto Sans CJK SC', 'Source Han Sans CN', 'PingFang SC', 'Microsoft YaHei', " + FONT;
+const CJK_TEXT = /[\u2e80-\u9fff\uac00-\ud7af\uff00-\uffef]/u;
 /** Series colors in draw order. */
 const SERIES = ["c1", "c2", "c3", "c4", "c5", "c6"] as const;
 /** Corner radius of bars, tracks and cells. */
@@ -130,6 +133,9 @@ const WIDE_LABEL_WIDTH = 260;
 const MAX_GROUP_CHARS = 20;
 /** Vertical space parting consecutive groups of category rows. */
 const GROUP_GAP = 8;
+/** Reserve for rasterizer font metrics beyond the UI-sans advance estimates. */
+const LABEL_FONT_SLACK = 1.4;
+const LABEL_GAP_SLACK = 8;
 /** Semibold text sets this much wider than {@link measure} estimates for regular text. */
 const SEMIBOLD_WIDTH = 1.06;
 /** Opacity of marks beside an emphasized one. */
@@ -263,8 +269,16 @@ export function renderChartSvg(spec: ChartSpec): string {
 		height += 20;
 	}
 	height = Math.ceil(height + PAD);
+	const font =
+		CJK_TEXT.test(layer.body) ||
+		CJK_TEXT.test(header.body) ||
+		CJK_TEXT.test(head.body) ||
+		CJK_TEXT.test(key) ||
+		CJK_TEXT.test(caption)
+			? CJK_FONT
+			: FONT;
 	return [
-		`<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}" role="img" aria-label="${escapeXml(chartAlt(spec))}" font-family="${FONT}" font-size="${LABEL_SIZE}">`,
+		`<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}" role="img" aria-label="${escapeXml(chartAlt(spec))}" font-family="${font}" font-size="${LABEL_SIZE}">`,
 		layer.body.includes(`url(#${INK_MASK})`) ? INK_DEFS : "",
 		`<g transform="translate(0 ${PAD})">${header.body}</g>`,
 		head.body && `<g transform="translate(0 ${num(PAD + header.height)})">${head.body}</g>`,
@@ -4053,12 +4067,10 @@ function labelText(x: number, y: number, lines: readonly string[], style: TextSt
 }
 
 /**
- * Category names down the label column, centred on their rows from `tops`;
- * a group's name once, semibold, beside its first member. Names start at the
- * column's left, so one set wider than {@link measure} estimates (another
- * font, a larger size) runs toward the plot instead of off the canvas. Long
- * names wrap to two lines ({@link categoryLines}); the renderer grows its rows
- * to hold them ({@link labelRow}).
+ * Category names down the label column, centred on their rows from `tops`.
+ * A group's name sits beside its first member; long names wrap to two lines.
+ * Clip only the labels when an installed font exceeds the width estimate,
+ * leaving the matrix and plot separated by the plot's own gap.
  */
 function categoryLabels(
 	spec: ChartSpec,
@@ -4076,39 +4088,40 @@ function categoryLabels(
 		return state ? dot(x + 4, middle(at), 4, STATUS_COLORS[state]) : "";
 	};
 	const lines = categoryLines(spec);
-	if (!groups)
-		return (
-			matrix +
-			lines
-				.map(
-					(name, at) =>
-						badge(PAD, at) +
-						labelText(PAD + badges, middle(at), name, {
-							fill: "fg",
-							weight: strong.has(at) ? 600 : undefined,
-						}),
-				)
-				.join("")
-		);
-	const memberX = PAD + groupNameWidth(groups) + 10;
-	const heads = clipNames(
-		groups.map(group => group.name),
-		groupChars(groups),
-	);
 	const parts: string[] = [matrix];
-	let at = 0;
-	groups.forEach((group, index) => {
-		parts.push(text(PAD, middle(at), heads[index]!, { fill: "fg", weight: 600 }));
-		for (const end = at + group.members.length; at < end; at++)
-			parts.push(
-				badge(memberX, at) +
-					labelText(memberX + badges, middle(at), lines[at]!, {
+	if (!groups) {
+		parts.push(
+			...lines.map(
+				(name, at) =>
+					badge(PAD, at) +
+					labelText(PAD + badges, middle(at), name, {
 						fill: "fg",
 						weight: strong.has(at) ? 600 : undefined,
 					}),
-			);
-	});
-	return parts.join("");
+			),
+		);
+	} else {
+		const memberX = PAD + groupNameWidth(groups) + 10;
+		const heads = clipNames(
+			groups.map(group => group.name),
+			groupChars(groups),
+		);
+		let at = 0;
+		groups.forEach((group, index) => {
+			parts.push(text(PAD, middle(at), heads[index]!, { fill: "fg", weight: 600 }));
+			for (const end = at + group.members.length; at < end; at++)
+				parts.push(
+					badge(memberX, at) +
+						labelText(memberX + badges, middle(at), lines[at]!, {
+							fill: "fg",
+							weight: strong.has(at) ? 600 : undefined,
+						}),
+				);
+		});
+	}
+	const width = num(PAD + labelColumnWidth(spec));
+	const id = `chart-label-${width}`;
+	return `<defs><clipPath id="${id}"><rect x="0" y="0" width="${width}" height="1000000"/></clipPath></defs><g clip-path="url(#${id})">${parts.join("")}</g>`;
 }
 
 /** Characters a matrix column's heading takes per line, wrapped to two lines at most. */
@@ -4210,7 +4223,7 @@ function rowTops(spec: ChartSpec, top: number, rowHeight: number): number[] {
 	return tops;
 }
 
-/** Width of the category label column: the widest name, or the widest group name beside the widest member. */
+/** Width of the category label column, allowing for the rendered font's metrics. */
 function labelColumnWidth(spec: ChartSpec): number {
 	// One line sets at the label size, a wrapped pair a step smaller.
 	const widest = Math.max(
@@ -4222,7 +4235,11 @@ function labelColumnWidth(spec: ChartSpec): number {
 	const { groups } = spec;
 	const width = groups ? groupNameWidth(groups) + 10 + widest : widest;
 	const matrix = matrixColumns(spec).reduce((sum, column) => sum + column.width, 0);
-	return Math.max(4 * LABEL_SIZE * ADVANCE, width) + (spec.status?.some(Boolean) ? STATUS_WIDTH : 0) + matrix;
+	return (
+		Math.max(4 * LABEL_SIZE * ADVANCE, width * LABEL_FONT_SLACK + LABEL_GAP_SLACK) +
+		(spec.status?.some(Boolean) ? STATUS_WIDTH : 0) +
+		matrix
+	);
 }
 
 /** Width of the widest semibold group name. */

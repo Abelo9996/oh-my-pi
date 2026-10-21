@@ -604,6 +604,30 @@ describe("renderChartSvg", () => {
 		expect(svg.match(/>bash</g)).toHaveLength(2);
 	});
 
+	it("keeps mixed CJK labels on a CJK-capable face and away from bars", () => {
+		const analysis = analyze(`| Reference change | Count |
+|---|---:|
+| contradicted → insufficient | 27 |
+| insufficient（删除后） | 45 |`);
+		const spec = buildChart(analysis, { kind: "bar", label: 0, series: [1], transpose: false })!;
+		const svg = renderChartSvg(spec);
+		const font = /<svg[^>]*font-family="([^"]+)"/.exec(svg)?.[1];
+		expect(font?.startsWith("'Noto Sans CJK SC', 'Source Han Sans CN'")).toBe(true);
+		expect(svg).toContain(">insufficient（删除后）</text>");
+		const clipEnd = Number(/<clipPath[^>]*><rect[^>]*width="([\d.]+)"/.exec(svg)?.[1]);
+		const plotStart = Number(/<line x1="([\d.]+)"[^>]*stroke="var\(--border\)"/.exec(svg)?.[1]);
+		// The reported rendered label is ~209 units wide at x=12; even if a font is wider, clip before the plot.
+		expect(clipEnd).toBeGreaterThan(12 + 209);
+		expect(plotStart - clipEnd).toBeGreaterThanOrEqual(10);
+		expect(svg).toContain('clip-path="url(#chart-label-');
+	});
+
+	it("keeps the Latin UI face when category labels have no CJK glyphs", () => {
+		const analysis = analyze(TIMINGS);
+		const svg = renderChartSvg(buildChart(analysis, planChart(analysis)!)!);
+		expect(/<svg[^>]*font-family="([^"]+)"/.exec(svg)?.[1]).toMatch(/^Geist,/);
+	});
+
 	it("draws a heatmap's columns of different quantities as bars on their own axes", () => {
 		const analysis = analyze(NESTED);
 		const plan = planChart(analysis)!;

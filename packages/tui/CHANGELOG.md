@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed autoGraph chart labels rendering CJK characters as boxes or overlapping bars ([#16623](https://github.com/can1357/oh-my-pi/issues/16623))
+
 ## [18.12.4] - 2026-10-20
 
 ### Added
