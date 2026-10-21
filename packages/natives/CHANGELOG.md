@@ -6,7 +6,6 @@
 
 - Fixed cancellation interrupting shell TERM cleanup before it could finish ([#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
 
-## [18.11.3] - 2026-10-16
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
