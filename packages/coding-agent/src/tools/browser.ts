@@ -60,8 +60,11 @@ import { cfgToolsMaxTimeout } from "./settings";
 export type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 
 /** First-use boundary for the generated Playwright ARIA evaluator bundle. */
-export function buildAriaSnapshotScript(selector: string | undefined, options: AriaSnapshotOptions = {}): string {
-	return require("./browser/aria/aria-snapshot").buildAriaSnapshotScript(selector, options);
+export function buildAriaSnapshotPayloadScript(
+	selector: string | undefined,
+	options: AriaSnapshotOptions = {},
+): string {
+	return require("./browser/aria/aria-snapshot").buildAriaSnapshotPayloadScript(selector, options);
 }
 
 /** First-use boundary for ARIA-ref parsing; keeps evaluator construction out of tool registration. */

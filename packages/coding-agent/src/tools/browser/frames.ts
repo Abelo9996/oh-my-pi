@@ -7,11 +7,16 @@ import type { ElementHandle, ElementScreenshotOptions, Frame, Page } from "puppe
 import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "./aria/aria-snapshot";
+import {
+	type AriaSnapshotOptions,
+	type AriaSnapshotPayload,
+	buildAriaSnapshotPayloadScript,
+} from "./aria/aria-snapshot";
 import { clickElement, fillViaHandle, focusTextEntryTarget, pressKey } from "./interactions";
 import { readPageViewport } from "./launch";
 import { RunOutput } from "./run-output";
 import { whileDrawing } from "./screenshot";
+import { postProcessAriaSnapshot } from "./snapshot-plus";
 import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** JSON-safe metadata for one document frame. */
@@ -345,9 +350,10 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			}),
 		ariaSnapshot: (selector, options) =>
 			hooks.op("frame.ariaSnapshot()", hooks.quickOpMs, async signal => {
-				return (await untilAborted(signal, () =>
-					frame.evaluate(buildAriaSnapshotScript(selector, options)),
-				)) as string;
+				const payload = (await untilAborted(signal, () =>
+					frame.evaluate(buildAriaSnapshotPayloadScript(selector, options)),
+				)) as AriaSnapshotPayload;
+				return postProcessAriaSnapshot(payload.snapshot, options, payload.hrefs);
 			}),
 		evaluate: ((fn: string | ((...args: unknown[]) => unknown), ...args: unknown[]) =>
 			hooks.op("frame.evaluate()", Number.POSITIVE_INFINITY, signal =>

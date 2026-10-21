@@ -152,21 +152,14 @@ export function parseAriaRefSelector(selector: string): string | null {
 
 /**
  * Build a self-contained expression script that runs the vendored bundle in the
- * page and returns the ARIA snapshot YAML. Used by the cmux backend, whose
- * `browser.eval` RPC takes a script string and returns the completion value (it
- * has no ElementHandle to pass in). The script resolves `selector` via
- * `document.querySelector` in-page (CSS selectors only) or falls back to the
- * whole document. Like the puppeteer path it installs nothing on `window`, but
- * cmux runs the expression in the page world and therefore has its own ref
- * namespace.
+ * page world and returns the raw ARIA snapshot YAML plus link destinations
+ * (resolved only when `options.urls`). Callers apply
+ * {@link postProcessAriaSnapshot} for `interactive`/`compact`/`urls`. Used by the
+ * cmux backend, whose `browser.eval` RPC takes a script string, and by Chromium
+ * frame handles. The script resolves `selector` via `document.querySelector`
+ * in-page (CSS selectors only) or falls back to the whole document. It installs
+ * nothing on `window`, but page-world refs form their own namespace.
  */
-export function buildAriaSnapshotScript(selector: string | undefined, options: AriaSnapshotOptions = {}): string {
-	const request = { depth: options.depth, boxes: options.boxes };
-	const sel = selector ? JSON.stringify(selector) : "null";
-	return `(function(){var module={exports:{}};\n${ariaBundle}\nvar __sel=${sel};var __root=__sel?document.querySelector(__sel):null;if(__sel&&!__root)throw new Error("tab.ariaSnapshot: selector "+__sel+" matched no element");return module.exports.ariaSnapshot(__root,${JSON.stringify(request)});})()`;
-}
-
-/** Build the cmux page-world expression returning snapshot text plus link destinations. */
 export function buildAriaSnapshotPayloadScript(
 	selector: string | undefined,
 	options: AriaSnapshotOptions = {},
