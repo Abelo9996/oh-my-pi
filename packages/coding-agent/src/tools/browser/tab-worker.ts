@@ -142,8 +142,7 @@ import {
 	BrowserTracingController,
 } from "./tracing";
 import {
-	installWebMcp,
-	type WebMcpController,
+	WebMcpController,
 	type WebMcpEventsOptions,
 	type WebMcpEventsResult,
 	type WebMcpInvokeOptions,
@@ -1783,7 +1782,7 @@ export class WorkerCore {
 				// interactive without raising a window; explicit settle-freeze still applies.
 				await this.#page.emulateFocusedPage(true);
 			}
-			this.#webmcp = await installWebMcp(this.#page);
+			this.#webmcp = new WebMcpController(this.#page);
 			await installVitalsObservers(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
 			if (payload.ignoreHttpsErrors) this.#certificateOverride = await applyIgnoreHttpsErrors(this.#page);
