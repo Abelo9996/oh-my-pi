@@ -340,10 +340,20 @@ pub fn offset_drawing_for_subgraphs(graph: &mut AsciiGraph) {
 /// subgraph sizing.
 pub fn create_mapping(graph: &mut AsciiGraph) {
 	let direction = graph.config.direction;
+	// Parallel routes can need a free corridor on the outer side of the first
+	// row/column of nodes; without it, an occupied border port has no approach.
+	let outer_corridor = graph.edges.iter().enumerate().any(|(id, edge)| {
+		edge.from != edge.to
+			&& graph.edges[..id]
+				.iter()
+				.any(|other| routing::same_pair(edge, other))
+	});
+	let outer_offset = if outer_corridor { 4 } else { 0 };
 	let layering = layering::layer(graph);
 	for row in &layering.order {
 		for &node in row {
-			let (level, position) = (layering.rank[node] as i32 * 4, layering.slot[node] as i32 * 4);
+			let (level, position) =
+				(layering.rank[node] as i32 * 4, layering.slot[node] as i32 * 4 + outer_offset);
 			let requested = match direction {
 				LayoutDirection::LR => GridCoord::new(level, position),
 				LayoutDirection::TD => GridCoord::new(position, level),
