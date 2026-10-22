@@ -6,6 +6,10 @@
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
+### Fixed
+
+- Fixed a parent follow-up consumed while a kept-alive subagent resumes from queued steering or an async completion leaving `agent://` on the previous result instead of delivering the fresh answer ([#16746](https://github.com/can1357/oh-my-pi/issues/16746))
+
 ## [18.12.6] - 2026-10-21
 
 ### Added

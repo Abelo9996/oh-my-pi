@@ -2140,11 +2140,22 @@ export class AgentSession implements SettingsScope {
 					this.#foldStrandedIrcAsidesIntoContext(messages);
 					return;
 				}
+				const observation =
+					this.#ircWakeTurnObserver && !this.#openTurnObservation
+						? this.#startTurnObservation(messages)
+						: undefined;
+				let turnError: unknown;
 				const inFlightEpoch = this.#beginInFlight();
 				try {
 					await this.agent.prompt(messages.length === 1 ? first : messages);
+				} catch (error) {
+					turnError = error;
+					throw error;
 				} finally {
 					this.#endInFlight(inFlightEpoch);
+					// The delivery receipt settles when injectIdle returns; waiting for
+					// owned deliveries here would wait on this very flush.
+					void this.#finishTurnObservation(observation, turnError);
 				}
 			},
 			scheduleIdleFlush: run => {
@@ -4991,6 +5002,7 @@ export class AgentSession implements SettingsScope {
 		signal: AbortSignal,
 		request: ScheduledAgentContinueRequest,
 		coalescedSources: Set<string>,
+		onStart?: () => void,
 	): Promise<AgentContinueOutcome> {
 		try {
 			// During an automatic-retry saga the primary model's selector cooldown
@@ -5025,6 +5037,7 @@ export class AgentSession implements SettingsScope {
 			}
 			for (;;) {
 				try {
+					if (!this.agent.state.isStreaming) onStart?.();
 					await this.agent.continue(signal);
 					return { status: "completed" };
 				} catch (error) {
@@ -5133,7 +5146,13 @@ export class AgentSession implements SettingsScope {
 
 				const inFlightEpoch = this.#beginInFlight();
 				const coalescedSources = new Set([options.source]);
-				const promise = this.#runAgentContinue(signal, request, coalescedSources);
+				let observation: TurnObservation | undefined;
+				const onStart = this.#ircWakeTurnObserver
+					? () => {
+							observation = this.#startTurnObservation([]);
+						}
+					: undefined;
+				const promise = this.#runAgentContinue(signal, request, coalescedSources, onStart);
 				const attempt: ActiveAgentContinue = {
 					schedulerToken: request.schedulerToken,
 					turnEnded: false,
@@ -5142,8 +5161,10 @@ export class AgentSession implements SettingsScope {
 					promise,
 				};
 				this.#activeAgentContinue = attempt;
+				let outcome: AgentContinueOutcome | undefined;
 				try {
-					this.#handleAgentContinueOutcome(await promise, request);
+					outcome = await promise;
+					this.#handleAgentContinueOutcome(outcome, request);
 				} finally {
 					// Clear the active attempt BEFORE #endInFlight(): the settle drain it
 					// triggers (#drainStrandedQueuedMessages -> queued-message-drain) runs
@@ -5154,6 +5175,7 @@ export class AgentSession implements SettingsScope {
 					}
 					this.#usagePreflightReadyForNextModelCall = false;
 					this.#endInFlight(inFlightEpoch);
+					void this.#finishTurnObservation(observation, outcome?.status === "failed" ? outcome.error : undefined);
 				}
 			},
 			{
@@ -12009,8 +12031,8 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Installs task-executor monitoring around turns no executor drives: autonomous IRC
-	 * wake turns and user prompts (focused-session steering of a kept-alive subagent).
+	 * Installs task-executor monitoring around kept-alive subagent turns that
+	 * have no executor caller: IRC wakes, focused prompts and bare continuations.
 	 */
 	setIrcWakeTurnObserver(
 		observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
