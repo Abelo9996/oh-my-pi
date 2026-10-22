@@ -3,11 +3,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
-import * as taskModule from "@oh-my-pi/pi-coding-agent/task";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
-import { TaskTool, type TaskParams, type TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task";
+import type { TaskParams, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task";
 import { BUILTIN_LIFECYCLE_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-lifecycle";
 import * as seanceResolver from "@oh-my-pi/pi-coding-agent/task/seance";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -21,9 +17,6 @@ const command = BUILTIN_LIFECYCLE_SLASH_COMMANDS.find(candidate => candidate.nam
 async function runSeanceCommand(ctx: InteractiveModeContext, args: string): Promise<void> {
 	if (!command?.handleTui) throw new Error("/seance TUI handler is not registered");
 	await command.handleTui({ name: "seance", args, text: `/seance ${args}` }, { ctx });
-	const settled = Promise.withResolvers<void>();
-	setImmediate(settled.resolve);
-	await settled.promise;
 }
 
 function sourceSession(path: string): SessionInfo {
@@ -40,39 +33,8 @@ function sourceSession(path: string): SessionInfo {
 	};
 }
 
-const realExecuteTaskFromHost = taskModule.executeTaskFromHost;
-
-async function registerTaskTool(ctx: InteractiveModeContext, execute: AgentTool["execute"]) {
-	ctx.session.buildToolContext = () => ({
-		sessionManager: ctx.session.sessionManager,
-		modelRegistry: ctx.session.modelRegistry,
-		model: ctx.session.model,
-		isIdle: () => true,
-		hasQueuedMessages: () => false,
-		abort: () => {},
-		settings: ctx.session.settings,
-	});
-	const tool = await TaskTool.create({
-		cwd: ctx.session.sessionManager.getCwd(),
-		hasUI: false,
-		settings: ctx.session.settings,
-		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
-	} as unknown as ToolSession);
-	vi.spyOn(tool, "execute").mockImplementation(
-		(callId, params, signal, onUpdate, context) =>
-			execute.call(tool as unknown as AgentTool, callId, params, signal, onUpdate, context) as Promise<
-				AgentToolResult<TaskToolDetails>
-			>,
-	);
-	const runner = {
-		consumeToolCallEmitted: () => false,
-		hasHandlers: () => false,
-		hasSessionApproval: () => false,
-		runScoped: <T>(fn: () => T): T => fn(),
-	} as unknown as ExtensionRunner;
-	ctx.session.agent.state.tools = [new ExtensionToolWrapper(tool as unknown as AgentTool, runner)];
-	return vi.spyOn(taskModule, "executeTaskFromHost").mockImplementation(realExecuteTaskFromHost);
+function registerTaskTool(ctx: InteractiveModeContext, execute: AgentTool["execute"]): void {
+	ctx.session.agent.state.tools = [{ name: "task", execute } as unknown as AgentTool];
 }
 
 function taskResult(details: Partial<TaskToolDetails>, text = ""): AgentToolResult<TaskToolDetails> {
@@ -166,22 +128,13 @@ describe("/seance", () => {
 				});
 			},
 		);
-		const executeHost = await registerTaskTool(ctx, execute as AgentTool["execute"]);
+		registerTaskTool(ctx, execute as AgentTool["execute"]);
 		ctx.showSessionSelector = vi.fn();
 		ctx.showHookSelector = vi.fn();
 		ctx.showModelSelector = vi.fn();
 
 		await runSeanceCommand(ctx, `${resolved.path} --model openai/requested-model`);
 
-		expect(executeHost).toHaveBeenCalledWith(
-			expect.any(ExtensionToolWrapper),
-			expect.any(String),
-			expect.not.objectContaining({ model: expect.anything() }),
-			"openai/requested-model",
-			expect.objectContaining({ settings: ctx.session.settings }),
-			undefined,
-			expect.any(Function),
-		);
 		expect(ctx.showSessionSelector).not.toHaveBeenCalled();
 		expect(ctx.showHookSelector).not.toHaveBeenCalled();
 		expect(ctx.showModelSelector).not.toHaveBeenCalled();
@@ -189,52 +142,6 @@ describe("/seance", () => {
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("progress-id"));
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("openai/actual-model"));
 	});
-	it("passes a user-selected saved model through the host route outside tool arguments", async () => {
-		const resolved = sourceSession("/repo/.omp/sessions/saved.jsonl");
-		const selectors = ["anthropic/saved-active", "openai/saved-default"];
-		vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({
-			file: resolved.path,
-			id: resolved.id,
-			modelSelectors: selectors,
-		});
-		const ctx = createInteractiveModeContext();
-		ctx.showHookSelector = vi.fn(async () => "Use saved model");
-		const executeHost = await registerTaskTool(
-			ctx,
-			vi.fn(async () =>
-				taskResult({
-					results: [{ id: "saved-seance", exitCode: 0, resolvedModel: selectors[0] } as never],
-				}),
-			) as AgentTool["execute"],
-		);
-		await runSeanceCommand(ctx, resolved.path);
-		expect(executeHost).toHaveBeenCalledWith(
-			expect.any(ExtensionToolWrapper),
-			expect.any(String),
-			expect.not.objectContaining({ model: expect.anything() }),
-			selectors,
-			expect.objectContaining({ settings: ctx.session.settings }),
-			undefined,
-			expect.any(Function),
-		);
-		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("saved-seance"));
-	});
-	it("rejects an unsupported custom task tool before invoking it with a user model choice", async () => {
-		const resolved = sourceSession("/repo/.omp/sessions/custom.jsonl");
-		vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({
-			file: resolved.path,
-			id: resolved.id,
-			modelSelectors: [],
-		});
-		const ctx = createInteractiveModeContext();
-		const execute = vi.fn(async () => taskResult({}));
-		await registerTaskTool(ctx, execute as AgentTool["execute"]);
-		ctx.session.agent.state.tools = [{ name: "task", execute } as unknown as AgentTool];
-		await runSeanceCommand(ctx, `${resolved.path} --model openai/requested-model`);
-		expect(execute).not.toHaveBeenCalled();
-		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("does not support host model selection"));
-	});
-
 	it("surfaces live async progress IDs and resolved model", async () => {
 		const resolved = sourceSession("/repo/.omp/sessions/async.jsonl");
 		vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({
@@ -258,7 +165,7 @@ describe("/seance", () => {
 				return snapshot;
 			},
 		);
-		await registerTaskTool(ctx, execute as AgentTool["execute"]);
+		registerTaskTool(ctx, execute as AgentTool["execute"]);
 
 		await runSeanceCommand(ctx, `${resolved.path} --model openai/requested-model`);
 
@@ -295,7 +202,7 @@ describe("/seance", () => {
 				return taskResult({ results: [{ id: "settled-id", exitCode: 0 } as never] });
 			},
 		);
-		await registerTaskTool(ctx, execute as AgentTool["execute"]);
+		registerTaskTool(ctx, execute as AgentTool["execute"]);
 
 		await runSeanceCommand(ctx, `${resolved.path} --model openai/requested-model`);
 
@@ -335,7 +242,7 @@ describe("/seance", () => {
 				});
 			},
 		);
-		await registerTaskTool(ctx, execute as AgentTool["execute"]);
+		registerTaskTool(ctx, execute as AgentTool["execute"]);
 
 		await runSeanceCommand(ctx, `${resolved.path} --model openai/requested-model`);
 
@@ -369,7 +276,7 @@ describe("/seance", () => {
 			abortReason,
 		};
 		const renderedResult = formatTaskResultSummary(abortedResult, { totalDurationMs: 0 });
-		await registerTaskTool(
+		registerTaskTool(
 			ctx,
 			vi.fn(async () => taskResult({ results: [abortedResult] }, renderedResult)) as AgentTool["execute"],
 		);
@@ -390,12 +297,12 @@ describe("/seance", () => {
 		const ctx = createInteractiveModeContext();
 		ctx.showHookSelector = vi.fn(async () => "Use saved model");
 		const preflight = "Source session is missing\n\u001b[31m";
-		await registerTaskTool(ctx, vi.fn(async () => taskResult({}, preflight)) as AgentTool["execute"]);
+		registerTaskTool(ctx, vi.fn(async () => taskResult({}, preflight)) as AgentTool["execute"]);
 		await runSeanceCommand(ctx, `${resolved.path} --model openai/model`);
 		expect(ctx.showError).toHaveBeenCalledWith(sanitizeErrorLine(preflight));
 
 		const thrown = new Error("Session fork failed\n\u001b[31m");
-		await registerTaskTool(
+		registerTaskTool(
 			ctx,
 			vi.fn(async () => {
 				throw thrown;

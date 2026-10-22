@@ -479,20 +479,20 @@ describe("WorkPool model selection", () => {
 		first.resolve();
 		await finishPool(session, workpool);
 		expect(initial.mock.calls).toHaveLength(1);
-		expect(initial.mock.calls[0]?.[0].model).toEqual(selected);
+		expect(initial.mock.calls[0]?.[0].perCallModel).toEqual(selected);
 		expect(follow.mock.calls).toHaveLength(1);
 		const workerId = initial.mock.calls[0]?.[0].identity?.id;
 		if (!workerId) throw new Error("First turn did not receive a worker id");
 		expect(follow.mock.calls[0]?.[0].id).toBe(workerId);
-		expect(follow.mock.calls[0]?.[0]).not.toHaveProperty("model");
+		expect(follow.mock.calls[0]?.[0]).not.toHaveProperty("perCallModel");
 	});
 
 	it("keeps independent selections for separate pools", async () => {
 		const session = makeSession();
-		const selections = new Map<string, string | string[] | undefined>();
+		const selections = new Map<string, string | undefined>();
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			const id = request.identity?.id ?? "missing";
-			selections.set(id, request.model);
+			selections.set(id, request.perCallModel);
 			markIdle(id);
 			return execution(id);
 		});

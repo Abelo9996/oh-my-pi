@@ -1,8 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -22,9 +20,6 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { PreparedSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
 import { seanceIsolationOptions } from "@oh-my-pi/pi-coding-agent/task/seance-policy";
-import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
-import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getAgentDir, prompt, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -127,120 +122,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	vi.restoreAllMocks();
 	IrcBus.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 });
 
 describe("seance startup contracts", () => {
-	it("rechecks current grants before a saved-model seance dispatches after cold revival", async () => {
-		using tempDir = TempDir.createSync("@omp-seance-model-revival-");
-		const cwd = tempDir.path();
-		const sourceFile = path.join(cwd, "source.jsonl");
-		const sourceId = "seance-model-revival";
-		registerMockApi(sourceId);
-		const model = createMockModel({ id: "seance-saved", handler: () => ({ content: ["Source evidence"] }) });
-		const authStorage = await AuthStorage.create(":memory:");
-		authStorage.keys.setRuntime("mock", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
-		const find = modelRegistry.find.bind(modelRegistry);
-		modelRegistry.find = (provider, id) =>
-			provider === model.provider && id === model.id ? model : find(provider, id);
-		modelRegistry.getAvailable = () => [model];
-		const identity = `${model.provider}/${model.id}`;
-		await Bun.write(
-			sourceFile,
-			`${[
-				sourceHeader("source-session", cwd),
-				sourceMessage(),
-				{
-					type: "model_change",
-					id: "source-model",
-					parentId: "source-user",
-					timestamp: "2026-10-01T00:00:03.000Z",
-					model: identity,
-					role: "default",
-				},
-			]
-				.map(entry => JSON.stringify(entry))
-				.join("\n")}\n`,
-		);
-		const settings = Settings.isolated({
-			"task.perCallModel": "off",
-			"task.perCallModelAllow": [identity],
-			"compaction.enabled": false,
-		});
-		const agent = getBundledAgent("seance");
-		if (!agent) throw new Error("Expected the bundled seance agent");
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
-		const parent = {
-			cwd,
-			settings,
-			authStorage,
-			modelRegistry,
-			getSessionFile: () => path.join(cwd, "parent.jsonl"),
-			getSessionSpawns: () => "*",
-			getSessionAgents: () => [],
-		} as unknown as ToolSession;
-		const previousAgentDir = getAgentDir();
-		setAgentDir(path.join(cwd, "agent"));
-		let revived: AgentSession | undefined;
-		try {
-			const run = await runStructuredSubagent({
-				session: parent,
-				invocationKind: "task",
-				agent: "seance",
-				sourceSession: sourceFile,
-				assignment: "Read the source transcript.",
-				structured: false,
-				identity: { id: "SeanceApproval" },
-				keepAlive: false,
-			});
-			expect({ exitCode: run.result.exitCode, error: run.result.error, stderr: run.result.stderr }).toEqual({
-				exitCode: 0,
-				error: undefined,
-				stderr: "",
-			});
-			expect(model.calls).toHaveLength(1);
-			const sessionFile = path.join(cwd, "parent", "SeanceApproval.jsonl");
-			expect(await Bun.file(sessionFile).exists()).toBe(true);
-			const ref = AgentRegistry.global().register({
-				id: "SeanceApproval",
-				displayName: "seance",
-				kind: "sub",
-				parentId: "Main",
-				status: "parked",
-				session: null,
-				sessionFile,
-			});
-			const revokedSettings = Settings.isolated({ "task.perCallModelAllow": ["mock/another-model"] });
-			const owner = revivalParent(cwd, []);
-			owner.getSessionAgents = () => [];
-			const revive = await createPersistedSubagentReviverFactory({
-				session: owner,
-				authStorage,
-				modelRegistry,
-				settings: revokedSettings,
-				enableLsp: false,
-			})(ref);
-			if (!revive) throw new Error("Expected a cold seance reviver");
-			revived = await revive(ref);
-			await revived.prompt("Consult the source again.");
-			expect(model.calls).toHaveLength(1);
-			expect(revived.agent.state.messages.at(-1)).toMatchObject({
-				role: "assistant",
-				stopReason: "error",
-				errorMessage: expect.stringContaining("not an approved model"),
-			});
-		} finally {
-			await revived?.dispose();
-			await AgentRegistry.global().get("SeanceApproval")?.session?.dispose();
-			unregisterCustomApis(sourceId);
-			authStorage.close();
-			setAgentDir(previousAgentDir);
-		}
-	}, 30_000);
-
 	it("builds a fresh SDK session with only historical tools and no extensions or outbound IRC", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-sdk-fresh-");
 		const cwd = path.join(tempDir.path(), "project");

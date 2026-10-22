@@ -295,45 +295,26 @@ export const cfgTaskEnableEffort = register({
 export const cfgTaskPerCallModel = register({
 	id: "task.perCallModel",
 	type: "enum",
-	values: ["off", "unpinned", "on", "eval"] as const,
+	values: ["off", "eval", "on"] as const,
 	default: "off",
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
 		label: "Per-Call Model",
 		description:
-			"Whether task items, eval agent() and workpool() accept one exact provider/model[:level] selector. The model must be operator-approved; roles and arrays are not accepted. An agentModelOverrides entry conflicts with a per-call model.",
+			"Whether a subagent call may pick its model with one exact provider/model-id[:level] selector. Only models the configuration already routes to are accepted.",
 		options: [
-			{
-				value: "off",
-				label: "Off",
-				description: "Hide `model` from task schemas and prompts; eval agent() and workpool() reject it",
-			},
-			{
-				value: "unpinned",
-				label: "Unpinned",
-				description:
-					"Accept `model` only without a task.agentModelOverrides entry or a frontmatter model that pins the agent. Bundled `task` counts until modelRoles.task is set",
-			},
-			{
-				value: "on",
-				label: "On",
-				description:
-					"Accept `model` for agents without a task.agentModelOverrides entry, including agents with a frontmatter model",
-			},
-			{
-				value: "eval",
-				label: "Eval only",
-				description:
-					"Accept `model` in eval agent() and workpool() unless task.agentModelOverrides conflicts; task items behave as off",
-			},
+			{ value: "off", label: "Off", description: "Reject `model` on task items and eval agent()/workpool()" },
+			{ value: "eval", label: "Eval only", description: "Accept `model` in eval agent() and workpool() only" },
+			{ value: "on", label: "On", description: "Accept `model` on task items and in eval agent()/workpool()" },
 		],
 	},
 });
 
-export function getPerCallModelMode(settings: Settings, invocationKind: "task" | "eval"): "off" | "unpinned" | "on" {
+/** Whether `task.perCallModel` accepts a per-call `model` for this invocation kind. */
+export function perCallModelEnabled(settings: Settings, invocationKind: "task" | "eval"): boolean {
 	const mode = cfgTaskPerCallModel.get(settings);
-	return mode === "eval" ? (invocationKind === "eval" ? "on" : "off") : mode;
+	return mode === "on" || (mode === "eval" && invocationKind === "eval");
 }
 
 export const cfgTaskPerCallModelAllow = register({
@@ -346,33 +327,7 @@ export const cfgTaskPerCallModelAllow = register({
 		label: "Per-Call Model Allowlist",
 		editor: "json",
 		description:
-			'Chat roles or model patterns a per-call model may use, e.g. ["@smol", "@review", "anthropic/*"]; replaces the derived grants, and a listed pattern can grant models no role names. A listed role includes its retry fallback chain (subject to task.perCallModelFallbacks); list "@default" to allow the parent\'s model (only that model, not the default fallback chain). Empty: configured chat roles, bundled/user-level agent models, agent overrides and the parent\'s model; concrete chain entries count when enabled by task.perCallModelFallbacks.',
-	},
-});
-
-export const cfgTaskPerCallModelFallbacks = register({
-	id: "task.perCallModelFallbacks",
-	type: "enum",
-	values: ["select", "runtime", "off"] as const,
-	default: "off",
-	ui: {
-		tab: "tasks",
-		group: "Subagents",
-		label: "Per-Call Model Fallbacks",
-		description: "How retry fallback chain models (retry.fallbackChains) apply to per-call models.",
-		options: [
-			{
-				value: "select",
-				label: "Select",
-				description: "Chain models can be requested directly and used as runtime fallbacks",
-			},
-			{
-				value: "runtime",
-				label: "Runtime only",
-				description: "Chain models are used only when the requested model fails over",
-			},
-			{ value: "off", label: "Off", description: "No fallback: the subagent fails instead of switching models" },
-		],
+			'Exact provider/model-id entries, e.g. ["anthropic/claude-sonnet-4-5"]. When set, a per-call model must also be listed here. Empty: every model the configuration grants.',
 	},
 });
 

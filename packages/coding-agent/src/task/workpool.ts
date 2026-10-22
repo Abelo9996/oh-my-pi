@@ -389,7 +389,7 @@ export class WorkPool {
 							assignment: message,
 							...(this.context ? { context: this.context } : {}),
 							agent: this.policy.agentName,
-							...(this.#model !== undefined ? { model: this.#model } : {}),
+							...(this.#model !== undefined ? { perCallModel: this.#model } : {}),
 							identity: { id: agent.id },
 							customTools: this.customTools,
 							outputSchema,

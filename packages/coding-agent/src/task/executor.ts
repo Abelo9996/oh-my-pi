@@ -133,13 +133,7 @@ import {
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
 import { yieldSectionShapes } from "./yield-assembly";
-import {
-	assertPerCallModelApproved,
-	isPerCallModelApproved,
-	PerCallModelError,
-	perCallModelFallbackOverrides,
-	type PerCallModelGrants,
-} from "./model-approval";
+import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
 	cfgTaskPrewalk,
@@ -160,7 +154,6 @@ import {
 	cfgTierAnthropic,
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
-	cfgRetryModelFallback,
 	cfgDefaultThinkingLevel,
 } from "../session/settings";
 import { cfgDisabledProviders } from "../config/model-settings";
@@ -1129,17 +1122,9 @@ interface RootCompactionThresholds extends CompactionThresholdPair {
 	modelThresholdsEnabled: boolean;
 }
 
-/**
- * `retry.modelFallback` a per-spawn override replaced for one subagent (a per-call
- * worker under `task.perCallModelFallbacks: off`). The override applies to that
- * agent only; agents it spawns restore this value instead of inheriting it.
- */
-const kRestoredRetryModelFallback = Symbol("task.restoredRetryModelFallback");
-
-/** Settings from {@link createSubagentSettings}, tagged with its chain's root values. */
+/** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
 interface SubagentChainSettings extends Settings {
 	[kRootCompactionThresholds]?: RootCompactionThresholds;
-	[kRestoredRetryModelFallback]?: boolean;
 }
 
 /**
@@ -1178,10 +1163,8 @@ export function createSubagentSettings(
 		thresholdTokens: cfgCompactionThresholdTokens.get(baseSettings),
 		modelThresholdsEnabled: cfgCompactionModelThresholdsEnabled.get(baseSettings),
 	};
-	const restoredModelFallback = baseSettings[kRestoredRetryModelFallback];
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
 	const subagentSettings: SubagentChainSettings = baseSettings.overlay({
-		...(restoredModelFallback !== undefined && { "retry.modelFallback": restoredModelFallback }),
 		...(inheritedRootThresholds && {
 			"compaction.thresholdPercent": inheritedRootThresholds.thresholdPercent,
 			"compaction.thresholdTokens": inheritedRootThresholds.thresholdTokens,
@@ -1218,9 +1201,6 @@ export function createSubagentSettings(
 		...overrides,
 	});
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
-	if (restoredModelFallback !== undefined || overrides?.["retry.modelFallback"] !== undefined) {
-		subagentSettings[kRestoredRetryModelFallback] = restoredModelFallback ?? cfgRetryModelFallback.get(baseSettings);
-	}
 	return subagentSettings;
 }
 
@@ -4016,22 +3996,15 @@ interface SubagentSettingsRecipe {
 	parent: Settings;
 	layers: OverlayLayers;
 	rootThresholds: RootCompactionThresholds | undefined;
-	restoredRetryModelFallback: boolean | undefined;
 }
 
 function captureSubagentSettings(parent: Settings, settings: SubagentChainSettings): SubagentSettingsRecipe {
-	return {
-		parent,
-		layers: settings.overlayLayers(),
-		rootThresholds: settings[kRootCompactionThresholds],
-		restoredRetryModelFallback: settings[kRestoredRetryModelFallback],
-	};
+	return { parent, layers: settings.overlayLayers(), rootThresholds: settings[kRootCompactionThresholds] };
 }
 
 function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 	const settings: SubagentChainSettings = recipe.parent.restoreOverlay(recipe.layers);
 	settings[kRootCompactionThresholds] = recipe.rootThresholds;
-	settings[kRestoredRetryModelFallback] = recipe.restoredRetryModelFallback;
 	return settings;
 }
 
@@ -4216,7 +4189,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			...(advisorRolePattern
 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
 				: undefined),
-			...(options.perCallModelGrants ? perCallModelFallbackOverrides(settings) : undefined),
 		},
 		options.parentServiceTier,
 	);
@@ -4434,7 +4406,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					settings,
 					id,
-					{ perCallModel: options.perCallModelGrants !== undefined },
+					options.perCallModelGrants ? { exactOnly: true } : undefined,
 				),
 			);
 			if (options.perCallModelGrants && !model) {
@@ -4459,12 +4431,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Preflight skips these checks while the registry is cold, so hold the model
 			// a per-call child actually starts on to them before its session exists.
 			if (options.perCallModelGrants && model) {
-				if (modelResolutionWarning) {
-					throw new PerCallModelError(
-						`Per-call \`model\` ${JSON.stringify(modelPatterns)} has an invalid thinking suffix. Use a supported thinking level or a literal model ID.`,
-					);
-				}
-				assertPerCallModelApproved(model, options.perCallModelGrants, modelRegistry, "select");
+				assertPerCallModelApproved(model, options.perCallModelGrants, modelRegistry);
 			}
 			// The exact-name `task.agentServiceTierOverrides` entry dispatch resolved
 			// for this agent. The session evaluates it against its final model —
@@ -4562,30 +4529,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// fast/cheap target at its first edit/write — the same mechanism as the
 			// session-level --prewalk. The bundled generic `task` agent has no
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
-			// Resolution failures skip prewalk instead of failing the spawn.
-			let prewalk: Prewalk | undefined;
-			const prewalkPattern = preparedSession
-				? undefined
-				: resolveAgentPrewalkPattern({
-						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-					});
+			// Resolution failures skip prewalk instead of failing the spawn. A per-call
+			// worker never switches models, so it never prewalks.
 			const perCallModelGrants = options.perCallModelGrants;
+			let prewalk: Prewalk | undefined;
+			const prewalkPattern =
+				preparedSession || perCallModelGrants
+					? undefined
+					: resolveAgentPrewalkPattern({
+							settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+							agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+						});
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
 				const target = resolvedPrewalk.model;
-				if (
-					target &&
-					perCallModelGrants &&
-					!isPerCallModelApproved(target, perCallModelGrants, modelRegistry, "dispatch")
-				) {
-					// A per-call model must not be swapped mid-run for one the operator never approved.
-					logger.debug("Subagent prewalk target is not approved for the per-call model; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-					});
-				} else if (!target || !modelRegistry.hasConfiguredAuth(target)) {
+				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
 					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
 						agent: agent.name,
 						pattern: prewalkPattern,
@@ -4671,7 +4630,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					...(perCallModelGrants
 						? {
 								assertDispatchModel: (dispatchModel: Model) =>
-									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry, "dispatch"),
+									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry),
+								disableModelFallback: true,
 							}
 						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,

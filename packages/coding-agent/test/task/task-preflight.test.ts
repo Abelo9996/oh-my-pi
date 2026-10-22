@@ -2,16 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { executeTaskFromHost, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -39,30 +34,6 @@ function createSession(options: {
 		getSessionSpawns: () => options.spawns ?? "*",
 		asyncJobManager: options.manager,
 	} as unknown as ToolSession;
-}
-
-function hostContext(settings: Settings): AgentToolContext {
-	return {
-		sessionManager: SessionManager.inMemory(),
-		modelRegistry: {} as ModelRegistry,
-		model: undefined,
-		isIdle: () => true,
-		hasQueuedMessages: () => false,
-		abort: () => {},
-		settings,
-	};
-}
-
-function wrapTask(tool: TaskTool, block = false) {
-	const emitToolCall = vi.fn(async () => (block ? { block: true, reason: "Host task blocked" } : undefined));
-	const runner = {
-		consumeToolCallEmitted: () => false,
-		hasHandlers: (name: string) => name === "tool_call",
-		emitToolCall,
-		hasSessionApproval: () => false,
-		runScoped: <T>(fn: () => T): T => fn(),
-	} as unknown as ExtensionRunner;
-	return { wrapped: new ExtensionToolWrapper(tool as unknown as AgentTool, runner), emitToolCall };
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -218,119 +189,5 @@ describe("task async preflight", () => {
 		} finally {
 			await fs.rm(home, { recursive: true, force: true });
 		}
-	});
-
-	it.each([false, true])(
-		"keeps trusted host model choices through preflight and async=%s dispatch",
-		async asyncEnabled => {
-			mockDiscovery();
-			const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("HostRouter"));
-			const jobs = manager();
-			const tool = await TaskTool.create(
-				createSession({
-					manager: jobs,
-					settings: {
-						"async.enabled": asyncEnabled,
-						"task.batch": false,
-						"task.perCallModel": "off",
-						modelRoles: { review: "p/requested" },
-						"task.agentModelOverrides": { task: "p/pinned" },
-					},
-				}),
-			);
-			const { wrapped, emitToolCall } = wrapTask(tool);
-			const outcome = await executeTaskFromHost(
-				wrapped,
-				"host-model",
-				{ name: "HostRouter", agent: "task", task: "Do the work." },
-				["@review", "p/alternative"],
-				hostContext(Settings.isolated()),
-			);
-			expect(emitToolCall).toHaveBeenCalledTimes(1);
-			expect(outcome.isError).not.toBe(true);
-			if (asyncEnabled) await jobs.waitForAll();
-			expect(runSubprocess.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested", "p/alternative"]);
-			expect(runSubprocess.mock.calls[0]?.[0]?.perCallModelGrants).toBeUndefined();
-		},
-	);
-
-	it("rejects a raw model supplied alongside a trusted host choice before registering jobs", async () => {
-		mockDiscovery();
-		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("unexpected"));
-		const jobs = manager();
-		const register = vi.spyOn(jobs, "register");
-		const tool = await TaskTool.create(createSession({ manager: jobs, settings: { "task.batch": false } }));
-		const outcome = await executeTaskFromHost(
-			wrapTask(tool).wrapped,
-			"host-model-conflict",
-			{ name: "Conflict", agent: "task", task: "Do the work.", model: "p/raw" },
-			"p/trusted",
-			hostContext(Settings.isolated()),
-		);
-		expect(outcome.isError).toBe(true);
-		expect(textOf(outcome)).toMatch(/model/);
-		expect(register).not.toHaveBeenCalled();
-		expect(runSubprocess).not.toHaveBeenCalled();
-	});
-
-	it.each(["deny", "extension"])("preserves %s blocking before host task jobs or execution", async policy => {
-		mockDiscovery();
-		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("unexpected"));
-		const jobs = manager();
-		const register = vi.spyOn(jobs, "register");
-		const tool = await TaskTool.create(createSession({ manager: jobs, settings: { "task.batch": false } }));
-		const { wrapped, emitToolCall } = wrapTask(tool, policy === "extension");
-		const settings = Settings.isolated(policy === "deny" ? { "tools.approval": { task: "deny" } } : {});
-		await expect(
-			executeTaskFromHost(
-				wrapped,
-				"host-blocked",
-				{ name: "Blocked", agent: "task", task: "Do the work." },
-				"p/trusted",
-				hostContext(settings),
-			),
-		).rejects.toThrow(policy === "deny" ? /blocked by user policy/i : "Host task blocked");
-		expect(emitToolCall).toHaveBeenCalledTimes(policy === "deny" ? 0 : 1);
-		expect(register).not.toHaveBeenCalled();
-		expect(runSubprocess).not.toHaveBeenCalled();
-	});
-
-	it("routes a per-call model on a task item into the spawn", async () => {
-		mockDiscovery();
-		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("Router"));
-		const jobs = manager();
-		const tool = await TaskTool.create(
-			createSession({
-				manager: jobs,
-				settings: { "async.enabled": false, "task.batch": true, "task.perCallModel": "on" },
-			}),
-		);
-
-		await tool.execute("per-call-model", {
-			context: "Shared context.",
-			tasks: [{ name: "Router", agent: "task", task: "Do the work.", model: "p/requested:high" }],
-		} as TaskParams);
-
-		expect(runSubprocess.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
-	});
-
-	it("rejects an ambiguous per-call model before dispatching the item", async () => {
-		mockDiscovery();
-		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("unexpected"));
-		const jobs = manager();
-		const tool = await TaskTool.create(
-			createSession({
-				manager: jobs,
-				settings: { "async.enabled": false, "task.batch": true, "task.perCallModel": "on" },
-			}),
-		);
-
-		const result = await tool.execute("ambiguous-model", {
-			context: "Shared context.",
-			tasks: [{ name: "Ambiguous", agent: "task", task: "Do the work.", model: "default" }],
-		} as TaskParams);
-
-		expect(textOf(result)).toMatch(/exact.*provider\/model/);
-		expect(runSubprocess).not.toHaveBeenCalled();
 	});
 });

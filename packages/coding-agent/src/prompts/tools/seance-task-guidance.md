@@ -1,2 +1,2 @@
-Historical consults: use `agent: "seance"` with `sourceSession` (id/path). The source stays unchanged. Saved source models must be available and approved by the current operator configuration; transcript records do not approve models.
-When per-call model selection is enabled, optional `model` selects one approved exact `provider/model-id`. If no saved model is approved and available, report the failure; the user can configure an approved model or choose a model with `/seance`.
+Historical consults: use `agent: "seance"` with `sourceSession` (id/path); optional `model` overrides the saved source model. The source stays unchanged.
+If the saved model is absent/unavailable, set `model` explicitly.

@@ -2,7 +2,6 @@ import type { TextContent } from "@oh-my-pi/pi-ai";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import type { TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { executeTaskFromHost } from "../task";
 import { discoverAgents } from "../task/discovery";
 import { isBundledSeance, resolveSeanceSource } from "../task/seance";
 import { SEANCE_AGENT_NAME } from "../task/seance-policy";
@@ -37,11 +36,7 @@ function parseSeanceArgs(args: string): ParsedSeanceArgs {
 	return { source, model };
 }
 
-async function launchSeance(
-	ctx: InteractiveModeContext,
-	sourceSession: string,
-	model: string | string[],
-): Promise<void> {
+async function launchSeance(ctx: InteractiveModeContext, sourceSession: string, model?: string): Promise<void> {
 	const taskTool = ctx.session.agent.state.tools.find(tool => tool.name === "task");
 	if (!taskTool) {
 		ctx.showError("The task tool is not available for /seance.");
@@ -52,6 +47,7 @@ async function launchSeance(
 		sourceSession,
 		task: seanceCommandPrompt,
 		solutionSpace: seanceCommandSolutionSpace.trim(),
+		...(model !== undefined ? { model } : {}),
 	};
 	const taskIds = new Set<string>();
 	let jobId: string | undefined;
@@ -69,17 +65,9 @@ async function launchSeance(
 		jobId = details.async?.jobId ?? jobId;
 	};
 	try {
-		const result = await executeTaskFromHost(
-			taskTool,
-			`seance-${Snowflake.next()}`,
-			params,
-			model,
-			ctx.session.buildToolContext(),
-			undefined,
-			update => {
-				collect(update.details);
-			},
-		);
+		const result = await taskTool.execute(`seance-${Snowflake.next()}`, params, undefined, update => {
+			collect(update.details as TaskToolDetails | undefined);
+		});
 		const details = result.details as TaskToolDetails | undefined;
 		collect(details);
 		const content = result.content
@@ -147,7 +135,7 @@ async function chooseSeanceModel(
 						{ label: "Choose another model", description: "Select a one-off model for this consultation" },
 					]);
 		if (choice === "Use saved model") {
-			void launchSeance(ctx, sourceSession, source.modelSelectors);
+			void launchSeance(ctx, sourceSession);
 		} else if (choice === "Choose another model") {
 			ctx.showModelSelector({
 				selectOnly: {

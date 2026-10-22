@@ -209,29 +209,11 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 - JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools?, model? })`; Python uses keyword arguments (`schema_mode`).
 - Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails handle allocation; Python raises directly, JS's pending handle rejects when awaited/used. Execution failures surface from `.wait()`.
-- `agent` defaults from the current spawn policy. `model` is the [per-call model](../task-agent-discovery.md#per-call-model): accepted only when `task.perCallModel` is not `off`, one exact operator-approved `provider/model-id[:level]` string, rejected when the agent has a `task.agentModelOverrides` entry, and highest in precedence. `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
+- `agent` defaults from the current spawn policy; `model` is the [per-call model](../task-agent-discovery.md#per-call-model): one exact operator-approved `provider/model-id[:level]`, accepted when `task.perCallModel` is `eval` or `on`, rejected for an agent with a `task.agentModelOverrides` entry. A workpool applies it to each worker's first turn; follow-up turns reuse that session. `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
 - Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
 - The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and handle `.wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (message with `write agent://<id>`, read transcripts at `history://<id>`) and get their own eval executors, like every subagent.
-
-#### Per-call model selection
-
-Set `task.perCallModel: eval` to allow model overrides here for any specialist without a `task.agentModelOverrides` entry, including a pinned `reviewer`, while ordinary task delegation keeps its configured routing. The parent model can call eval too; this controls where selection is offered, not a security boundary. Approval, allowlist, effort and dispatch checks remain the same.
-
-With `task.perCallModel` enabled, `agent()` and `workpool()` accept one exact `provider/model-id` string, optionally with a supported `:level`. Use a model your configuration already approves (for example the value of a configured `modelRoles` entry):
-
-```js
-const review = await agent("Review the change", { model: "anthropic/claude-sonnet-4-5:high" });
-const pool = await workpool("scout", { name: "research", model: "anthropic/claude-sonnet-4-5" });
-```
-
-```python
-review = agent("Review the change", model="anthropic/claude-sonnet-4-5:high")
-pool = workpool("scout", name="research", model="anthropic/claude-sonnet-4-5")
-```
-
-Role aliases (`@smol`, `@default`), arrays, comma lists, globs and partial ids are rejected. A model that is unavailable, unapproved or without working credentials fails the call instead of running on the parent's or any other model; runtime fallback to chain models is off unless `task.perCallModelFallbacks` enables it. A workpool applies its selector to each worker's **first turn**; follow-up turns reuse that worker's session. With `eval.workpool.freshAgents=true`, every new worker receives the pool selector.
 
 ### `wait()`
 

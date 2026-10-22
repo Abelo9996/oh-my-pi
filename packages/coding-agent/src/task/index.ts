@@ -19,7 +19,6 @@ import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
 import path from "node:path";
 import type {
 	AgentTool,
-	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ToolSpeculationPolicy,
@@ -81,32 +80,10 @@ import {
 	cfgTaskMaxConcurrency,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
-	getPerCallModelMode,
 	cfgTaskSpeculativeLaunch,
 	cfgTaskStructured,
+	perCallModelEnabled,
 } from "./settings";
-
-const TASK_HOST_MODEL = Symbol("taskHostModel");
-
-type HostTaskContext = AgentToolContext & {
-	[TASK_HOST_MODEL]?: { toolCallId: string; model: string | string[] };
-};
-
-export function executeTaskFromHost(
-	tool: AgentTool,
-	toolCallId: string,
-	params: TaskParams,
-	model: string | string[],
-	context: AgentToolContext,
-	signal?: AbortSignal,
-	onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
-): Promise<AgentToolResult<TaskToolDetails>> {
-	if ((tool as AgentTool & { [TASK_HOST_MODEL]?: boolean })[TASK_HOST_MODEL] !== true) {
-		throw new Error("The registered task tool does not support host model selection.");
-	}
-	const hostContext: HostTaskContext = { ...context, [TASK_HOST_MODEL]: { toolCallId, model } };
-	return tool.execute(toolCallId, params, signal, onUpdate, hostContext);
-}
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -177,7 +154,7 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
-	perCallModel: "off" | "unpinned" | "on";
+	perCallModelEnabled: boolean;
 	evalToolsEnabled: boolean;
 	structured: boolean;
 	asyncEnabled: boolean;
@@ -228,8 +205,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
-		perCallModelEnabled: options.perCallModel !== "off",
-		perCallModelUnpinnedOnly: options.perCallModel === "unpinned",
+		perCallModelEnabled: options.perCallModelEnabled,
 		evalToolsEnabled: options.evalToolsEnabled,
 		structured: options.structured,
 		asyncEnabled: options.asyncEnabled,
@@ -302,7 +278,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			const label = `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
 			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
-			const modelError = invalidModelSelectorReason(item.model, label);
+			const modelError = validateModel(item, label);
 			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
@@ -326,7 +302,19 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call") ?? invalidModelSelectorReason(params.model, "The call");
+	return validateEffort(params.effort, "The call") ?? validateModel(params, "The call");
+}
+
+/** The seance agent's `model` overrides its source's saved model; anywhere else it is the per-call selector. */
+function validateModel(item: TaskItem | TaskParams, label: string): string | undefined {
+	return item.agent === SEANCE_AGENT_NAME ? undefined : invalidModelSelectorReason(item.model, label);
+}
+
+function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "model" | "perCallModel"> {
+	if (params.model === undefined) return {};
+	if (params.agent === SEANCE_AGENT_NAME) return { model: params.model };
+	// `validateModel` rejected anything but one string before dispatch.
+	return typeof params.model === "string" ? { perCallModel: params.model } : {};
 }
 
 /**
@@ -613,7 +601,6 @@ export async function refreshAgentDiscovery(cwd: string, extensionRoots?: Effect
  * disabled, the tool blocks until every spawn finishes.
  */
 export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetails, Theme> {
-	readonly [TASK_HOST_MODEL] = true;
 	readonly name = "task";
 	readonly approval = "exec" as const;
 	readonly formatApprovalDetails = (args: unknown): string[] => {
@@ -749,7 +736,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			structured: this.#isStructured(),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
-			perCallModel: getPerCallModelMode(this.session.settings, "task") !== "off",
 		});
 	}
 
@@ -783,7 +769,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
-			perCallModel: getPerCallModelMode(this.session.settings, "task"),
+			perCallModelEnabled: perCallModelEnabled(this.session.settings, "task"),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
@@ -867,7 +853,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		index: number;
 		agentId?: string;
 		detached: boolean;
-		hostModel?: string | string[];
 	}): SpawnRun {
 		return new SpawnRun(
 			this.#permit,
@@ -882,7 +867,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawn.detached,
 					run.timing,
 					spawn.detached ? run.onArtifactsRetained : undefined,
-					spawn.hostModel,
 					run.tools,
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
@@ -934,7 +918,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * normalized task params rather than smuggling internal policy over the
 	 * task wire contract.
 	 */
-	#resolveSpawnPreflight(params: TaskParams, hostModel?: string | string[]) {
+	#resolveSpawnPreflight(params: TaskParams) {
 		return resolveEffectiveSubagentPolicy({
 			session: this.session,
 			invocationKind: "task",
@@ -942,8 +926,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
 			sourceSession: params.sourceSession,
-			model: params.model,
-			hostModel,
+			...spawnModelFields(params),
 			...this.#resultParams(params),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
@@ -967,21 +950,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		rawParams: unknown,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
-		context?: AgentToolContext,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		const hostSelection = (context as HostTaskContext | undefined)?.[TASK_HOST_MODEL];
-		const hostModel = hostSelection?.toolCallId === toolCallId ? hostSelection.model : undefined;
 		const launchSession = this.#launchSessions.get(toolCallId);
 		this.#launchSessions.delete(toolCallId);
 		try {
-			return await this.#dispatch(
-				toolCallId,
-				rawParams,
-				hostModel === undefined ? launchSession : undefined,
-				signal,
-				onUpdate,
-				hostModel,
-			);
+			return await this.#dispatch(toolCallId, rawParams, launchSession, signal, onUpdate);
 		} finally {
 			// No-op once dispatch adopted; otherwise nothing launched early may outlive the call.
 			launchSession?.discard("task call settled without adopting speculative launches");
@@ -994,7 +967,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		launchSession: TaskLaunchSession | undefined,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
-		hostModel?: string | string[],
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
@@ -1025,7 +997,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const preflights = await Promise.all(
 			normalizedSpawnParams.map(async spawn => {
 				try {
-					return { policy: await this.#resolveSpawnPreflight(spawn, hostModel) };
+					return { policy: await this.#resolveSpawnPreflight(spawn) };
 				} catch (error) {
 					return { error: error instanceof StructuredSubagentError ? error.message : String(error) };
 				}
@@ -1099,7 +1071,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				defaultAgent,
 				signal,
 				onUpdate,
-				hostModel,
 			);
 			if (!advisory) return result;
 			let appended = false;
@@ -1229,7 +1200,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					manager,
 					toolCallId,
 					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
-					hostModel,
 					agentId: spawn.agentId,
 					run: spawn.run,
 					progress: spawn.progress,
@@ -1336,7 +1306,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			params,
 			defaultAgent,
 			signal,
-			hostModel,
 			spawns: syncSpawns.map(spawn => ({
 				item: spawn.item,
 				index: spawn.index,
@@ -1400,7 +1369,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		manager: AsyncJobManager;
 		toolCallId: string;
 		spawnParams: TaskParams;
-		hostModel?: string | string[];
 		agentId: string;
 		/** Run already started while the call streamed; the job adopts it instead of launching. */
 		run?: SpawnRun;
@@ -1414,7 +1382,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			manager,
 			toolCallId,
 			spawnParams,
-			hostModel,
 			agentId,
 			run,
 			progress,
@@ -1495,7 +1462,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: progress.index,
 					agentId,
 					detached: true,
-					hostModel,
 				}));
 				activeRun.attach({
 					signal: runSignal,
@@ -1632,7 +1598,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		defaultAgent: string,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
-		hostModel?: string | string[],
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		if (spawns.length === 1) {
 			const spawn = spawns[0]!;
@@ -1644,7 +1609,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: spawn.index,
 					agentId: spawn.preAllocatedId,
 					detached: false,
-					hostModel,
 				});
 			run.attach({ signal, onUpdate });
 			return await run.result;
@@ -1672,7 +1636,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			defaultAgent,
 			signal,
 			spawns,
-			hostModel,
 			onItemProgress: onUpdate
 				? (index, progress) => {
 						latestProgress.set(index, { ...progress, index });
@@ -1709,10 +1672,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		defaultAgent: string;
 		spawns: SyncSpawnRef[];
 		signal?: AbortSignal;
-		hostModel?: string | string[];
 		onItemProgress?: (index: number, progress: AgentProgress) => void;
 	}): Promise<(AgentToolResult<TaskToolDetails> | undefined)[]> {
-		const { toolCallId, params, defaultAgent, spawns, signal, onItemProgress, hostModel } = args;
+		const { toolCallId, params, defaultAgent, spawns, signal, onItemProgress } = args;
 		const { results } = await mapWithConcurrencyLimitAllSettled(
 			spawns,
 			spawns.length,
@@ -1725,7 +1687,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						index: spawn.index,
 						agentId: spawn.preAllocatedId,
 						detached: false,
-						hostModel,
 					});
 				run.attach({
 					signal: workerSignal,
@@ -1778,7 +1739,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
-		hostModel?: string | string[],
 		tools?: TextTap,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
@@ -1793,8 +1753,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				context,
 				agent: params.agent,
 				sourceSession: params.sourceSession,
-				model: params.model,
-				hostModel,
+				...spawnModelFields(params),
 				...this.#resultParams(params),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
 				solutionSpace: params.solutionSpace,

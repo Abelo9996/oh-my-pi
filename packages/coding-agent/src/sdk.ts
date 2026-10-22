@@ -68,7 +68,6 @@ import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mo
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
 	disabledProviderIds,
-	filterAvailableModelsByEnabledPatterns,
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
@@ -250,7 +249,6 @@ import { isScoutSpawnable } from "./task/spawn-policy";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
-	assertModelSupportsEffortCeiling,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
@@ -611,10 +609,12 @@ export interface CreateAgentSessionOptions {
 	modelPatternDefaultFallbackChain?: string[];
 	/**
 	 * Called with the model of every main-loop request before it is sent; throw to
-	 * refuse it. Per-call `model` subagents use it so a retry fallback, model
-	 * switch, or extension cannot reach a model the operator did not approve.
+	 * refuse it. Per-call `model` subagents use it so no switch reaches a model the
+	 * operator did not approve.
 	 */
 	assertDispatchModel?: (model: Model) => void;
+	/** Never switch to a retry fallback model; the turn fails instead. Per-call `model` subagents set it. */
+	disableModelFallback?: boolean;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -2944,15 +2944,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			await logger.time("resolveModelDiscoveryDeferredRetry", startRuntimeDiscovery);
 			const matchPreferences = getModelMatchPreferences(settings);
 			const disabledProviders = new Set(cfgDisabledProviders.get(settings));
-			const enabledPatterns = isSubagentSession ? cfgEnabledModels.get(settings) : [];
-			const scopedRuntimeModels =
-				enabledPatterns.length > 0
-					? filterAvailableModelsByEnabledPatterns(
-							modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider)),
-							enabledPatterns,
-							settings,
-						)
-					: undefined;
 			const runtimeResolved = deferredModelPatterns.some(pattern =>
 				pattern.split(",").some(selector => {
 					const trimmedSelector = selector.trim();
@@ -2972,15 +2963,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// is unreachable, so a match on one likewise must not count: otherwise
 					// a disabled first selector suppresses the discovery refresh an enabled
 					// later selector still needs.
-					return (
-						resolved.model !== undefined &&
-						!disabledProviders.has(resolved.model.provider) &&
-						(scopedRuntimeModels === undefined ||
-							scopedRuntimeModels.some(
-								candidate =>
-									candidate.provider === resolved.model?.provider && candidate.id === resolved.model?.id,
-							))
-					);
+					return resolved.model !== undefined && !disabledProviders.has(resolved.model.provider);
 				}),
 			);
 			if (!runtimeResolved && modelRegistry.getDiscoverableProviders().length > 0) {
@@ -2988,20 +2971,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					modelRegistry.refresh("online-if-uncached"),
 				);
 			}
-			const allEnabledModels = filterAvailableModelsByEnabledPatterns(
+			const allEnabledModels =
 				disabledProviders.size === 0
 					? modelRegistry.getAll()
-					: modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider)),
-				enabledPatterns,
-				settings,
-			);
-			const availableModels = filterAvailableModelsByEnabledPatterns(
+					: modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider));
+			const availableModels =
 				disabledProviders.size === 0
 					? modelRegistry.getAvailable()
-					: modelRegistry.getAvailable().filter(candidate => !disabledProviders.has(candidate.provider)),
-				enabledPatterns,
-				settings,
-			);
+					: modelRegistry.getAvailable().filter(candidate => !disabledProviders.has(candidate.provider));
 			const expandedModelPatterns = deferredModelPatterns.flatMap(pattern =>
 				pattern.split(",").flatMap(selector => {
 					const trimmedSelector = selector.trim();
@@ -4553,9 +4530,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getApiKey: effectiveGetApiKey,
 			streamFn: (streamModel, context, streamOptions) => {
 				options.assertDispatchModel?.(streamModel);
-				if (options.thinkingLevelCeiling !== undefined) {
-					assertModelSupportsEffortCeiling(streamModel, options.thinkingLevelCeiling);
-				}
 				if (notifyFirstChatDispatch) {
 					const cb = notifyFirstChatDispatch;
 					notifyFirstChatDispatch = undefined;
@@ -4762,6 +4736,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agent,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
+			disableModelFallback: options.disableModelFallback,
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,

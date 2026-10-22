@@ -39,7 +39,7 @@ describe("per-call exact selection after background discovery", () => {
 				warm = true;
 			});
 			const createAgentSession = sdk.createAgentSession;
-			vi.spyOn(sdk, "createAgentSession").mockImplementation(options => {
+			const created = vi.spyOn(sdk, "createAgentSession").mockImplementation(options => {
 				warm = true;
 				return createAgentSession(options);
 			});
@@ -73,7 +73,7 @@ describe("per-call exact selection after background discovery", () => {
 				invocationKind: "task",
 				assignment: "Answer the question.",
 				agent: "worker",
-				model: exact ? `mock/${model.id}` : "mock/requested-model",
+				perCallModel: exact ? `mock/${model.id}` : "mock/requested-model",
 				structured: false,
 				identity: { id: agentId },
 				keepAlive: false,
@@ -82,6 +82,11 @@ describe("per-call exact selection after background discovery", () => {
 				expect(execution.result.exitCode).toBe(0);
 				expect(execution.result.output).toBe("Exact answer.");
 				expect(model.calls).toHaveLength(1);
+				// The worker never switches models and every request stays held to the grants.
+				const options = created.mock.calls[0]?.[0];
+				expect(options?.disableModelFallback).toBe(true);
+				expect(options?.prewalk).toBeUndefined();
+				expect(() => options?.assertDispatchModel?.(createMockModel({ id: "other" }))).toThrow(/not approved/);
 			} else {
 				expect(model.calls).toHaveLength(0);
 				expect(execution.result.exitCode).not.toBe(0);

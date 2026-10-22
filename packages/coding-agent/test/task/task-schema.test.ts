@@ -5,7 +5,7 @@ import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
-import { isBundledSeance, seanceTaskSchemaFields, validateSeanceParams } from "@oh-my-pi/pi-coding-agent/task/seance";
+import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -91,7 +91,7 @@ describe("task schema (single-spawn)", () => {
 });
 
 describe("task schema seance fields", () => {
-	it("accepts source and exact model selectors when per-call models are enabled", () => {
+	it("accepts source and model selectors in every flat/batch isolation mode", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({
@@ -99,9 +99,10 @@ describe("task schema seance fields", () => {
 					isolationEnabled,
 					evalToolsEnabled: false,
 					seanceFields: seanceTaskSchemaFields,
-					perCallModel: true,
 				});
-				const modelSelector = "anthropic/claude-sonnet-4-5";
+				const modelSelector = batchEnabled
+					? ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]
+					: "anthropic/claude-sonnet-4-5";
 				const item = {
 					agent: "seance",
 					task: "Read historical context.",
@@ -138,7 +139,8 @@ describe("task schema seance fields", () => {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
-				expect(wireSchema).not.toContain('"model"');
+				// Only the per-call `model` remains: one string, never the seance selector list.
+				expect(wireSchema).toContain('"model":{"type":"string"}');
 			}
 		}
 	});
@@ -187,14 +189,14 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).not.toContain('"model"');
+		expect(planSchema).toContain('"model":{"type":"string"}');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
 		const ordinary = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
 		const ordinarySchema = JSON.stringify(ordinary.parameters.toJsonSchema());
 		expect(ordinarySchema).toContain('"sourceSession"');
-		expect(ordinarySchema).not.toContain('"model"');
+		expect(ordinarySchema).toContain('"model"');
 		expect(ordinary.description).toContain("`seance`");
 		expect(ordinary.description).toContain("Historical consults");
 	});
@@ -206,13 +208,9 @@ describe("task spawn validation", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function executeText(
-		params: unknown,
-		agents: AgentDefinition[] = [],
-		settings?: Record<string, unknown>,
-	): Promise<string> {
+	async function executeText(params: unknown, agents: AgentDefinition[] = []): Promise<string> {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
-		const tool = await TaskTool.create(createSession({ settings }));
+		const tool = await TaskTool.create(createSession());
 		const result = await tool.execute("tool-call", params);
 		return result.content.find(part => part.type === "text")?.text ?? "";
 	}
@@ -241,107 +239,18 @@ describe("task spawn validation", () => {
 			model: "anthropic/claude-sonnet-4-5",
 		};
 		expect(schema(params) instanceof type.errors).toBe(false);
-		const scout = loadBundledAgents().find(agent => agent.name === "scout")!;
+		const scout = loadBundledAgents().find(agent => agent.name === "scout");
+		if (!scout) throw new Error("Expected the bundled scout agent");
 		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
 	});
 
-	it.each([
-		{ batch: false, mode: "off" },
-		{ batch: true, mode: "eval" },
-	])("rejects seance model input before reading the source under $mode with batch=$batch", async ({ batch, mode }) => {
-		const item = {
-			agent: "seance",
-			task: "Read historical context.",
-			solutionSpace: "focused read-only inspection",
-			sourceSession: "/missing/source.jsonl",
-			model: "anthropic/claude-sonnet-4-5",
+	it("advertises `model` in the task prompt only while task.perCallModel is on", async () => {
+		const description = async (mode: string) => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+			return (await TaskTool.create(createSession({ settings: { "task.perCallModel": mode } }))).description;
 		};
-		const text = await executeText(
-			batch ? { context: "Historical consult.", tasks: [item] } : item,
-			[bundledSeance],
-			{ "task.batch": batch, "task.perCallModel": mode },
-		);
-		expect(text).toContain(`task.perCallModel: ${mode}`);
-		expect(text).not.toContain("selected session file was not found");
-	});
-
-	it("names seance for a misplaced batch-container `sourceSession` and stays agent-neutral for `model` alone", () => {
-		const validate = (container: Record<string, unknown>) =>
-			validateSeanceParams({
-				params: { context: "Shared context", tasks: [{ task: "Do work" }], ...container },
-				batchEnabled: true,
-				defaultAgent: "task",
-				seanceAdvertised: true,
-			});
-		expect(validate({ model: "p/requested" })).toBe("Put `model` on the individual items inside `tasks[]`.");
-		expect(validate({ sourceSession: "abc", model: "p/requested" })).toContain("`seance` item");
-	});
-});
-
-describe("per-call model schema boundaries", () => {
-	for (const isolationEnabled of [false, true]) {
-		for (const effortEnabled of [false, true]) {
-			it(`drops a batch-container model instead of advertising it (isolation=${isolationEnabled}, effort=${effortEnabled})`, () => {
-				const schema = getTaskSchema({ isolationEnabled, effortEnabled, batchEnabled: true, perCallModel: true });
-				const result = schema({
-					context: "Shared context",
-					model: "p/requested",
-					tasks: [{ task: "Do work", solutionSpace: "c" }],
-				});
-				// `never` would serialize to `{not:{}}`, which Cloud Code Assist rejects; items carry `model`.
-				expect(result instanceof type.errors).toBe(false);
-				if (!(result instanceof type.errors)) expect(result).not.toHaveProperty("model");
-			});
-		}
-	}
-
-	it("rejects ordered model arrays on flat calls and batch items", () => {
-		const item = { task: "Do work", solutionSpace: "c", model: ["p/preferred", "p/alternative"] };
-		for (const batchEnabled of [false, true]) {
-			const schema = getTaskSchema({ isolationEnabled: false, batchEnabled, perCallModel: true });
-			expect(schema(batchEnabled ? { context: "Shared context", tasks: [item] } : item) instanceof type.errors).toBe(
-				true,
-			);
-		}
-	});
-
-	it("advertises `model` in the task schema and prompt only for task-enabled modes", async () => {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-			agents: [bundledSeance],
-			projectAgentsDir: null,
-		});
-		const advertised = async (perCallModel: string) => {
-			const tool = await TaskTool.create(createSession({ settings: { "task.perCallModel": perCallModel } }));
-			return {
-				schema: JSON.stringify(tool.parameters.toJsonSchema()).includes('"model"'),
-				prompt: tool.description.includes("`model`:"),
-			};
-		};
-		expect(await advertised("off")).toEqual({ schema: false, prompt: false });
-		expect(await advertised("unpinned")).toEqual({ schema: true, prompt: true });
-		expect(await advertised("on")).toEqual({ schema: true, prompt: true });
-		expect(await advertised("eval")).toEqual({ schema: false, prompt: false });
-		vi.restoreAllMocks();
-	});
-
-	it.each([false, true])("eval mode drops ordinary task model input with batch=%s", async batch => {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
-		const tool = await TaskTool.create(
-			createSession({ settings: { "task.perCallModel": "eval", "task.batch": batch } }),
-		);
-		const item = { task: "Do work", solutionSpace: "c", model: "p/requested" };
-		const parsed = tool.parameters(batch ? { context: "shared", tasks: [item] } : item);
-		expect(parsed instanceof type.errors).toBe(false);
-		expect(parsed).toHaveProperty(batch ? "tasks.0.task" : "task", "Do work");
-		expect(parsed).not.toHaveProperty(batch ? "tasks.0.model" : "model");
-	});
-
-	it("drops `model` from a dynamically built schema while task.perCallModel is off", () => {
-		const params = { task: "Do work", solutionSpace: "c", model: "p/requested" };
-		const build = (perCallModel: boolean) =>
-			getTaskSchema({ isolationEnabled: false, batchEnabled: false, effortEnabled: true, perCallModel })(params);
-		// Build the enabled variant first so a cache keyed without the gate would hand it back.
-		expect(build(true)).toHaveProperty("model", "p/requested");
-		expect(build(false)).not.toHaveProperty("model");
+		expect(await description("off")).not.toContain("`model`: one exact");
+		expect(await description("eval")).not.toContain("`model`: one exact");
+		expect(await description("on")).toContain("`model`: one exact");
 	});
 });

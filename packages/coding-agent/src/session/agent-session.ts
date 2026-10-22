@@ -1070,6 +1070,7 @@ export class AgentSession implements SettingsScope {
 	#modelRegistry: ModelRegistry;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
 	readonly #allowSessionModelFallback: boolean;
+	readonly #disableModelFallback: boolean;
 	/** Creation-time: false when the extension UI context cannot reach a human (ACP without form elicitation). */
 	readonly #interactivePrompts: boolean;
 	/** Newest usage reports, cached by fetchUsageReports. */
@@ -1760,6 +1761,7 @@ export class AgentSession implements SettingsScope {
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
+		this.#disableModelFallback = config.disableModelFallback === true;
 		this.#interactivePrompts = config.interactivePrompts !== false;
 		this.#extensionRoots =
 			config.extensionRoots ??
@@ -1950,6 +1952,7 @@ export class AgentSession implements SettingsScope {
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
 			setThinkingLevel: level => this.#models.setThinkingLevel(level),
 			thinkingLevelCeiling: () => this.#models.thinkingLevelCeiling,
+			modelFallbackDisabled: () => this.#disableModelFallback,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			isCompacting: () => this.isCompacting,
@@ -12994,10 +12997,6 @@ export class AgentSession implements SettingsScope {
 	 * compile here instead of surfacing as `undefined` at runtime.
 	 */
 	buildAskReanswerContext(uiContext: ExtensionUIContext): AgentToolContext {
-		return this.buildToolContext(uiContext);
-	}
-
-	buildToolContext(uiContext?: ExtensionUIContext): AgentToolContext {
 		return {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
@@ -13009,7 +13008,7 @@ export class AgentSession implements SettingsScope {
 			},
 			settings: this.settings,
 			ui: uiContext,
-			hasUI: uiContext !== undefined,
+			hasUI: true,
 		};
 	}
 

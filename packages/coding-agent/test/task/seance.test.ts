@@ -3,13 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
-import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
-import { prepareSeance, resolveSeanceSource, restoreSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { resolveSeanceSource, restoreSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
 import { getAgentDir, getSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function sessionHeader(id: string, cwd: string) {
@@ -270,52 +267,6 @@ describe("seance source resolution", () => {
 			expect((await fs.stat(legacyDir)).isDirectory()).toBe(true);
 			await expect(fs.stat(migratedLegacyDir)).rejects.toThrow();
 		});
-	});
-});
-
-describe("seance model approval", () => {
-	it("skips unapproved saved candidates and refuses forged source grants without substituting the parent", async () => {
-		using tempDir = TempDir.createSync("@omp-seance-approval-");
-		const cwd = tempDir.path();
-		const sourceFile = path.join(cwd, "source.jsonl");
-		const saved = "anthropic/claude-sonnet-4-5";
-		const forged = "anthropic/claude-sonnet-4-6";
-		await writeSession(sourceFile, "source", cwd, [
-			modelChange("default", null, saved, "default"),
-			modelChange("active", "default", forged, "fast"),
-		]);
-		const authStorage = await AuthStorage.create(":memory:");
-		try {
-			authStorage.keys.setRuntime("anthropic", "test-key");
-			const modelRegistry = new ModelRegistry(authStorage);
-			const settings = Settings.isolated({
-				"task.perCallModelAllow": [saved],
-				modelRoles: { review: `${saved}:low` },
-			});
-			const agent = getBundledAgent("seance");
-			if (!agent) throw new Error("Expected the bundled seance agent");
-			const session = { cwd, settings, modelRegistry, getSessionFile: () => null } as unknown as ToolSession;
-			const context = {
-				session,
-				invocationKind: "task" as const,
-				agent,
-				sourceSession: sourceFile,
-				planMode: false,
-				isolationRequested: false,
-				hasCustomTools: false,
-				modelGrants: { settings, agentName: "seance", parentModelPattern: saved },
-			};
-			expect((await prepareSeance(context)).modelPatterns).toEqual([saved]);
-			expect((await prepareSeance({ ...context, model: "@review" })).modelPatterns).toEqual([`${saved}:low`]);
-			await writeSession(sourceFile, "source", cwd, [modelChange("default", null, forged, "default")]);
-			await expect(prepareSeance(context)).rejects.toThrow("No approved saved model");
-			await expect(prepareSeance({ ...context, model: forged, exactModel: true })).rejects.toThrow(
-				"Catalog or credentials alone do not approve a model",
-			);
-			expect((await prepareSeance({ ...context, modelGrants: undefined })).modelPatterns).toEqual([forged]);
-		} finally {
-			authStorage.close();
-		}
 	});
 });
 

@@ -4,7 +4,6 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
@@ -34,7 +33,7 @@ import {
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
 import { discoverAgents, getAgent } from "./discovery";
-import { assertPerCallModelApproved, perCallModelFallbackOverrides } from "./model-approval";
+import { assertPerCallModelApproved } from "./model-approval";
 import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
@@ -167,7 +166,7 @@ export function createPersistedSubagentReviverFactory(
 					`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no message history (truncated to header/session_init). The agent was not revived.`,
 				);
 			}
-			// The agent's own model and override grant a per-call worker only while that agent is still discovered.
+			// The agent's frontmatter model grants a per-call worker only while that agent is still discovered.
 			const configuredAgent =
 				init.perCallModel && init.agent
 					? getAgent(
@@ -207,7 +206,6 @@ export function createPersistedSubagentReviverFactory(
 						}
 					: undefined),
 				...compactionThresholdSettings(init.compactionThreshold),
-				...(init.perCallModel ? perCallModelFallbackOverrides(ctx.settings) : undefined),
 			});
 			// Restore the `subagent:<id>` fallback chain the spawn installed; the
 			// transcript alone cannot rebuild it (multi-model agent patterns and
@@ -283,10 +281,11 @@ export function createPersistedSubagentReviverFactory(
 					parentAgentId: ref.parentId,
 					oauthAccountPools,
 					// A per-call model is held to the operator's current grants, not the transcript's,
-					// and to the live task.maxEffort ceiling the spawn ran under.
+					// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
 					...(init.perCallModel
 						? {
 								thinkingLevelCeiling: cfgTaskMaxEffort.get(ctx.settings),
+								disableModelFallback: true,
 								assertDispatchModel: (model: Model) =>
 									assertPerCallModelApproved(
 										model,
@@ -301,7 +300,6 @@ export function createPersistedSubagentReviverFactory(
 												: undefined,
 										},
 										ctx.modelRegistry,
-										"dispatch",
 									),
 							}
 						: {}),
@@ -338,17 +336,6 @@ export function createPersistedSubagentReviverFactory(
 			} catch (error) {
 				mcpFollower?.dispose();
 				throw error;
-			}
-			// A per-call worker whose model cannot run at or below the live ceiling fails instead
-			// of running at the model's floor, as its spawn would.
-			if (init.perCallModel && session.model) {
-				try {
-					assertModelSupportsEffortCeiling(session.model, cfgTaskMaxEffort.get(ctx.settings));
-				} catch (error) {
-					mcpFollower?.dispose();
-					await session.dispose();
-					throw error;
-				}
 			}
 			mcpFollower?.bind(session);
 			// Clamp the active set to the persisted list: createAgentSession's

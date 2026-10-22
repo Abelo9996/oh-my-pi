@@ -2,39 +2,26 @@
  * Approval for the per-call `model` selector on task items, eval `agent()` and
  * `workpool()`.
  *
- * A model-facing selector may only pick a model the operator already routes
- * to: a configured chat role value, a retry fallback chain entry, the
- * selected agent's frontmatter model or `task.agentModelOverrides` entry, or
- * the parent's live model. A model that is only in the catalog, authenticated,
- * enabled, picked by a built-in role default, or of another kind (image, web,
- * speech, dictation, judge) is not approved. Matching reuses the resolver that
- * `enabledModels` uses, so role aliases, fuzzy ids and globs behave the same
- * way here as they do everywhere else.
+ * A model-facing selector may only pick a chat model the operator already
+ * routes to: a configured chat role's value, a bundled or user-level agent's
+ * frontmatter model, or the parent's live model. Catalog membership,
+ * credentials, built-in role defaults, project agent frontmatter and saved
+ * transcripts grant nothing. `task.perCallModelAllow`, when set, narrows the
+ * result to the exact models it lists.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { getBundledModel, isGeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
-	getModelMatchPreferences,
-	modelSelectionInheritsSessionModel,
 	normalizeModelPatternList,
-	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
-	splitRoleAliasThinkingSuffix,
+	resolveModelOverride,
 } from "../config/model-resolver";
 import { isKindRole } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import { expandDefaultRetryFallbackChains } from "../session/retry-fallback-chains";
-import { cfgRetryFallbackChains } from "../session/settings";
-import {
-	cfgTaskAgentModelOverrides,
-	cfgTaskDisabledAgents,
-	cfgTaskPerCallModelAllow,
-	cfgTaskPerCallModelFallbacks,
-} from "./settings";
+import { cfgTaskDisabledAgents, cfgTaskPerCallModelAllow } from "./settings";
 
 /** A per-call model was rejected: not approved by the operator's configuration. */
 export class PerCallModelError extends Error {
@@ -51,158 +38,93 @@ export interface PerCallModelGrants {
 	agentSource?: AgentSource;
 	/** The selected agent's frontmatter `model`. */
 	agentModel?: string | string[];
-	/** The selected agent is no longer discovered (cold revival): its model and override grant nothing. */
+	/** The selected agent is no longer discovered (cold revival): its frontmatter grants nothing. */
 	agentRemoved?: boolean;
-	/** The parent session's live model selector. */
+	/** The parent session's live model, as `provider/model-id`. */
 	parentModelPattern?: string;
 }
 
-/** `@default` in any spelling (`*`, `pi/default`, `:level`) names the session's model, never a grant; a bare `*` would otherwise match every model as a glob. */
-function isSessionToken(pattern: string): boolean {
-	const base = splitRoleAliasThinkingSuffix(pattern).base.toLowerCase();
-	return base === "default" || base === "inherit" || modelSelectionInheritsSessionModel(pattern);
-}
-
-/**
- * `select`: a model the caller may name in `model`. `dispatch`: a model the
- * running subagent may send to, which also covers retry fallbacks.
- */
-export type PerCallModelUse = "select" | "dispatch";
-
-export function perCallModelAllowsParent(settings: Settings): boolean {
-	const allow = cfgTaskPerCallModelAllow.get(settings);
-	return allow.length === 0 || allow.some(entry => resolveExplicitModelRole(entry, settings) === "default");
-}
-
-/** Operator-configured selectors that approve a per-call model. */
-export function perCallModelGrantPatterns(grants: PerCallModelGrants, use: PerCallModelUse): string[] {
-	const { settings, agentName } = grants;
-	const fallbackMode = cfgTaskPerCallModelFallbacks.get(settings);
-	const withFallbacks = fallbackMode === "select" || (fallbackMode === "runtime" && use === "dispatch");
-	const allow = cfgTaskPerCallModelAllow.get(settings);
-	const chains = Object.entries(
-		withFallbacks
-			? expandDefaultRetryFallbackChains(
-					cfgRetryFallbackChains.get(settings),
-					allow.flatMap(entry => resolveExplicitModelRole(entry, settings) ?? []),
-				)
-			: {},
-	).filter(([key]) => !isKindRole(key));
-	// Wildcard chain entries are relative provider swaps, not models the operator named.
-	const concrete = (chain: readonly string[] | undefined) => (chain ?? []).filter(entry => !entry.includes("*"));
-	const overrides = cfgTaskAgentModelOverrides.get(settings);
-	const parentAllowed = perCallModelAllowsParent(settings);
-	// A disabled or removed agent's own model and override stop granting.
-	const agentEnabled = !grants.agentRemoved && !cfgTaskDisabledAgents.get(settings).includes(agentName);
-	const sources: Array<string | string[] | undefined> =
-		allow.length > 0
-			? // An explicit list replaces the derived grants; a listed role brings its configured values
-				// (or the configured role it borrows, never built-in defaults) and its fallback chain.
-				allow.flatMap(entry => {
-					const role = resolveExplicitModelRole(entry, settings);
-					if (!role) return [entry];
-					if (role === "default" || isKindRole(role)) return [];
-					return [
-						...resolveConfiguredModelPatterns(entry, settings, { builtInDefaults: false }),
-						...concrete(chains.find(([key]) => key === role)?.[1]),
-					];
-				})
-			: [
-					// Every listed candidate of a value is a grant; an alias in a value expands only to
-					// configured roles, never to the built-in defaults an unset role would route through.
-					...Object.entries(settings.getModelRoles())
-						.filter(([role]) => !isKindRole(role))
-						.map(([, value]) => resolveConfiguredModelPatterns(value, settings, { builtInDefaults: false })),
-					...chains.map(([, chain]) => concrete(chain)),
-					agentEnabled && (grants.agentSource === "bundled" || grants.agentSource === "user")
-						? grants.agentModel
-						: undefined,
-					agentEnabled && Object.hasOwn(overrides, agentName) ? overrides[agentName] : undefined,
-				];
-	if (parentAllowed) sources.push(grants.parentModelPattern);
-	const patterns = new Set<string>();
-	for (const source of sources) {
-		for (const pattern of normalizeModelPatternList(source)) {
-			if (!isSessionToken(pattern)) patterns.add(pattern);
-		}
-	}
-	return [...patterns];
-}
-
-/**
- * Settings overrides for a per-call worker's own session: under
- * `task.perCallModelFallbacks: off` it fails instead of switching models, even to
- * one another grant approves. Agents the worker spawns restore the chain's value.
- */
-export function perCallModelFallbackOverrides(settings: Settings): Readonly<Record<string, unknown>> | undefined {
-	return cfgTaskPerCallModelFallbacks.get(settings) === "off" ? { "retry.modelFallback": false } : undefined;
-}
+type ApprovalRegistry = Pick<ModelRegistry, "getAvailable">;
 
 function identity(model: Pick<Model<Api>, "provider" | "id">): string {
 	return `${model.provider}/${model.id}`;
+}
+
+/**
+ * Operator-configured selectors that grant a per-call model. Role aliases are
+ * skipped rather than expanded: a configured role's value is a grant of its
+ * own, and an unconfigured role would only route through built-in defaults.
+ */
+export function perCallModelGrantPatterns(grants: PerCallModelGrants): string[] {
+	const { settings, agentName } = grants;
+	const trustedAgent =
+		(grants.agentSource === "bundled" || grants.agentSource === "user") &&
+		!grants.agentRemoved &&
+		!cfgTaskDisabledAgents.get(settings).includes(agentName);
+	const sources = [
+		...Object.entries(settings.getModelRoles())
+			.filter(([role]) => !isKindRole(role))
+			.map(([, value]) => value),
+		trustedAgent ? grants.agentModel : undefined,
+		grants.parentModelPattern,
+	];
+	const patterns = new Set<string>();
+	for (const source of sources) {
+		for (const pattern of normalizeModelPatternList(source)) {
+			const bare = pattern.toLowerCase();
+			if (bare === "default" || bare === "inherit" || resolveExplicitModelRole(pattern, settings)) continue;
+			patterns.add(pattern);
+		}
+	}
+	return [...patterns];
 }
 
 /** Whether `model` is one the operator routes to under the current configuration. */
 export function isPerCallModelApproved(
 	model: Pick<Model<Api>, "provider" | "id">,
 	grants: PerCallModelGrants,
-	registry: Pick<ModelRegistry, "getAvailable"> & Partial<Pick<ModelRegistry, "getAll">>,
-	use: PerCallModelUse,
+	registry: ApprovalRegistry,
 ): boolean {
-	const patterns = perCallModelGrantPatterns(grants, use);
-	// An empty list means "no restriction" to the resolver; here it means no grant.
-	if (patterns.length === 0) return false;
 	const target = identity(model);
-	// Subagents run chat models only; a grant matching an image, search, speech or judge model does not count.
-	const chat = registry.getAvailable("chat");
-	const chatIds = new Set(chat.map(identity));
-	const catalogIds = new Set(registry.getAll?.("all").map(identity));
-	const isKnownModel = (selector: string): boolean => {
-		if (chatIds.has(selector) || catalogIds.has(selector)) return true;
-		const slash = selector.indexOf("/");
-		const provider = selector.slice(0, slash);
-		return (
-			slash > 0 &&
-			isGeneratedProvider(provider) &&
-			getBundledModel(provider, selector.slice(slash + 1)) !== undefined
-		);
-	};
-	const literalGrants = new Set<string>();
-	const patternGrants: string[] = [];
-	for (const pattern of patterns) {
-		const selector = pattern.trim();
-		const base = isKnownModel(selector)
-			? selector
-			: splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
-		if (isKnownModel(base)) literalGrants.add(base);
-		else patternGrants.push(pattern);
+	const allow = cfgTaskPerCallModelAllow.get(grants.settings);
+	if (
+		allow.length > 0 &&
+		!allow.some(entry => splitThinkingSuffix(entry.trim(), -1, MAX_THINKING_SUFFIX_OPTIONS).base === target)
+	) {
+		return false;
 	}
-	if (literalGrants.has(target) && chatIds.has(target)) return true;
-	if (patternGrants.length === 0) return false;
-	// An ambiguous grant counts as the provider selection would pick, not the first catalog entry.
-	return filterAvailableModelsByEnabledPatterns(
-		chat,
-		patternGrants,
-		grants.settings,
-		getModelMatchPreferences(grants.settings),
-	).some(granted => identity(granted) === target);
+	// Subagents run chat models only; a grant naming an image, search, speech or judge model does not count.
+	const chat = registry.getAvailable("chat");
+	if (!chat.some(candidate => identity(candidate) === target)) return false;
+	const chatRegistry = { getAvailable: () => chat };
+	return perCallModelGrantPatterns(grants).some(pattern => {
+		// A literal id wins, so brackets in real ids (`glm-5.2[1m]`) never act as a glob.
+		const literal = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
+		if (literal === target || pattern === target) return true;
+		if (chat.some(candidate => identity(candidate) === literal || identity(candidate) === pattern)) return false;
+		// Otherwise a grant approves what it routes to: every match of a glob, or the one model a selector resolves to.
+		if (/[*?[]/.test(pattern)) {
+			return filterAvailableModelsByEnabledPatterns(chat, [pattern], grants.settings).some(
+				granted => identity(granted) === target,
+			);
+		}
+		const resolved = resolveModelOverride([pattern], chatRegistry, grants.settings).model;
+		return resolved !== undefined && identity(resolved) === target;
+	});
 }
 
 /** Throw {@link PerCallModelError} unless `model` is approved. */
 export function assertPerCallModelApproved(
 	model: Pick<Model<Api>, "provider" | "id">,
 	grants: PerCallModelGrants,
-	registry: Pick<ModelRegistry, "getAvailable"> & Partial<Pick<ModelRegistry, "getAll">>,
-	use: PerCallModelUse,
+	registry: ApprovalRegistry,
 ): void {
-	if (isPerCallModelApproved(model, grants, registry, use)) return;
-	const selectionGuidance =
+	if (isPerCallModelApproved(model, grants, registry)) return;
+	const allowGuidance =
 		cfgTaskPerCallModelAllow.get(grants.settings).length > 0
-			? "use a model approved by task.perCallModelAllow, which replaces the derived grants (listed-role fallback grants require task.perCallModelFallbacks: select). Other configured models, including the parent's, are not implicitly approved."
-			: "use an exact model approved by a configured role, bundled or user-level agent model, task.agentModelOverrides entry, or the parent's model (fallback chain models count only with task.perCallModelFallbacks: select).";
+			? " It must also be listed in task.perCallModelAllow."
+			: "";
 	throw new PerCallModelError(
-		use === "select"
-			? `Per-call model ${identity(model)} is not configured for agent "${grants.agentName}": ${selectionGuidance} Catalog or credentials alone do not approve a model.`
-			: `Per-call subagent "${grants.agentName}" cannot switch to ${identity(model)}: it is not an approved model (task.perCallModelAllow / task.perCallModelFallbacks).`,
+		`Per-call model ${identity(model)} is not approved for agent "${grants.agentName}": use a model named by a configured chat role, a bundled or user-level agent's frontmatter, or the parent's model.${allowGuidance} Catalog or credentials alone do not approve a model.`,
 	);
 }

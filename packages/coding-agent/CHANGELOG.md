@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `task.perCallModel` (`off` by default, `eval`, `on`): task items and eval `agent()`/`workpool()` can pick a subagent's model with one exact `provider/model-id[:level]`, limited to models already named by a configured chat role, a bundled or user-level agent, or the parent session; `task.perCallModelAllow` can narrow that to a list of exact models, and a per-call subagent fails instead of switching to a fallback model ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- A task call or eval `agent()` that passes `model` while `task.perCallModel` does not allow it now fails with an error instead of having `model` silently dropped ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
