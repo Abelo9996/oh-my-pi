@@ -137,6 +137,29 @@ describe("task wire schema", () => {
 		expect(item.model).toBe("p/m");
 		expect(item.task).toBe("x");
 	});
+
+	it("rejects a batch-level specialist instead of silently spawning the default agent", () => {
+		for (const options of [
+			{ isolationEnabled: false, batchEnabled: true },
+			{ isolationEnabled: true, batchEnabled: true, defaultAgent: "scout", effortEnabled: true },
+		]) {
+			const schema = getTaskSchema(options);
+			const parsed = schema({
+				context: "Inspect changes",
+				agent: "custom-auditor",
+				tasks: [{ task: "Inspect the patch", solutionSpace: "one inspection" }],
+			});
+			expect(parsed instanceof type.errors).toBe(true);
+			if (parsed instanceof type.errors) expect(parsed.summary).toContain("tasks[].agent");
+			const corrected = parsedItems(
+				schema({
+					context: "Inspect changes",
+					tasks: [{ agent: "custom-auditor", task: "Inspect the patch", solutionSpace: "one inspection" }],
+				}),
+			);
+			expect(corrected[0]?.agent).toBe("custom-auditor");
+		}
+	});
 });
 
 // Contract: `agent` and `name` shape the spawned subagent's identity and the
