@@ -423,6 +423,8 @@ export interface SessionMaintenanceHost {
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
+	/** The session never switches models on its own (a per-call `model` subagent): no context promotion. */
+	modelFallbackDisabled?(): boolean;
 	isStreaming(): boolean;
 	isGeneratingHandoff(): boolean;
 	promptGeneration(): number;
@@ -3427,7 +3429,7 @@ export class SessionMaintenance {
 	 * ({@link runPrePromptCompactionIfNeeded}).
 	 */
 	async #promoteContextModel(): Promise<boolean> {
-		if (!cfgContextPromotionEnabled.get(this.#host.settings)) return false;
+		if (!cfgContextPromotionEnabled.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
 		const currentModel = this.#model;
 		if (!currentModel) return false;
 		const contextWindow = currentModel.contextWindow ?? 0;

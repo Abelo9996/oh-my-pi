@@ -4629,8 +4629,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					thinkingLevel: effectiveThinkingLevel,
 					...(perCallModelGrants
 						? {
-								assertDispatchModel: (dispatchModel: Model) =>
-									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry),
+								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
+								assertDispatchModel: (dispatchModel: Model) => {
+									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
+									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+								},
 								disableModelFallback: true,
 							}
 						: {}),

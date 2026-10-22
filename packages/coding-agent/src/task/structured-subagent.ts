@@ -134,6 +134,12 @@ export interface StructuredSubagentRequest {
 	 * operator-approved models.
 	 */
 	perCallModel?: string;
+	/**
+	 * The model-facing `model` of a task call naming the `seance` agent. Honoured as
+	 * the source-session override only when that name resolves to the bundled seance;
+	 * a project or user agent shadowing the name gets it as a {@link perCallModel}.
+	 */
+	seanceModel?: string | string[];
 
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
@@ -348,7 +354,7 @@ export function invalidModelSelectorReason(model: unknown, label: string): strin
 /** Gate, validate and approve a per-call `model`; returns the grants the running child stays held to. */
 function preflightPerCallModel(
 	request: StructuredSubagentRequest,
-	perCallModel: string,
+	selector: unknown,
 	agent: AgentDefinition,
 	hasModelOverride: boolean,
 	parentModelPattern: string | undefined,
@@ -369,8 +375,9 @@ function preflightPerCallModel(
 			`Per-call model conflicts with task.agentModelOverrides for agent "${agent.name}". Omit model to use the configured override.`,
 		);
 	}
-	const selectorProblem = invalidModelSelectorReason(perCallModel, "The call");
+	const selectorProblem = invalidModelSelectorReason(selector, "The call");
 	if (selectorProblem) fail(selectorProblem);
+	const perCallModel = selector as string;
 	const grants: PerCallModelGrants = {
 		settings,
 		agentName: agent.name,
@@ -488,7 +495,7 @@ export async function resolveEffectiveSubagentPolicy(
 				invocationKind: request.invocationKind,
 				agent,
 				sourceSession: request.sourceSession,
-				model: request.model,
+				model: request.seanceModel ?? request.model,
 				planMode,
 				isolationRequested: request.isolation?.requested === true,
 				hasCustomTools: (request.customTools?.length ?? 0) > 0,
@@ -530,12 +537,14 @@ export async function resolveEffectiveSubagentPolicy(
 	const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(request.session.settings));
 	const oauthAccountPools = Object.hasOwn(agentAccountPools, agentName) ? agentAccountPools[agentName] : undefined;
 	const hasPreparedSeance = preparedSeance !== undefined;
+	// A `seance` name that resolved to anything but the bundled agent is an ordinary agent: its `model` is per-call.
+	const perCallSelector: unknown = request.perCallModel ?? (isBundledSeance(agent) ? undefined : request.seanceModel);
 	const perCallModelGrants =
-		request.perCallModel === undefined
+		perCallSelector === undefined
 			? undefined
 			: preflightPerCallModel(
 					request,
-					request.perCallModel,
+					perCallSelector,
 					agent,
 					Object.hasOwn(agentModelOverrides, agentName),
 					request.session.getActiveModelString?.(),
@@ -543,7 +552,7 @@ export async function resolveEffectiveSubagentPolicy(
 	const parentActiveModelPattern =
 		hasPreparedSeance || perCallModelGrants ? undefined : request.session.getActiveModelString?.();
 	const modelResolution = {
-		requestModel: preparedSeance?.modelPatterns ?? request.perCallModel ?? request.model,
+		requestModel: preparedSeance?.modelPatterns ?? (perCallModelGrants ? (perCallSelector as string) : request.model),
 		settingsOverride: hasPreparedSeance ? undefined : agentModelOverrides[agentName],
 		agentModel: hasPreparedSeance ? undefined : effectiveAgent.model,
 		settings: request.session.settings,

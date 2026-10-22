@@ -1514,4 +1514,67 @@ describe("per-call model preflight", () => {
 		expect(policy.perCallModelGrants).toBeUndefined();
 		expect(policy.parentActiveModelPattern).toBe("mock/parent");
 	});
+
+	describe("an agent shadowing the seance name", () => {
+		const shadow: AgentDefinition = { ...AGENT, name: "seance", source: "project", model: ["mock/agent-own"] };
+
+		it.each(["off", "on"] as const)(
+			"holds its model to the per-call gate under task.perCallModel: %s",
+			async mode => {
+				mockDiscovery(shadow);
+				await expect(
+					resolveEffectiveSubagentPolicy(
+						request({
+							session: perCallSession({ "task.perCallModel": mode }),
+							agent: "seance",
+							seanceModel: "mock/target",
+						}),
+					),
+				).rejects.toThrow(mode === "off" ? "task.perCallModel: off" : "not approved");
+			},
+		);
+
+		it("keeps task.agentModelOverrides authoritative", async () => {
+			mockDiscovery(shadow);
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: perCallSession({
+							"task.perCallModel": "on",
+							modelRoles: { review: "mock/target" },
+							"task.agentModelOverrides": { seance: "mock/agent-own" },
+						}),
+						agent: "seance",
+						seanceModel: "mock/target",
+					}),
+				),
+			).rejects.toThrow(/conflicts with task\.agentModelOverrides/);
+		});
+
+		it("rejects a candidate array instead of routing it", async () => {
+			mockDiscovery(shadow);
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: perCallSession({ "task.perCallModel": "on", modelRoles: { review: "mock/target" } }),
+						agent: "seance",
+						seanceModel: ["mock/target"],
+					}),
+				),
+			).rejects.toThrow(/invalid `model`/);
+		});
+
+		it("routes an approved model as a per-call worker", async () => {
+			mockDiscovery(shadow);
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({
+					session: perCallSession({ "task.perCallModel": "on", modelRoles: { review: "mock/target" } }),
+					agent: "seance",
+					seanceModel: "mock/target",
+				}),
+			);
+			expect(policy.modelOverride).toEqual(["mock/target"]);
+			expect(policy.perCallModelGrants?.agentName).toBe("seance");
+		});
+	});
 });

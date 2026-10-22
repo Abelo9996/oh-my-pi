@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponse, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
@@ -642,6 +643,63 @@ describe("persisted subagent revival", () => {
 		discover.mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const removedCheck = await revive(Settings.isolated());
 		expect(() => removedCheck(own)).toThrow(/not approved/);
+	});
+
+	it("refuses to revive or dispatch a per-call worker on a model that cannot run at or below task.maxEffort", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const highOnly = buildModel({
+			id: "mock-high-only",
+			name: "High Only",
+			api: "anthropic-messages",
+			provider: "mock",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.High] },
+			baseUrl: "https://example.invalid",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		});
+		const disposed: boolean[] = [];
+		let options: CreateAgentSessionOptions | undefined;
+		let sessionModel: typeof highOnly | undefined = highOnly;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async created => {
+			options = created;
+			const session = Object.assign(createRevivedSession([]).session, {
+				model: sessionModel,
+				dispose: async () => {
+					disposed.push(true);
+				},
+			});
+			return { session } as CreateAgentSessionResult;
+		});
+		const revive = async (perCallModel: boolean) => {
+			const cwd = makeTempDir("@pi-revive-per-call-floor-");
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+				agent: "task",
+				perCallModel,
+			});
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd, undefined, {
+				settings: Settings.isolated({ "task.maxEffort": "low", modelRoles: { review: "mock/mock-high-only" } }),
+				modelRegistry: { authStorage: {}, getAvailable: () => [highOnly] } as unknown as ModelRegistry,
+			})(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			return reviver(ref);
+		};
+
+		await expect(revive(true)).rejects.toThrow(
+			"mock/mock-high-only has no supported thinking effort at or below task.maxEffort=low",
+		);
+		expect(disposed).toEqual([true]);
+		await expect(revive(false)).resolves.toBeDefined();
+
+		// A model the worker reaches later (e.g. an extension swap) is held to the same floor at dispatch.
+		sessionModel = undefined;
+		await revive(true);
+		const check = options?.assertDispatchModel;
+		if (!check) throw new Error("Expected a per-call dispatch check");
+		expect(() => check(highOnly)).toThrow("no supported thinking effort at or below task.maxEffort=low");
 	});
 
 	it("falls back to the ref display name reviving a legacy session file without a persisted agent name", async () => {

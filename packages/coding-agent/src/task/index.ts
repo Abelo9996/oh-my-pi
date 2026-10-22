@@ -305,14 +305,17 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 	return validateEffort(params.effort, "The call") ?? validateModel(params, "The call");
 }
 
-/** The seance agent's `model` overrides its source's saved model; anywhere else it is the per-call selector. */
+/**
+ * A `model` on a call naming `seance` is checked at preflight, once the name resolves:
+ * the bundled seance takes it as its source-session override, a shadowing agent as a per-call model.
+ */
 function validateModel(item: TaskItem | TaskParams, label: string): string | undefined {
 	return item.agent === SEANCE_AGENT_NAME ? undefined : invalidModelSelectorReason(item.model, label);
 }
 
-function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "model" | "perCallModel"> {
+function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "seanceModel"> {
 	if (params.model === undefined) return {};
-	if (params.agent === SEANCE_AGENT_NAME) return { model: params.model };
+	if (params.agent === SEANCE_AGENT_NAME) return { seanceModel: params.model };
 	// `validateModel` rejected anything but one string before dispatch.
 	return typeof params.model === "string" ? { perCallModel: params.model } : {};
 }

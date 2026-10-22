@@ -851,4 +851,40 @@ describe("batch model placement", () => {
 			expect(run).not.toHaveBeenCalled();
 		},
 	);
+
+	it.each(["off", "on"] as const)(
+		"holds a project agent named seance to the per-call gate while task.perCallModel is %s",
+		async mode => {
+			mockDiscovery([
+				taskAgent,
+				{ name: "seance", description: "Shadow", systemPrompt: "Work.", source: "project", model: ["p/own"] },
+			]);
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+			const tool = await TaskTool.create(
+				createSession({
+					settings: {
+						"task.batch": true,
+						"async.enabled": false,
+						"task.perCallModel": mode,
+						"task.agentModelOverrides": { seance: "p/own" },
+					},
+				}),
+			);
+			const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+				type: "toolCall",
+				id: "seance-shadow",
+				name: tool.name,
+				arguments: {
+					context: "Shared context",
+					tasks: [{ agent: "seance", task: "Do work", solutionSpace: "c", model: "p/ungranted" }],
+				},
+			});
+			const result = await tool.execute("seance-shadow", args as TaskParams);
+			expect(getFirstText(result)).toMatch(
+				mode === "off" ? /per-call model is disabled/i : /conflicts with task\.agentModelOverrides/,
+			);
+			expect(result.isError).toBe(true);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
 });

@@ -100,4 +100,81 @@ describe("per-call exact selection after background discovery", () => {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
 	});
+
+	it("refuses the next request once the operator revokes the grant mid-run", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-executor-revoked-model-"));
+		const authStorage = await AuthStorage.create(":memory:");
+		const sourceId = "executor-revoked-model";
+		const agentId = "RevokedModel";
+		try {
+			authStorage.keys.setRuntime("mock", "test-key");
+			registerMockApi(sourceId);
+			await Bun.write(path.join(cwd, "notes.txt"), "notes");
+			const settings = Settings.isolated({
+				"task.maxRecursionDepth": 2,
+				"task.perCallModel": "on",
+				"task.isolation.enabled": false,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				modelRoles: { review: "mock/revoked-model" },
+			});
+			const model = createMockModel({
+				id: "revoked-model",
+				responses: [
+					() => {
+						// The operator points the only granting role elsewhere while the worker is running.
+						settings.setModelRole("review", "mock/other-model");
+						return { content: [{ type: "toolCall", name: "read", arguments: { path: "notes.txt" } }] };
+					},
+				],
+				handler: () => ({ content: ["Answer after revocation."] }),
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+			const find = modelRegistry.find.bind(modelRegistry);
+			vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
+				provider === "mock" && id === model.id ? model : find(provider, id),
+			);
+			vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => [model]);
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [{ name: "worker", description: "test", systemPrompt: "test", source: "bundled", tools: ["read"] }],
+				projectAgentsDir: null,
+			});
+			const session = {
+				cwd,
+				hasUI: false,
+				settings,
+				authStorage,
+				modelRegistry,
+				restrictToolNames: true,
+				enableMCP: false,
+				enableLsp: false,
+				enableIrc: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				getSessionAgents: () => [],
+			} as unknown as ToolSession;
+			const execution = await runStructuredSubagent({
+				session,
+				invocationKind: "task",
+				assignment: "Read notes.txt, then answer.",
+				agent: "worker",
+				perCallModel: `mock/${model.id}`,
+				structured: false,
+				identity: { id: agentId },
+				keepAlive: false,
+			});
+			// Only the request admitted before the revocation reached the model.
+			expect(model.calls).toHaveLength(1);
+			expect(execution.result.output).not.toContain("Answer after revocation.");
+			expect(`${execution.result.error ?? ""}${execution.result.stderr}${execution.result.output}`).toMatch(
+				/not approved/,
+			);
+		} finally {
+			await AgentRegistry.global().get(agentId)?.session?.dispose();
+			AgentRegistry.global().unregister(agentId);
+			unregisterCustomApis(sourceId);
+			authStorage.close();
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
 });
