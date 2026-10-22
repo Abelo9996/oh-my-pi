@@ -337,14 +337,17 @@ mod tests {
 
 	#[test]
 	fn parallel_edge_keeps_other_node_ports_and_labels_distinct() {
-		let diagram = "flowchart LR
+		let prefix = "flowchart LR
   X[Client] --> A[Gateway]
   A -->|first parallel| B[Service B]
-  B -->|branch a| D[Target D]
+";
+		let other_edges = "  B -->|branch a| D[Target D]
   B -->|longer branch b| E[Target E]
   A -->|forward request| C[Service C]
   F[Caller] --> G[Proxy] --> C
-  A -.->|second parallel| B";
+";
+		let second = "  A -.->|second parallel| B
+";
 		let config = super::super::AsciiConfig {
 			use_ascii:          false,
 			padding_x:          5,
@@ -352,32 +355,56 @@ mod tests {
 			box_border_padding: 1,
 			direction:          LayoutDirection::LR,
 		};
-		let parsed = super::super::parser::parse_flowchart(diagram).unwrap();
-		let mut graph = super::super::converter::convert(&parsed, config.clone());
-		super::super::grid::create_mapping(&mut graph);
-		let second = graph
-			.edges
-			.iter()
-			.find(|edge| edge.text == "second parallel")
+		for diagram in
+			[format!("{prefix}{second}{other_edges}"), format!("{prefix}{other_edges}{second}")]
+		{
+			let parsed = super::super::parser::parse_flowchart(&diagram).unwrap();
+			let mut graph = super::super::converter::convert(&parsed, config.clone());
+			super::super::grid::create_mapping(&mut graph);
+			let second = graph
+				.edges
+				.iter()
+				.find(|edge| edge.text == "second parallel")
+				.unwrap();
+			let used: HashSet<_> = path_cells(&second.path).collect();
+			for label in ["forward request", "longer branch b", "first parallel"] {
+				let other = graph.edges.iter().find(|edge| edge.text == label).unwrap();
+				assert!(
+					path_cells(&other.path).all(|cell| !used.contains(&cell)),
+					"parallel edge crossed {label}"
+				);
+			}
+			let rendered = super::super::render(
+				&diagram,
+				config.clone(),
+				None,
+				crate::mermaid::ansi::ColorMode::None,
+				&crate::mermaid::ansi::Theme::default(),
+			)
 			.unwrap();
-		let used: HashSet<_> = path_cells(&second.path).collect();
-		for label in ["forward request", "longer branch b", "first parallel"] {
-			let other = graph.edges.iter().find(|edge| edge.text == label).unwrap();
-			assert!(
-				path_cells(&other.path).all(|cell| !used.contains(&cell)),
-				"parallel edge crossed {label}"
-			);
+			for label in ["first parallel", "second parallel", "forward request", "longer branch b"] {
+				assert!(rendered.contains(label), "edge label {label} was overwritten");
+			}
 		}
+	}
+
+	#[test]
+	fn unused_parallel_corridor_does_not_add_blank_rows() {
+		let config = super::super::AsciiConfig {
+			use_ascii:          false,
+			padding_x:          5,
+			padding_y:          5,
+			box_border_padding: 1,
+			direction:          LayoutDirection::LR,
+		};
 		let rendered = super::super::render(
-			diagram,
+			"flowchart LR\nA -->|first| B\nA -.->|second| B",
 			config,
 			None,
 			crate::mermaid::ansi::ColorMode::None,
 			&crate::mermaid::ansi::Theme::default(),
 		)
 		.unwrap();
-		for label in ["first parallel", "second parallel", "forward request", "longer branch b"] {
-			assert!(rendered.contains(label), "edge label {label} was overwritten");
-		}
+		assert!(rendered.starts_with('┌'), "unused corridor added blank rows:\n{rendered}");
 	}
 }
