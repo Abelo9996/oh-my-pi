@@ -1894,8 +1894,12 @@ async function openCodexWebSocketTransport(
 	if (websocketState.connection?.hasActiveRequest()) {
 		throw new CodexWebSocketBusyError("websocket request already in progress");
 	}
+	// Accepted steering belongs to whichever request ends up owning the socket,
+	// so it is only consumed once this request takes it (see `onOwned` below).
 	const steered = websocketState.acceptedSteering;
-	websocketState.acceptedSteering = undefined;
+	const onOwned = () => {
+		if (websocketState.acceptedSteering === steered) websocketState.acceptedSteering = undefined;
+	};
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,
@@ -1926,6 +1930,7 @@ async function openCodexWebSocketTransport(
 					timeouts,
 					requestSetup.requestSignal,
 					onSseEvent,
+					onOwned,
 				),
 				requestBodyForState: cloneJsonTree(requestContext.transformedBody),
 				transport: "websocket",
@@ -2004,6 +2009,7 @@ async function openCodexWebSocketTransport(
 		timeouts,
 		requestSetup.requestSignal,
 		onSseEvent,
+		onOwned,
 	);
 	return {
 		eventStream,
@@ -4200,6 +4206,7 @@ class CodexWebSocketConnection {
 		timeouts: CodexWebSocketRequestTimeouts,
 		signal?: AbortSignal,
 		onSseEvent?: (event: RawSseEvent) => void,
+		onOwned?: () => void,
 	): AsyncGenerator<Record<string, unknown>> {
 		if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) {
 			throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
@@ -4211,6 +4218,7 @@ class CodexWebSocketConnection {
 			throw new CodexWebSocketTransportError(`request was aborted`, { cause: signal.reason });
 		}
 		this.#activeRequest = true;
+		onOwned?.();
 		this.#streamObserver = onSseEvent;
 		// Drain any non-error frames left over from a prior request before sending.
 		// An attach reads exactly those frames: the successor the server started
