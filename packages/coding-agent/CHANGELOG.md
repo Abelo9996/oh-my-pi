@@ -23,6 +23,10 @@
 - Adjusted view placement to align with column‑capped output, fixing view offsets after line truncation
 - In Tern, warnings, errors, the update notice, `@file` reads and finished background jobs, tangents and supervised processes read like the rest of the chat: an icon and the message instead of a raw terminal line
 
+### Changed
+
+- Computer-enabled sessions receive the desktop guide before their first call, avoiding a separate documentation read before starting a desktop task
+
 ### Fixed
 
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
