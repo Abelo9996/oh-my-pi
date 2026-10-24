@@ -458,6 +458,24 @@ impl GitRepo {
 		Ok(())
 	}
 
+	/// Record the checkout's uncommitted changes to tracked files as a stash
+	/// commit on `reference`'s reflog, leaving the working tree, the index, and
+	/// the stash list as they are. `None` when nothing is uncommitted.
+	pub fn save_uncommitted(&self, reference: &str, message: &str) -> Result<Option<String>> {
+		let create = ["stash", "create"].map(str::to_owned);
+		let created = super::cli::run_sync(self.root(), &create, super::cli::COMMAND_TIMEOUT)?
+			.into_checked(&create)?;
+		let id = created.stdout.trim();
+		if id.is_empty() {
+			return Ok(None);
+		}
+		let update =
+			["update-ref", "--create-reflog", "-m", message, reference, id].map(str::to_owned);
+		super::cli::run_sync(self.root(), &update, super::cli::COMMAND_TIMEOUT)?
+			.into_checked(&update)?;
+		Ok(Some(id.to_owned()))
+	}
+
 	/// Reset HEAD, index, and optionally the worktree to a target commit.
 	pub fn reset(&self, mode: ResetMode, target: Option<&str>) -> Result<()> {
 		let repo = self.gix()?;
