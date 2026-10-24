@@ -47,6 +47,7 @@
 - Fixed post-edit diagnostics showing "OK" or "no issues" when one of several language servers, or one file of a batched edit, had not reported yet ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 - Fixed `lsp code_actions` passing diagnostics from an earlier version of a reopened file to quick-fix providers ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 - Fixed `lsp diagnostics` getting no report from language servers that check files only on save ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
+- macOS computer-use tasks now open apps that may have no window and inspect the returned window in one call, while known-open windows and read-only work keep window lookup ([#16925](https://github.com/can1357/oh-my-pi/pull/16925) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.13.3] - 2026-10-28
 
@@ -345,9 +346,6 @@
 - Fixed an image pasted while an extension input hook held a submission being dropped from the next message: once the submitted images leave the composer, the images that stay are renumbered from `#1` ([#16805](https://github.com/can1357/oh-my-pi/pull/16805) by [@lemonleks](https://github.com/lemonleks))
 - Fixed a collab guest losing the draft of a host-only command that takes its draft out of the composer on Enter (`/plan`, `/goal`, `/tan`, `/btw` and others): the draft now comes back with its images ([#16805](https://github.com/can1357/oh-my-pi/pull/16805) by [@lemonleks](https://github.com/lemonleks))
 - Fixed a hashline `PUT` whose body repeats the line just above or below its range (or both), and is shorter than the range, silently deleting the range's other lines or writing a neighbouring line twice in Python, TypeScript and other parsed files; it is now refused, and the "too short" refusal names the lines the body leaves out ([#17028](https://github.com/can1357/oh-my-pi/pull/17028) by [@sjawhar](https://github.com/sjawhar))
-- Computer-use tasks now start with an app's returned window instead of first looking for a window that may not be open.
-- Computer-use tasks on macOS now start with an app's returned window instead of first looking for a window that may not be open.
-- Computer-use tasks on macOS now start with an app's returned window instead of first looking for a window that may not be open ([#16925](https://github.com/can1357/oh-my-pi/pull/16925) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
 - `/resume` into another session now cancels the previous session's background jobs, as `/new` does, instead of delivering their results into the resumed session and starting a turn there ([#16760](https://github.com/can1357/oh-my-pi/pull/16760) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the models config migration writing `models.yml` readable by other users on the machine, and dropping every custom provider when the write was interrupted; the migrated file is now published atomically with owner-only permissions ([#16654](https://github.com/can1357/oh-my-pi/pull/16654) by [@adi-IL](https://github.com/adi-IL))
