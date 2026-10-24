@@ -129,7 +129,9 @@ export type NativeDesktopSessionFactory = (
 	options: DesktopSessionOptions,
 ) => NativeDesktopSession | Promise<NativeDesktopSession>;
 
-type WindowFilter = { id?: string | number; app?: string; title?: string };
+type WindowFilter = { id?: string | number; app?: string; title?: string; wait?: number };
+const MAX_WINDOW_WAIT_MS = 10_000;
+const WINDOW_WAIT_INTERVAL_MS = 100;
 /** Window listings are session-transcript payload; `window()` lookups search the whole native list. */
 const MAX_LISTED_WINDOWS = 48;
 /**
@@ -341,6 +343,16 @@ function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
 		(!app || window.app.toLocaleLowerCase().includes(app)) &&
 		(!title || window.title.toLocaleLowerCase().includes(title))
 	);
+}
+
+function windowWait(wait: unknown): number {
+	if (wait === undefined) return 0;
+	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
+		throw new ToolError(
+			`window({ wait }) takes milliseconds from 0 to ${MAX_WINDOW_WAIT_MS}; got ${JSON.stringify(wait)}`,
+		);
+	}
+	return wait;
 }
 
 function guardRun(context: ComputerRunContext, method: string): void {
@@ -1835,11 +1847,19 @@ export class ComputerWorkerCore {
 			},
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
-				const windows = await nativeCall(signal, () => session.listWindows());
-				const matches =
-					typeof selector === "string" || typeof selector === "number"
-						? windows.filter(window => window.id === String(selector))
-						: windows.filter(window => matchesFilter(window, selector));
+				const wait = typeof selector === "object" && selector !== null ? windowWait(selector.wait) : 0;
+				const deadline = Date.now() + wait;
+				let windows: DesktopWindow[];
+				let matches: DesktopWindow[];
+				for (;;) {
+					windows = await nativeCall(signal, () => session.listWindows());
+					matches =
+						typeof selector === "string" || typeof selector === "number"
+							? windows.filter(window => window.id === String(selector))
+							: windows.filter(window => matchesFilter(window, selector));
+					if (matches.length > 0 || Date.now() + WINDOW_WAIT_INTERVAL_MS > deadline) break;
+					await waitForRun(WINDOW_WAIT_INTERVAL_MS, signal);
+				}
 				// Untyped scripts may pass nothing or `null`, which `matchesFilter` accepts as no filter: a desktop with one
 				// window returns it, and otherwise the error names the missing selector.
 				const unfiltered =

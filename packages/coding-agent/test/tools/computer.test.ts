@@ -4790,3 +4790,104 @@ describe("computer background fallback", () => {
 		expect(notice(await run(front, clickTarget, "takeover"))).toContain("not confirmed");
 	});
 });
+
+describe("window() waiting for a window to appear", () => {
+	class OpeningSession extends FakeNativeSession {
+		listings = 0;
+		constructor(readonly appearsAt: number) {
+			super();
+		}
+		override async listWindows(): Promise<DesktopWindow[]> {
+			this.listings += 1;
+			return this.listings >= this.appearsAt
+				? [windowFixture, { ...windowFixture, id: "151", app: "Preview", title: "report.pdf" }]
+				: [windowFixture];
+		}
+	}
+
+	async function run(native: NativeDesktopSession, code: string, readOnly = false) {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const id = crypto.randomUUID();
+		transport.inbound({
+			type: "run",
+			id,
+			code,
+			timeoutMs: 5_000,
+			session: snapshot(readOnly),
+			escape: escapeScope(),
+		});
+		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+		if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
+		return message;
+	}
+
+	it("polls a filter with wait until the window appears in a read-only run", async () => {
+		const native = new OpeningSession(4);
+		const result = await run(
+			native,
+			'return (await desktop.window({ app: "Preview", title: "report.pdf", wait: 2000 })).id',
+			true,
+		);
+		if (!result.ok) throw new Error(result.error.message);
+		expect(result.payload.returnValue).toBe("151");
+		expect(native.listings).toBe(4);
+	});
+
+	it("still fails at once without wait", async () => {
+		const native = new OpeningSession(4);
+		const result = await run(native, 'return await desktop.window({ app: "Preview" })');
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toStartWith('no window matches {"app":"Preview"}');
+		expect(native.listings).toBe(1);
+	});
+
+	it("keeps id selectors to one listing", async () => {
+		const native = new OpeningSession(4);
+		const result = await run(native, "return await desktop.window(151)");
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toStartWith("no window matches 151");
+		expect(native.listings).toBe(1);
+	});
+
+	it("reports the window miss after waiting when nothing appears", async () => {
+		const native = new OpeningSession(Number.POSITIVE_INFINITY);
+		const result = await run(native, 'return await desktop.window({ app: "Preview", wait: 300 })');
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toStartWith('no window matches {"app":"Preview","wait":300}');
+		expect(result.error.message).toContain("Open windows by app");
+		expect(native.listings).toBeGreaterThan(1);
+	});
+
+	it.each(["60000", "-1", '"soon"', "NaN"])("refuses an invalid wait of %s", async wait => {
+		const native = new OpeningSession(1);
+		const result = await run(native, `return await desktop.window({ app: "Preview", wait: ${wait} })`);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toContain("window({ wait }) takes milliseconds from 0 to 10000");
+		expect(native.listings).toBe(0);
+	});
+
+	it("resolves a delayed window through Python keyword filters", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const native = new OpeningSession(3);
+		const prelude = workerPrelude(session, native);
+		definitions = [prelude];
+		const result = await executePython(
+			'win = await computer.window(app="Preview", title="report.pdf", wait=2000)\nprint(win.id)',
+			{
+				cwd: process.cwd(),
+				sessionId: `computer-window-wait-${crypto.randomUUID()}`,
+				toolSession: session,
+				kernelMode: "per-call",
+			},
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim().split("\n").at(-1)).toBe("151");
+		expect(native.listings).toBe(3);
+	});
+});
