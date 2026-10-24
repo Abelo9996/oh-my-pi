@@ -4805,7 +4805,7 @@ describe("window() waiting for a window to appear", () => {
 		}
 	}
 
-	async function run(native: NativeDesktopSession, code: string, readOnly = false) {
+	async function run(native: NativeDesktopSession, code: string, readOnly = false, timeoutMs = 5_000) {
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => native);
 		const id = crypto.randomUUID();
@@ -4813,7 +4813,7 @@ describe("window() waiting for a window to appear", () => {
 			type: "run",
 			id,
 			code,
-			timeoutMs: 5_000,
+			timeoutMs,
 			session: snapshot(readOnly),
 			escape: escapeScope(),
 		});
@@ -4832,6 +4832,18 @@ describe("window() waiting for a window to appear", () => {
 		if (!result.ok) throw new Error(result.error.message);
 		expect(result.payload.returnValue).toBe("151");
 		expect(native.listings).toBe(4);
+	});
+
+	it("stops polling when the run is cancelled by its deadline", async () => {
+		const native = new OpeningSession(Number.POSITIVE_INFINITY);
+		const result = await run(native, 'return await desktop.window({ app: "Preview", wait: 10000 })', false, 300);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toContain("timed out");
+		const listings = native.listings;
+		// AbortSignal.timeout uses the platform clock; let a native poll interval pass to expose a surviving loop.
+		await Bun.sleep(250);
+		expect(native.listings).toBe(listings);
 	});
 
 	it("still fails at once without wait", async () => {
