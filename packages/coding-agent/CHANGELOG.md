@@ -17,15 +17,12 @@
 - `PI_INTENT_PROMPT` replaces the system-prompt guidance for the `i` intent field; `PI_INTENT_DESC` replaces its tool-schema description
 - Eval shows printed JSON text (`print(json.dumps(…))`, `console.log(JSON.stringify(…))`) as a collapsible JSON tree, like printed dicts and objects
 - The warning that a saved Codex or Claude rate-limit reset is about to expire now shows once per reset across all conversations and omp windows, and only in its final 6 hours instead of from 24 hours out; the status line keeps counting it down meanwhile
+- Sessions started with computer use enabled receive the desktop guide before their first call, avoiding a separate documentation read before starting a desktop task ([#16918](https://github.com/can1357/oh-my-pi/pull/16918) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
 - Adjusted view placement to align with column‑capped output, fixing view offsets after line truncation
 - In Tern, warnings, errors, the update notice, `@file` reads and finished background jobs, tangents and supervised processes read like the rest of the chat: an icon and the message instead of a raw terminal line
-
-### Changed
-
-- Sessions started with computer use enabled receive the desktop guide before their first call, avoiding a separate documentation read before starting a desktop task
 
 ### Fixed
 
