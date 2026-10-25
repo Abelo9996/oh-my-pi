@@ -1466,7 +1466,9 @@ the call is signaled and its control socket is open. A missing or empty
 and mute: `live_mute` only moves the phase to `muted`, so silence the peer's
 microphone track while that phase lasts. The server sends no `live_levels` and
 no `speaking` phase for these sessions. `voice`, `instructions`, `live_stop` and
-the frames work as for `live_start`.
+the frames work as for `live_start`. The server cannot see the client's peer, so
+send `live_stop` when that peer disconnects (`connectionstatechange` to `failed`
+or `closed`); otherwise the session stays open.
 
 `live_stop` responds after the session has stopped and succeeds when none is
 active. `live_mute` sets the microphone mute, or toggles it when `muted` is

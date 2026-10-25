@@ -714,7 +714,12 @@ export interface ExtensionLiveSession {
 	sdpAnswer: string;
 	/** Voice in use. */
 	voice: string;
-	/** Ends the session; resolves once it has stopped. Safe to call repeatedly. */
+	/**
+	 * Ends the session; resolves once it has stopped. Safe to call repeatedly. The host has no media
+	 * peer, so it never sees the extension's peer go away: call this when that peer disconnects
+	 * (`connectionstatechange` to `failed` or `closed`, or the relay socket closing). Until then the
+	 * call stays open and the TUI keeps its live visualizer up.
+	 */
 	stop(): Promise<void>;
 }
 
