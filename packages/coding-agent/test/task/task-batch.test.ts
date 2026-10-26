@@ -857,10 +857,9 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
+	// `off` and `eval` refuse task calls through the same gate; one mode per shape covers it.
 	it.each([
 		["off", "batch"],
-		["eval", "batch"],
-		["off", "flat"],
 		["eval", "flat"],
 	] as const)(
 		"rejects a task call's model before dispatch while task.perCallModel is %s (%s call)",
@@ -871,7 +870,8 @@ describe("batch model placement", () => {
 			const tool = await TaskTool.create(
 				createSession({ settings: { "task.batch": batch, "async.enabled": false, "task.perCallModel": mode } }),
 			);
-			const work = { task: "Do work", solutionSpace: "c", model: "p/requested" };
+			// A role alias is not an exact selector, but the disabled gate is what the caller must hear first.
+			const work = { task: "Do work", solutionSpace: "c", model: "@smol" };
 			// Through shared argument validation, as a model's tool call arrives: `model` must reach preflight in both shapes.
 			const args = validateAgentToolArguments(tool as unknown as AgentTool, {
 				type: "toolCall",

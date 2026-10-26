@@ -180,7 +180,7 @@ function resolveGlobScopePattern(
 /**
  * Format a model as "provider/modelId" string.
  */
-export function formatModelString(model: Model<Api>): string {
+export function formatModelString(model: Pick<Model<Api>, "provider" | "id">): string {
 	return `${model.provider}/${model.id}`;
 }
 

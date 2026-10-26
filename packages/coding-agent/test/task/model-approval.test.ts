@@ -6,6 +6,7 @@ import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid"
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
 	assertPerCallModelApproved,
@@ -277,6 +278,22 @@ describe("per-call model grants", () => {
 		};
 		expect(() => assertPerCallModelApproved(droidFable, grants, registry)).toThrow(
 			/server-side fallback to factory-droid\/claude-opus-5/,
+		);
+	});
+
+	it("rejects a non-string task.perCallModelAllow entry from a config file and a runtime write", async () => {
+		const tempDir = TempDir.createSync("@pi-per-call-allow-");
+		try {
+			const overlay = tempDir.join("overlay.yml");
+			await Bun.write(overlay, "task:\n  perCallModelAllow:\n    - mock/target\n    - 42\n");
+			await expect(Settings.loadIsolated({ inMemory: true, configFiles: [overlay] })).rejects.toThrow(
+				"Invalid task.perCallModelAllow[1]",
+			);
+		} finally {
+			tempDir.removeSync();
+		}
+		expect(() => Settings.isolated({ "task.perCallModelAllow": [{ id: "mock/target" }] })).toThrow(
+			"Invalid task.perCallModelAllow[0]",
 		);
 	});
 

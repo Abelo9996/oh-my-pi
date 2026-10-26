@@ -3,9 +3,10 @@
  * `workpool()`.
  *
  * A model-facing selector may only pick a chat model the operator already
- * routes to: a configured chat role's value, a bundled or user-level agent's
- * frontmatter model, or the parent's live model. Catalog membership,
- * credentials, built-in role defaults, project agent frontmatter and saved
+ * routes to: a configured chat role's value, the selected agent's own
+ * frontmatter model (only when that agent is bundled or user-level), or the
+ * parent's live model. Catalog membership, credentials, built-in role
+ * defaults, project agent frontmatter, other agents' frontmatter and saved
  * transcripts grant nothing. `task.perCallModelAllow`, when set, narrows the
  * result to the exact models it lists.
  */
@@ -32,7 +33,11 @@ export class PerCallModelError extends Error {
 	}
 }
 
-/** Inputs that grant per-call models. Read live; nothing here is persisted as a grant. */
+/**
+ * Inputs that grant per-call models; nothing here is persisted as a grant. `settings` is read live,
+ * so a configuration change applies to the next request; the agent and parent fields are captured
+ * when the child spawns (or is revived).
+ */
 export interface PerCallModelGrants {
 	settings: Settings;
 	agentName: string;
@@ -47,11 +52,6 @@ export interface PerCallModelGrants {
 
 type ApprovalRegistry = Pick<ModelRegistry, "getAvailable">;
 
-/** `provider/id`, plus `@upstream` when the model is pinned to one aggregator route. */
-function identity(model: Model<Api>): string {
-	return formatModelStringWithRouting(model);
-}
-
 /**
  * The one model an exact entry names: a literal catalog id wins over a `:level`
  * split, and an `@upstream` pin stays part of the identity. Undefined when the
@@ -59,7 +59,7 @@ function identity(model: Model<Api>): string {
  */
 function exactIdentity(entry: string, chat: Model<Api>[]): string | undefined {
 	const model = resolveModelOverride([entry], { getAvailable: () => chat }, undefined, { exactOnly: true }).model;
-	return model ? identity(model) : undefined;
+	return model ? formatModelStringWithRouting(model) : undefined;
 }
 
 /**
@@ -95,7 +95,7 @@ export function perCallModelGrantPatterns(grants: PerCallModelGrants): string[] 
 /** Whether the operator's configuration names `model` itself (see {@link isPerCallModelApproved}). */
 function isGranted(model: Model<Api>, grants: PerCallModelGrants, chat: Model<Api>[]): boolean {
 	const settings = grants.settings.rootSettings();
-	const target = identity(model);
+	const target = formatModelStringWithRouting(model);
 	if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) return false;
 	const allow = cfgTaskPerCallModelAllow.get(settings);
 	if (allow.length > 0 && !allow.some(entry => exactIdentity(entry.trim(), chat) === target)) return false;
@@ -107,11 +107,11 @@ function isGranted(model: Model<Api>, grants: PerCallModelGrants, chat: Model<Ap
 		// Otherwise a grant approves what it routes to: every match of a glob, or the one model a selector resolves to.
 		if (/[*?[]/.test(pattern)) {
 			return filterAvailableModelsByEnabledPatterns(chat, [pattern], settings).some(
-				granted => identity(granted) === target,
+				granted => formatModelStringWithRouting(granted) === target,
 			);
 		}
 		const resolved = resolveModelOverride([pattern], chatRegistry, settings).model;
-		return resolved !== undefined && identity(resolved) === target;
+		return resolved !== undefined && formatModelStringWithRouting(resolved) === target;
 	});
 }
 
@@ -157,7 +157,7 @@ export function assertPerCallModelApproved(
 		const fallbacks = unapprovedServerSideFallbacks(model, grants, chat);
 		if (fallbacks.length === 0) return;
 		throw new PerCallModelError(
-			`Per-call model ${identity(model)} is not approved for agent "${grants.agentName}": its provider always attaches a server-side fallback to ${fallbacks.join(", ")}, which is not approved. Approve the fallback model too, or use a model without one.`,
+			`Per-call model ${formatModelStringWithRouting(model)} is not approved for agent "${grants.agentName}": its provider always attaches a server-side fallback to ${fallbacks.join(", ")}, which is not approved. Approve the fallback model too, or use a model without one.`,
 		);
 	}
 	const allowGuidance =
@@ -165,6 +165,6 @@ export function assertPerCallModelApproved(
 			? " It must also be listed in task.perCallModelAllow."
 			: "";
 	throw new PerCallModelError(
-		`Per-call model ${identity(model)} is not approved for agent "${grants.agentName}": use a model named by a configured chat role, a bundled or user-level agent's frontmatter, or the parent's model.${allowGuidance} Catalog or credentials alone do not approve a model.`,
+		`Per-call model ${formatModelStringWithRouting(model)} is not approved for agent "${grants.agentName}": use a model named by a configured chat role, the selected agent's own frontmatter (bundled or user-level agents only), or the parent's model.${allowGuidance} Catalog or credentials alone do not approve a model.`,
 	);
 }

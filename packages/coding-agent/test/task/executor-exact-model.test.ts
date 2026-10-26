@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -170,6 +172,82 @@ describe("per-call exact selection after background discovery", () => {
 			expect(`${execution.result.error ?? ""}${execution.result.stderr}${execution.result.output}`).toMatch(
 				/not approved/,
 			);
+		} finally {
+			await AgentRegistry.global().get(agentId)?.session?.dispose();
+			AgentRegistry.global().unregister(agentId);
+			unregisterCustomApis(sourceId);
+			authStorage.close();
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{ label: "clamps a :high selector to task.maxEffort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+		{ label: "fails a model whose lowest effort is above task.maxEffort", efforts: [Effort.High] },
+	])("$label on the running worker", async ({ efforts }) => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-executor-effort-ceiling-"));
+		const authStorage = await AuthStorage.create(":memory:");
+		const sourceId = `executor-effort-ceiling-${efforts.length}`;
+		const agentId = `EffortCeiling${efforts.length}`;
+		try {
+			authStorage.keys.setRuntime("mock", "test-key");
+			registerMockApi(sourceId);
+			const model = Object.assign(
+				createMockModel({ id: "laddered", reasoning: true, handler: () => ({ content: ["Capped answer."] }) }),
+				{ thinking: { mode: "effort", efforts } satisfies ThinkingConfig },
+			);
+			const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+			const find = modelRegistry.find.bind(modelRegistry);
+			vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
+				provider === "mock" && id === model.id ? model : find(provider, id),
+			);
+			vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => [model]);
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [{ name: "worker", description: "test", systemPrompt: "test", source: "bundled", tools: ["read"] }],
+				projectAgentsDir: null,
+			});
+			const session = {
+				cwd,
+				hasUI: false,
+				settings: Settings.isolated({
+					"task.maxRecursionDepth": 2,
+					"task.perCallModel": "on",
+					"task.maxEffort": "low",
+					"task.isolation.enabled": false,
+					"compaction.enabled": false,
+					modelRoles: { review: `mock/${model.id}` },
+				}),
+				authStorage,
+				modelRegistry,
+				restrictToolNames: true,
+				enableMCP: false,
+				enableLsp: false,
+				enableIrc: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				getSessionAgents: () => [],
+			} as unknown as ToolSession;
+			const execution = await runStructuredSubagent({
+				session,
+				invocationKind: "task",
+				assignment: "Answer the question.",
+				agent: "worker",
+				perCallModel: `mock/${model.id}:high`,
+				structured: false,
+				identity: { id: agentId },
+				keepAlive: false,
+			});
+			if (efforts.length > 1) {
+				expect(execution.result.exitCode).toBe(0);
+				// The request the provider receives runs at the ceiling, not the requested `:high`.
+				expect(model.calls.map(call => call.options?.reasoning)).toEqual([Effort.Low]);
+			} else {
+				expect(model.calls).toHaveLength(0);
+				expect(execution.result.exitCode).not.toBe(0);
+				expect(`${execution.result.error ?? ""}${execution.result.stderr}`).toMatch(
+					/no supported thinking effort at or below task\.maxEffort=low/,
+				);
+			}
 		} finally {
 			await AgentRegistry.global().get(agentId)?.session?.dispose();
 			AgentRegistry.global().unregister(agentId);

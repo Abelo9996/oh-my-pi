@@ -32,7 +32,7 @@
 
 ## Inputs
 
-The wire schema is shape-swapped by `task.batch` (default on). One unit of work is `{ name?, agent?, task, solutionSpace, effort?, outputSchema?, schemaMode?, tools?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` requires `task.enableEffort=true` (default off), and `tools` requires `eval.tools.enabled` (default on).
+The wire schema is shape-swapped by `task.batch` (default on). One unit of work is `{ name?, agent?, model?, task, solutionSpace, effort?, outputSchema?, schemaMode?, tools?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` requires `task.enableEffort=true` (default off), and `tools` requires `eval.tools.enabled` (default on).
 
 - **Batch shape** (`task.batch` on): `{ context, tasks: item[] }` — one subagent per item, all run under the same fan-out rules; there is no top-level agent field. `context` is **required** shared background rendered into every spawned subagent's system prompt (`CONTEXT` section); `agent`, `outputSchema`, and `schemaMode` are per item. `effort` is added only when its setting enables it; `isolated` additionally requires plan mode to be disabled.
 - **Flat shape** (`task.batch` off): `{ ...item }` — exactly one spawn per call. Shared background goes into a `local://` file (e.g. `local://ctx.md`) that each spawn's `task` references; subagents share the parent's `local://` root.
@@ -110,7 +110,7 @@ Artifacts and side channels:
    - a mixed call registers the async jobs first, then runs its blocking items inline and returns once they settle — the text combines the inline summaries with the spawned-job listing, and the block keeps rendering the still-running background rows beside the inline results.
 5. Each `SpawnRun` calls `#runSpawn` → `runStructuredSubagent(...)`. Shared policy resolution reloads settings and rediscovers agents from disk, so runtime resolution can differ from the create-time description.
 6. It resolves the requested agent, enforces depth/spawn policy and `PI_BLOCKED_AGENT` self-recursion prevention, validates the effective output schema, and applies `before_subagent_spawn` routing/blocking hooks.
-7. Model priority: per-call `model` → `task.agentModelOverrides` → agent frontmatter → configured task role/session fallback. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
+7. Model priority: `task.agentModelOverrides` → agent frontmatter → configured task role/session fallback. An approved per-call `model` replaces the last two; for an agent with a `task.agentModelOverrides` entry it is a conflict error. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
 8. Plan mode supplies `read`, `grep`, `glob`, `web_search`, and any configured `ast_grep`, replaces the agent's spawn/prewalk controls, and disables LSP/IRC. Eval-defined tools and isolation/apply/merge controls are rejected.
 9. If `isolated`, it requires a git repo (`getRepoRoot(...)` / `captureBaseline(...)`), maps `isolation.backend` to a backend-kind hint (`parseIsolationBackend`), and materializes the workspace via the natives PAL (`ensureIsolation` → `isoResolve`/`isoStart`), walking the candidate list when a backend is unavailable.
 10. Artifacts dir comes from the parent session file when available, otherwise a temp dir. When the session is executing an approved plan, the plan reference is handed to the subagent.

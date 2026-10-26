@@ -2,6 +2,7 @@
  * Host-side handler for the eval `agent()` helper.
  */
 import { type } from "@oh-my-pi/omptype";
+import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import {
@@ -87,12 +88,12 @@ export interface EvalAgentResult {
 	};
 }
 
-function parseAgentArgs(args: unknown): EvalAgentArgs {
+function parseAgentArgs(args: unknown, settings: Settings): EvalAgentArgs {
 	const result = agentArgsSchema(args);
 	if (result instanceof type.errors) {
 		throw new ToolError(`agent() received invalid arguments: ${result.summary}`);
 	}
-	const selectorProblem = invalidModelSelectorReason(result.model, "agent()");
+	const selectorProblem = invalidModelSelectorReason(result.model, "agent()", { settings, invocationKind: "eval" });
 	if (selectorProblem) throw new ToolError(selectorProblem);
 	return result;
 }
@@ -172,7 +173,7 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
 
 /** Register a background subagent and return its handle immediately. */
 export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentHandleResult> {
-	const parsed = parseAgentArgs(args);
+	const parsed = parseAgentArgs(args, options.session.settings);
 	const turnBudget = options.session.getTurnBudget?.();
 	if (turnBudget?.hard && turnBudget.total !== null && turnBudget.spent >= turnBudget.total) {
 		throw new ToolError(

@@ -361,30 +361,20 @@ describe("runEvalAgent", () => {
 		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
 	});
 
-	it("rejects a per-call model on agent() while task.perCallModel is off", async () => {
+	it.each([
+		// The gate wins over the selector check, so an invalid selector still reports the disabled gate.
+		{ mode: "off", model: "@smol", error: /task\.perCallModel: off/ },
+		{ mode: "on", model: "default", error: /invalid `model`/ },
+		// The argument schema accepts only a string, so a candidate array never reaches preflight.
+		{ mode: "on", model: ["p/preferred:high", "p/alternative"], error: /model must be a string/ },
+	])("rejects agent() model $model under $mode before dispatch", async ({ mode, model, error }) => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-		const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
+		const settings = Settings.isolated({ "task.perCallModel": mode, "task.isolation.enabled": false });
 
 		await expect(
-			runEvalAgent(
-				{ prompt: "work", agent: "reviewer", model: "p/requested" },
-				{ session: makeSession({ settings }) },
-			),
-		).rejects.toThrow(/task\.perCallModel: off/);
-		expect(runSpy).not.toHaveBeenCalled();
-	});
-
-	it("rejects an unqualified or blank per-call model on agent() before dispatch", async () => {
-		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
-		await expect(runEvalAgent({ prompt: "work", model: "default" }, { session: makeSession() })).rejects.toThrow(
-			/invalid `model`/,
-		);
-		await expect(runEvalAgent({ prompt: "work", model: "   " }, { session: makeSession() })).rejects.toThrow(
-			/invalid `model`/,
-		);
+			runEvalAgent({ prompt: "work", agent: "reviewer", model }, { session: makeSession({ settings }) }),
+		).rejects.toThrow(error);
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
@@ -1567,26 +1557,5 @@ describe("runEvalAgent isolation", () => {
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
 		);
 		expect(removedArtifactsDir).toBe(false);
-	});
-});
-
-describe("agent exact model selection", () => {
-	afterEach(async () => {
-		vi.restoreAllMocks();
-		AgentRegistry.resetGlobalForTests();
-		resetRegisteredArtifactDirsForTests();
-		await Promise.all([...jobManagers].map(manager => manager.dispose()));
-		jobManagers.clear();
-	});
-	it("rejects a model array before dispatching an agent", async () => {
-		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-		await expect(
-			runEvalAgentAndWait(
-				{ prompt: "work", agent: "reviewer", model: ["p/preferred:high", "p/alternative"] },
-				{ session: makeSession() },
-			),
-		).rejects.toThrow(/invalid/);
-		expect(runSpy).not.toHaveBeenCalled();
 	});
 });

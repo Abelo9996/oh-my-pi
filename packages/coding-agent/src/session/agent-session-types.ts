@@ -205,7 +205,10 @@ export interface AgentSessionConfig {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
 	thinkingLevelCeiling?: Effort;
-	/** Never switch to a retry fallback model; the turn fails instead. */
+	/**
+	 * Never switch the main-loop model: no retry fallback, context promotion or usage-aware fallback;
+	 * the turn retries on, or fails with, its own model instead.
+	 */
 	disableModelFallback?: boolean;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;

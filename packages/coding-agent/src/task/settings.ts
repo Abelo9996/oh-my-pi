@@ -317,10 +317,30 @@ export function perCallModelEnabled(settings: Settings, invocationKind: "task" |
 	return mode === "on" || (mode === "eval" && invocationKind === "eval");
 }
 
+/**
+ * Validates `task.perCallModelAllow`: a list of exact `provider/model-id` strings. A non-string
+ * entry fails load and writes instead of reaching approval as an entry that matches nothing.
+ */
+function validatePerCallModelAllow(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!Array.isArray(value)) {
+		throw new Error(
+			`Invalid task.perCallModelAllow: expected a list of provider/model-id strings, got ${Bun.inspect(value)}.`,
+		);
+	}
+	for (const [index, entry] of value.entries()) {
+		if (typeof entry === "string") continue;
+		throw new Error(
+			`Invalid task.perCallModelAllow[${index}]: expected a provider/model-id string, got ${Bun.inspect(entry)}.`,
+		);
+	}
+}
+
 export const cfgTaskPerCallModelAllow = register({
 	id: "task.perCallModelAllow",
 	type: "array",
 	default: [] as string[],
+	validate: validatePerCallModelAllow,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",

@@ -616,7 +616,10 @@ export interface CreateAgentSessionOptions {
 	 * operator did not approve.
 	 */
 	assertDispatchModel?: (model: Model) => void;
-	/** Never switch to a retry fallback model; the turn fails instead. Per-call `model` subagents set it. */
+	/**
+	 * Never switch the main-loop model: no retry fallback, context promotion or usage-aware fallback;
+	 * the turn retries on, or fails with, its own model instead. Per-call `model` subagents set it.
+	 */
 	disableModelFallback?: boolean;
 	/** Never opt requests into a provider's optional server-side model fallback. Per-call `model` subagents set it. */
 	disableServerSideFallback?: boolean;

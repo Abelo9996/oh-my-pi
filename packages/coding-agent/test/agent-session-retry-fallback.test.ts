@@ -6015,6 +6015,86 @@ describe("AgentSession retry fallback", () => {
 		}
 	});
 
+	it.each([
+		{ label: "switches while model switching is allowed", disableModelFallback: false },
+		{ label: "retries the same model with disableModelFallback", disableModelFallback: true },
+	])("retry fallback: $label", async ({ disableModelFallback }) => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			disableModelFallback,
+		});
+
+		await session.prompt("Recover from an overloaded provider");
+		await session.waitForIdle();
+
+		const primaryId = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackId = `${fallbackModel.provider}/${fallbackModel.id}`;
+		expect(requestedModels).toEqual([primaryId, disableModelFallback ? primaryId : fallbackId]);
+		expect(session.model?.id).toBe(disableModelFallback ? primaryModel.id : fallbackModel.id);
+	});
+
+	it.each([
+		{ label: "switches while model switching is allowed", disableModelFallback: false },
+		{ label: "stays on the depleted model with disableModelFallback", disableModelFallback: true },
+	])("usage-aware fallback: $label", async ({ disableModelFallback }) => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ content: ["ok"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "auto",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (_provider, options) =>
+			options.modelId === primaryModel.id
+				? { state: "depleted", accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }] }
+				: { state: "healthy", accounts: [] },
+		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			disableModelFallback,
+		});
+
+		await session.prompt("Run on the depleted model");
+		await session.waitForIdle();
+
+		const selected = disableModelFallback ? primaryModel : fallbackModel;
+		expect(requestedModels).toEqual([`${selected.provider}/${selected.id}`]);
+		expect(session.model?.id).toBe(selected.id);
+	});
+
 	it("does not send oversized context to a smaller retry fallback model", async () => {
 		// Regression for #8065: the forward counterpart of #7952. A retryable
 		// error on a large-window primary switches to a retry-fallback candidate,

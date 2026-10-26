@@ -223,12 +223,11 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 For task dispatch, model precedence is:
 
-1. the call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`; see below)
-2. `task.agentModelOverrides[agentName]`
-3. the agent frontmatter's prioritized `model` list
-4. the parent's active model, then its configured/default model fallback
+1. `task.agentModelOverrides[agentName]`
+2. the agent frontmatter's prioritized `model` list
+3. the parent's active model, then its configured/default model fallback
 
-Role aliases in steps 2 and 3 are expanded through `modelRoles`. Host callers (SDK `runStructuredSubagent({ model })`, `omp cleanse --model`) supply an ungated model ahead of the settings override; the bundled seance agent's `model` overrides its source session's saved model as before.
+A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`; see below) replaces steps 2 and 3 when it is approved, and is a conflict error for an agent with a step-1 entry rather than outranking it. Role aliases in steps 1 and 2 are expanded through `modelRoles`. Host callers (SDK `runStructuredSubagent({ model })`, `omp cleanse --model`) supply an ungated model ahead of the settings override; the bundled seance agent's `model` overrides its source session's saved model as before.
 
 ### Per-call `model`
 
@@ -240,19 +239,19 @@ Role aliases in steps 2 and 3 are expanded through `modelRoles`. Host callers (S
 | `eval` | Accepted by eval `agent()` and `workpool()` only; task items behave as `off`. Use it to route a specialist (e.g. a pinned `reviewer`) from a script while ordinary delegation keeps its configured routing. |
 | `on` | Accepted everywhere. |
 
-A per-call `model` is exactly one `provider/model-id`, optionally followed by a supported `:level` (for example `anthropic/claude-sonnet-4-5:high`). Role aliases (including `@default`), arrays, comma lists, globs and partial ids fail preflight. It is matched literally against the available chat models; there is no fuzzy resolution, and a non-chat model is rejected with that reason.
+A per-call `model` is exactly one `provider/model-id`, optionally followed by a supported `:level` (for example `anthropic/claude-sonnet-4-5:high`). Role aliases (including `@default` and a legacy `pi/<role>` naming a built-in or configured custom role), arrays, comma lists, globs and partial ids fail preflight; when `task.perCallModel` refuses the call, that error is reported first. It is matched literally against the available chat models; there is no fuzzy resolution, and a non-chat model is rejected with that reason.
 
 The model must be one the operator already routes to:
 
 - a configured chat role's `modelRoles` value (non-chat roles such as `image`, `web` and `judge` grant nothing, and role aliases inside a value are not expanded into built-in defaults),
-- the selected bundled or user-level agent's frontmatter `model` (a project agent's frontmatter never grants, so an agent file in the repository cannot widen the set),
+- the selected agent's own frontmatter `model`, only when that agent is bundled or user-level (a project agent's frontmatter never grants, so an agent file in the repository cannot widen the set; another agent's frontmatter grants nothing),
 - the parent's live model.
 
 Globs in those values grant every chat model they match; any other value grants the one model it resolves to. Catalog membership, credentials, built-in role defaults and saved transcripts grant nothing. `task.perCallModelAllow`, when set, is a list of exact `provider/model-id` entries that narrows the result: the model must be granted and listed.
 
 A `model` for an agent with a `task.agentModelOverrides` entry fails preflight with a conflict error, so the operator's override is never silently replaced. Per-call `model` is not supported for the bundled seance agent, whose own `model` overrides its source session's saved model as before. A project or user agent that shadows the `seance` name is an ordinary agent: its `model` is a per-call `model`, held to every rule here.
 
-A per-call worker never switches its main-loop model: retry fallback, context promotion and prewalk are off for it, and a requested model that is unavailable or has no working credentials fails the call rather than running on the parent's model. Every main-loop request is checked against the grants read from current settings, so an extension replacement or a settings change cannot move it to an unapproved model. A cold registry at preflight is checked again before the child session is created. Cold revival re-applies the check, grants the agent's frontmatter only while that agent is still discovered, and grants the parent's model only from the worker's real parent while it is live (the root session for its direct children); it revives only onto the exact saved provider/model id and otherwise fails. Changing `task.perCallModel` affects new calls only. Side requests the session makes for its own maintenance (compaction summaries via `compactionModel` or the compaction fallback, and advisor calls) use their own configured models and are not covered by this check.
+A per-call worker never switches its main-loop model: retry fallback, context promotion and prewalk are off for it, and a requested model that is unavailable or has no working credentials fails the call rather than running on the parent's model. Every main-loop request is checked against the grants read from current settings, so an extension replacement or a settings change cannot move it to an unapproved model. A cold registry at preflight, or a model not yet found while background model discovery is still running, is checked again before the child session is created, once that discovery settles. Cold revival re-applies the check, grants the agent's frontmatter only while that agent is still discovered, and grants the parent's model only from the worker's real parent while it is live (the root session for its direct children); it revives only onto the exact saved provider/model id and otherwise fails. Changing `task.perCallModel` affects new calls only. Side requests the session makes for its own maintenance (compaction summaries and advisor calls) are not covered by this check: compaction tries the model's `compactionModel`, the session model and the built-in chat roles' models, then also the available model with the largest context window.
 
 A spawn with a per-call `model` runs under `task.maxEffort` as a hard ceiling, like the `effort` hint: a `:level` above the ceiling is clamped, a level that defers to the provider (`off` on a model whose metadata says it still thinks when off, or an inherited/unset level) resolves to an explicit effort at or below the ceiling, and a model whose lowest supported effort is above it fails the spawn and every later request. Cold revival restores the ceiling from the live setting and refuses to revive onto a model whose lowest effort is above it.
 
