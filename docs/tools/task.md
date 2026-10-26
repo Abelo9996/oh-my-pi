@@ -57,6 +57,8 @@ There is no wire label field: the one-line UI label shown in the TUI/registry is
 
 Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. A user-tagged `^provider/model` agent grants its tagged model for per-call selection, subject to `task.perCallModelAllow`. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
 
+When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models and the narrowing allowlist from settings.
+
 Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape.
 
 Batch calls reject a top-level `agent` rather than silently discarding a specialist selector and spawning the default agent. Put `agent` on each `tasks[]` item when selecting `reviewer`, `scout`, or a custom agent; the agent name is not inferred from the task text.

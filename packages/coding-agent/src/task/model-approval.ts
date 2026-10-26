@@ -92,11 +92,44 @@ export function parentModelGrantPattern(model: Model<Api>): string | undefined {
 	return selector;
 }
 
+/** Settings-only selectors advertised without resolving the model catalog or availability. */
+export interface PerCallModelAdvertisement {
+	roles: { role: string; patterns: string[] }[];
+	allowlist: string[];
+}
+
 /**
  * Operator-configured selectors that grant a per-call model. Role aliases are
  * skipped rather than expanded: a configured role's value is a grant of its
  * own, and an unconfigured role would only route through built-in defaults.
  */
+function modelGrantPatterns(source: string | string[] | undefined, settings: Settings): string[] {
+	const patterns = new Set<string>();
+	for (const pattern of normalizeModelPatternList(source)) {
+		const bare = pattern.toLowerCase();
+		if (bare === "default" || bare === "inherit" || resolveExplicitModelRole(pattern, settings)) continue;
+		patterns.add(pattern);
+	}
+	return [...patterns];
+}
+
+function configuredRoleGrantPatterns(settings: Settings): PerCallModelAdvertisement["roles"] {
+	return Object.entries(settings.getModelRoles()).flatMap(([role, value]) => {
+		if (isKindRole(role)) return [];
+		const patterns = modelGrantPatterns(value, settings);
+		return patterns.length > 0 ? [{ role, patterns }] : [];
+	});
+}
+
+/** Stable prompt data: only operator-owned settings grant or narrow the advertised selectors. */
+export function getPerCallModelAdvertisement(settings: Settings): PerCallModelAdvertisement {
+	const authority = settings.grantAuthority();
+	return {
+		roles: configuredRoleGrantPatterns(authority),
+		allowlist: [...new Set(cfgTaskPerCallModelAllow.get(authority).map(entry => entry.trim()))],
+	};
+}
+
 function perCallModelGrantPatterns(grants: PerCallModelGrants): string[] {
 	const settings = grants.settings.grantAuthority();
 	const { agentName } = grants;
@@ -104,22 +137,13 @@ function perCallModelGrantPatterns(grants: PerCallModelGrants): string[] {
 		(grants.agentSource === "bundled" || grants.agentSource === "user") &&
 		!grants.agentRemoved &&
 		!cfgTaskDisabledAgents.get(settings).includes(agentName);
-	const sources = [
-		...Object.entries(settings.getModelRoles())
-			.filter(([role]) => !isKindRole(role))
-			.map(([, value]) => value),
-		trustedAgent ? grants.agentModel : undefined,
-		grants.parentModelPattern,
+	return [
+		...new Set([
+			...configuredRoleGrantPatterns(settings).flatMap(({ patterns }) => patterns),
+			...modelGrantPatterns(trustedAgent ? grants.agentModel : undefined, settings),
+			...modelGrantPatterns(grants.parentModelPattern, settings),
+		]),
 	];
-	const patterns = new Set<string>();
-	for (const source of sources) {
-		for (const pattern of normalizeModelPatternList(source)) {
-			const bare = pattern.toLowerCase();
-			if (bare === "default" || bare === "inherit" || resolveExplicitModelRole(pattern, settings)) continue;
-			patterns.add(pattern);
-		}
-	}
-	return [...patterns];
 }
 
 /**

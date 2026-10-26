@@ -11,6 +11,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
 	assertPerCallModelApproved,
+	getPerCallModelAdvertisement,
 	parentModelGrantPattern,
 	PerCallModelError,
 	type PerCallModelGrants,
@@ -333,6 +334,69 @@ const rows: Row[] = [
 		approved: true,
 	},
 ];
+
+describe("per-call model advertisement", () => {
+	it("advertises no built-in role defaults", () => {
+		expect(getPerCallModelAdvertisement(Settings.isolated())).toEqual({ roles: [], allowlist: [] });
+	});
+
+	it("keeps configured role order and selectors while filtering and deduplicating grants", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				smol: "anthropic/claude-haiku-4-5",
+				image: "image/provider",
+				judge: "judge/provider",
+				web: "web/provider",
+				alias: "@smol",
+				legacyAlias: "pi/slow",
+				defaulted: "default",
+				inherited: "inherit",
+				starAlias: "*",
+				slow: "unavailable/model@upstream:high",
+				custom: "anthropic/*, @slow, default, mock/target, anthropic/*, inherit",
+			},
+			"task.perCallModelAllow": ["mock/target", " mock/target ", "unavailable/model@upstream"],
+		});
+		expect(getPerCallModelAdvertisement(settings)).toEqual({
+			roles: [
+				{ role: "smol", patterns: ["anthropic/claude-haiku-4-5"] },
+				{ role: "slow", patterns: ["unavailable/model@upstream:high"] },
+				{ role: "custom", patterns: ["anthropic/*", "mock/target"] },
+			],
+			allowlist: ["mock/target", "unavailable/model@upstream"],
+		});
+	});
+
+	it("reads live grant authority, excluding derived settings but honoring host overlays", () => {
+		const root = Settings.isolated({
+			modelRoles: { smol: "mock/target" },
+			"task.perCallModelAllow": ["mock/target"],
+		});
+		const child = root.overlay(
+			{ modelRoles: { slow: "mock/other" }, "task.perCallModelAllow": ["mock/other"] },
+			{ derived: true },
+		);
+		expect(getPerCallModelAdvertisement(child)).toEqual(getPerCallModelAdvertisement(root));
+		root.setModelRole("smol", "mock/edited");
+		cfgTaskPerCallModelAllow.override(root, ["mock/edited"]);
+		expect(getPerCallModelAdvertisement(child)).toEqual({
+			roles: [{ role: "smol", patterns: ["mock/edited"] }],
+			allowlist: ["mock/edited"],
+		});
+
+		const host = root.overlay({
+			modelRoles: { slow: "host/model" },
+			"task.perCallModelAllow": ["host/model"],
+		});
+		expect(getPerCallModelAdvertisement(host)).toEqual({
+			roles: [
+				{ role: "slow", patterns: ["host/model"] },
+				{ role: "smol", patterns: ["mock/edited"] },
+			],
+			allowlist: ["host/model"],
+		});
+	});
+});
 
 describe("per-call model grants", () => {
 	it.each(rows)("$name", row => {

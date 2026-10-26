@@ -259,6 +259,8 @@ Catalog membership, credentials, built-in role defaults and saved transcripts gr
 
 Grants come from the operator's settings or an SDK host's settings instance; a plain `Settings.overlay()` created by a host is its own authority, including its roles and allowlist. Settings overlays derived for subagents never grant and defer to their parent's authority. Role and allowlist edits apply live, so removing a role stops it granting.
 
+When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models and the narrowing allowlist from settings, without resolving model availability.
+
 A `model` for an agent with a `task.agentModelOverrides` entry fails preflight with a conflict error, so the operator's override is never silently replaced. Per-call `model` is not supported for the bundled seance agent, whose own `model` overrides its source session's saved model as before. A project or user agent that shadows the `seance` name is an ordinary agent: its `model` is a per-call `model`, held to every rule here.
 
 A per-call worker never moves to an unapproved main-loop model. Retry fallback, context promotion and agent prewalk are off, and an unavailable requested model or missing working credentials fails the call rather than using the parent's model. Factory models whose provider attaches a server-side fallback chain are refused, even if the fallback targets are granted. Every main-loop request is checked against the current operator grants, so an extension replacement or settings change cannot move the worker to an unapproved model. A cold registry at preflight, or a model not yet found during background discovery, is checked again before child-session creation once discovery settles.

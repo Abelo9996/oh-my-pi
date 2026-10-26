@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Tool as AiTool } from "@oh-my-pi/pi-ai";
@@ -13,17 +13,22 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
-import { cfgTaskMaxRecursionDepth, cfgTaskPerCallModel } from "@oh-my-pi/pi-coding-agent/task/settings";
+import {
+	cfgTaskMaxRecursionDepth,
+	cfgTaskPerCallModel,
+	cfgTaskPerCallModelAllow,
+} from "@oh-my-pi/pi-coding-agent/task/settings";
 
 function makeSession(opts: {
 	spawns?: string | null;
 	backends?: Record<string, boolean>;
+	settings?: Record<string, unknown>;
 	preludes?: () => readonly EvalPreludeDefinition[];
 	taskDepth?: number;
 	maxRecursionDepth?: number;
 	readActive?: boolean;
 }): ToolSession {
-	const settings = Settings.isolated(opts.backends);
+	const settings = Settings.isolated({ ...opts.backends, ...opts.settings });
 	if (opts.maxRecursionDepth !== undefined) cfgTaskMaxRecursionDepth.set(settings, opts.maxRecursionDepth);
 	return {
 		cwd: "/tmp/eval-test",
@@ -106,15 +111,180 @@ describe("eval tool description", () => {
 		expect(disabled.agents).not.toContain("tools?=None");
 	});
 
-	it("advertises agent()/workpool() `model` only while task.perCallModel is not off", () => {
-		const agentsTopic = (perCallModel: "off" | "on" | "eval") => {
-			const session = makeSession({});
-			cfgTaskPerCallModel.set(session.settings, perCallModel);
-			return new EvalTool(session).docTopics().agents ?? "";
+	it("advertises approved agent()/workpool() selectors only while task.perCallModel is not off", () => {
+		for (const mode of ["off", "on", "eval"] as const) {
+			const tool = new EvalTool(
+				makeSession({
+					readActive: false,
+					settings: {
+						"task.perCallModel": mode,
+						modelRoles: { smol: "anthropic/claude-haiku-4-5", slow: "openai/gpt-5.5" },
+						"task.perCallModelAllow": ["openai/gpt-5.5"],
+					},
+				}),
+			);
+			if (mode === "off") {
+				for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+					for (const guidance of [
+						"model?=None",
+						"`model`: one exact",
+						"Approved:",
+						"Allowlist:",
+						"anthropic/claude-haiku-4-5",
+						"openai/gpt-5.5",
+					]) {
+						expect(text).not.toContain(guidance);
+					}
+				}
+				continue;
+			}
+			expect((tool.docTopics().agents ?? "").match(/model\?=None/g)).toHaveLength(2);
+			for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+				expect(text).toContain(
+					"Approved: `anthropic/claude-haiku-4-5` (smol), `openai/gpt-5.5` (slow); your own current model; the selected bundled/user agent's own configured model.",
+				);
+				expect(text).toContain("Allowlist: `openai/gpt-5.5` (must also be approved).");
+				expect(text).toContain("Unavailable → stop and report; NEVER substitute another.");
+			}
+		}
+	});
+
+	it("omits kind roles, role aliases, and default/inherit selectors from session advertisements", () => {
+		const tool = new EvalTool(
+			makeSession({
+				readActive: false,
+				settings: {
+					"task.perCallModel": "eval",
+					modelRoles: {
+						smol: "anthropic/claude-haiku-4-5",
+						image: "hidden/image",
+						judge: "hidden/judge",
+						alias: "@smol",
+						legacyAlias: "pi/slow",
+						wildcardAlias: "*",
+						useDefault: "default",
+						inherited: "inherit",
+						slow: "openai/gpt-5.5",
+					},
+				},
+			}),
+		);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain(
+				"Approved: `anthropic/claude-haiku-4-5` (smol), `openai/gpt-5.5` (slow); your own current model; the selected bundled/user agent's own configured model.",
+			);
+			for (const omitted of [
+				"hidden/image",
+				"hidden/judge",
+				"(alias)",
+				"(legacyAlias)",
+				"(wildcardAlias)",
+				"(useDefault)",
+				"(inherited)",
+				"`@smol`",
+				"`pi/slow`",
+				"`*`",
+				"`default`",
+				"`inherit`",
+			]) {
+				expect(text).not.toContain(omitted);
+			}
+		}
+	});
+
+	it("preserves configured comma-list and glob selectors without consulting the model registry", () => {
+		const session = makeSession({
+			readActive: false,
+			settings: {
+				"task.perCallModel": "eval",
+				modelRoles: { review: " mock/second:high, mock/*, mock/first, mock/* " },
+			},
+		});
+		const catalogLookup = vi.fn(() => [{ provider: "mock", id: "registry-expanded" }]);
+		Object.assign(session, { modelRegistry: { getAll: catalogLookup, getAvailable: catalogLookup } });
+		const tool = new EvalTool(session);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain(
+				"Approved: `mock/second:high`, `mock/*`, `mock/first` (review); your own current model; the selected bundled/user agent's own configured model.",
+			);
+			expect(text).toContain("A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.");
+			expect(text).not.toContain("mock/registry-expanded");
+		}
+		expect(catalogLookup).not.toHaveBeenCalled();
+	});
+
+	it("renders supplied helper advertisement data only when its per-call gate is enabled", () => {
+		const options = {
+			py: false,
+			js: true,
+			inlineTopics: true,
+			perCallModel: true,
+			perCallModelAdvertisement: {
+				roles: [{ role: "review", patterns: ["custom/first", "custom/*"] }],
+				allowlist: ["custom/first"],
+			},
 		};
-		expect(agentsTopic("off")).not.toContain("model?=None");
-		expect(agentsTopic("on")).toContain("model?=None");
-		expect(agentsTopic("eval")).toContain("model?=None");
+		for (const text of [getEvalDocTopics(options).agents ?? "", getEvalToolDescription(options)]) {
+			expect(text).toContain("Approved: `custom/first`, `custom/*` (review);");
+			expect(text).toContain("Allowlist: `custom/first` (must also be approved).");
+			expect(text).toContain("Unavailable → stop and report; NEVER substitute another.");
+		}
+		const disabled = { ...options, perCallModel: false };
+		for (const text of [getEvalDocTopics(disabled).agents ?? "", getEvalToolDescription(disabled)]) {
+			expect(text).not.toContain("`model`: one exact");
+			expect(text).not.toContain("Approved:");
+			expect(text).not.toContain("Allowlist:");
+			expect(text).not.toContain("custom/first");
+			expect(text).not.toContain("custom/*");
+		}
+	});
+
+	it("keeps current-model and selected trusted-agent grants when no roles grant models", () => {
+		const tool = new EvalTool(
+			makeSession({ readActive: false, settings: { "task.perCallModel": "eval", modelRoles: {} } }),
+		);
+		for (const text of [
+			tool.docTopics().agents ?? "",
+			tool.description,
+			getEvalDocTopics({ perCallModel: true }).agents ?? "",
+			getEvalToolDescription({ perCallModel: true, inlineTopics: true }),
+		]) {
+			expect(text).toContain(
+				"Approved: your own current model; the selected bundled/user agent's own configured model.",
+			);
+			expect(text).not.toContain("Allowlist:");
+		}
+	});
+
+	it("refreshes approved selectors and their allowlist from current session settings", () => {
+		const session = makeSession({
+			readActive: false,
+			settings: {
+				"task.perCallModel": "eval",
+				modelRoles: { smol: "mock/original" },
+				"task.perCallModelAllow": ["mock/original"],
+			},
+		});
+		const tool = new EvalTool(session);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain("Approved: `mock/original` (smol);");
+			expect(text).toContain("Allowlist: `mock/original` (must also be approved).");
+		}
+
+		session.settings.overrideModelRoles({ smol: "mock/replacement" });
+		cfgTaskPerCallModelAllow.override(session.settings, ["mock/replacement"]);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain("Approved: `mock/replacement` (smol);");
+			expect(text).toContain("Allowlist: `mock/replacement` (must also be approved).");
+			expect(text).not.toContain("mock/original");
+		}
+
+		cfgTaskPerCallModel.override(session.settings, "off");
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).not.toContain("Approved:");
+			expect(text).not.toContain("Allowlist:");
+			expect(text).not.toContain("mock/replacement");
+		}
 	});
 
 	it("renders helper syntax only for available runtimes", () => {

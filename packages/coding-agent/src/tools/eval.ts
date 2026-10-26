@@ -63,6 +63,7 @@ import {
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
 import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
+import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
@@ -181,6 +182,8 @@ export interface EvalToolDescriptionOptions {
 	autoProvision?: boolean;
 	/** `task.perCallModel` accepts `model` for eval: advertise it on `agent()`/`workpool()`. Default: false. */
 	perCallModel?: boolean;
+	/** Operator-owned role selectors and narrowing allowlist; independent of model availability. */
+	perCallModelAdvertisement?: PerCallModelAdvertisement;
 }
 
 function evalTemplateContext(options: EvalToolDescriptionOptions) {
@@ -197,6 +200,7 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
 		autoProvision: options.autoProvision ?? true,
 		perCallModel: options.perCallModel ?? false,
+		perCallModelAdvertisement: options.perCallModelAdvertisement,
 	};
 }
 
@@ -352,6 +356,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			cfgTaskMaxRecursionDepth.get(session.settings),
 			session.taskDepth ?? 0,
 		);
+		const perCallModel = perCallModelEnabled(session.settings, "eval");
 		return {
 			py: backends.python,
 			js: backends.js,
@@ -363,7 +368,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			preludes: this.#advertisedPreludes(session),
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
-			perCallModel: perCallModelEnabled(session.settings, "eval"),
+			perCallModel,
+			perCallModelAdvertisement: perCallModel ? getPerCallModelAdvertisement(session.settings) : undefined,
 		};
 	}
 
