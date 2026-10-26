@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `task.perCallModel` (`off` by default, `eval`, `on`): task items and eval `agent()`/`workpool()` can pick a subagent's model with one exact `provider/model-id[:level]`, limited to models already named by a configured chat role, a bundled or user-level agent, or the parent session; `task.perCallModelAllow` can narrow that to a list of exact models, and a per-call subagent fails instead of switching to a fallback or larger-context model or running above `task.maxEffort`, including after cold revival; a project agent that shadows the `seance` name gets no exemption ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+- Added `task.perCallModel` (`off` by default, `eval`, `on`): task items and eval `agent()`/`workpool()` can pick a subagent's model with one exact `provider/model-id[:level]`, limited to models already named by a configured chat role, a bundled or user-level agent, or the parent session; `task.perCallModelAllow` can narrow that to a list of exact models, and a per-call subagent fails instead of switching to a fallback or larger-context model or running above `task.maxEffort` (an `off` the model cannot honor or an unset level is pinned under it), including after cold revival, which restores only the exact saved model and grants only the live real parent's model; a project agent that shadows the `seance` name gets no exemption, while the bundled seance keeps its own model selectors when named with padding or reached as the default agent ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

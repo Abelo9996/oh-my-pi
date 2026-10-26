@@ -6,6 +6,7 @@ import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/ag
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
+import * as seanceModule from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -252,5 +253,35 @@ describe("task spawn validation", () => {
 		expect(await description("off")).not.toContain("`model`: one exact");
 		expect(await description("eval")).not.toContain("`model`: one exact");
 		expect(await description("on")).toContain("`model`: one exact");
+	});
+
+	it("keys the seance model exemption on the resolved agent, not the raw `agent` value", async () => {
+		const seen: unknown[] = [];
+		vi.spyOn(seanceModule, "prepareSeance").mockImplementation(async context => {
+			seen.push(context.model);
+			throw new Error("stop after seance received its selectors");
+		});
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [bundledSeance],
+			projectAgentsDir: null,
+		});
+		const selectors = ["anthropic/claude-sonnet-4-5", "openai/gpt-5"];
+		const run = async (batch: boolean, params: Record<string, unknown>) => {
+			const tool = await TaskTool.create(
+				createSession({ parentSpawns: "seance", settings: { "task.perCallModel": "off", "task.batch": batch } }),
+			);
+			const result = await tool.execute("tool-call", params);
+			return result.content.find(part => part.type === "text")?.text ?? "";
+		};
+		const flat = { task: "What was decided?", sourceSession: "/tmp/source.jsonl", model: selectors };
+		const item = { task: "What was decided?", sourceSession: "/tmp/source.jsonl", model: selectors };
+		const texts = [
+			await run(false, flat),
+			await run(false, { ...flat, agent: " seance " }),
+			await run(true, { context: "c", tasks: [item] }),
+			await run(true, { context: "c", tasks: [{ ...item, agent: " seance " }] }),
+		];
+		for (const text of texts) expect(text).not.toContain("invalid `model` value");
+		expect(seen).toEqual([selectors, selectors, selectors, selectors]);
 	});
 });

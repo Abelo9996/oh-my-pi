@@ -263,7 +263,7 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 
-function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
+function validateSpawnParams(params: TaskParams, batchEnabled: boolean, defaultAgent: string): string | undefined {
 	const hasTask = typeof params.task === "string" && params.task.trim() !== "";
 	const tasks = params.tasks;
 	if (batchEnabled && tasks !== undefined) {
@@ -281,7 +281,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			const label = `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
 			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
-			const modelError = validateModel(item, label);
+			const modelError = validateModel(item, label, defaultAgent);
 			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
@@ -305,15 +305,17 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call") ?? validateModel(params, "The call");
+	return validateEffort(params.effort, "The call") ?? validateModel(params, "The call", defaultAgent);
 }
 
 /**
  * A `model` on a call naming `seance` is checked at preflight, once the name resolves:
  * the bundled seance takes it as its source-session override, a shadowing agent as a per-call model.
  */
-function validateModel(item: TaskItem | TaskParams, label: string): string | undefined {
-	return item.agent === SEANCE_AGENT_NAME ? undefined : invalidModelSelectorReason(item.model, label);
+function validateModel(item: TaskItem | TaskParams, label: string, defaultAgent: string): string | undefined {
+	return (item.agent?.trim() || defaultAgent) === SEANCE_AGENT_NAME
+		? undefined
+		: invalidModelSelectorReason(item.model, label);
 }
 
 function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "seanceModel"> {
@@ -395,7 +397,7 @@ function planSpawns(
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
-		validateSpawnParams(params, batchEnabled) ??
+		validateSpawnParams(params, batchEnabled, defaultAgent) ??
 		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
 	const items = resolveSpawnItems(params);

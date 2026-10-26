@@ -4,6 +4,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveAgentAdvisorRolePattern } from "../config/model-resolver";
@@ -34,7 +35,7 @@ import {
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
 import { discoverAgents, getAgent } from "./discovery";
-import { assertPerCallModelApproved } from "./model-approval";
+import { assertPerCallModelApproved, PerCallModelError } from "./model-approval";
 import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
@@ -167,6 +168,12 @@ export function createPersistedSubagentReviverFactory(
 					`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no message history (truncated to header/session_init). The agent was not revived.`,
 				);
 			}
+			if (init.perCallModel && !init.resolvedModel) {
+				await reopened.close();
+				throw new Error(
+					`Cannot revive subagent "${ref.id}": its per-call model was not recorded, so it cannot be restored exactly. The agent was not revived.`,
+				);
+			}
 			// The agent's frontmatter model grants a per-call worker only while that agent is still discovered.
 			const configuredAgent =
 				init.perCallModel && init.agent
@@ -219,9 +226,10 @@ export function createPersistedSubagentReviverFactory(
 			const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(ctx.settings));
 			const oauthAccountPools =
 				init.agent && Object.hasOwn(agentAccountPools, init.agent) ? agentAccountPools[init.agent] : undefined;
+			// A per-call worker revives only onto its exact saved model: no role alias, no auth fallback.
 			const persistedModelPattern = restoredSeance
 				? restoredSeance.modelPattern
-				: init.modelRole && init.modelRole !== "default"
+				: !init.perCallModel && init.modelRole && init.modelRole !== "default"
 					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
 					: init.resolvedModel;
 			// Older session files persisted the synthetic xd:// write transport in the
@@ -254,7 +262,7 @@ export function createPersistedSubagentReviverFactory(
 					subagentEventBus: ctx.subagentEventBus,
 					modelRegistry: ctx.modelRegistry,
 					...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-					modelPatternAuthFallback: restoredSeance ? undefined : init.resolvedModel,
+					modelPatternAuthFallback: restoredSeance || init.perCallModel ? undefined : init.resolvedModel,
 					settings: subagentSettings,
 					sessionManager: reopened,
 					agentId: ref.id,
@@ -289,20 +297,35 @@ export function createPersistedSubagentReviverFactory(
 								disableModelFallback: true,
 								disableServerSideFallback: true,
 								assertDispatchModel: (model: Model) => {
-									assertPerCallModelApproved(
-										model,
-										{
-											settings: ctx.settings,
-											agentName: init.agent ?? ref.displayName,
-											agentModel: configuredAgent?.model,
-											agentSource: configuredAgent?.source,
-											agentRemoved: configuredAgent === undefined,
-											parentModelPattern: ctx.session.model
-												? formatModelStringWithRouting(ctx.session.model)
-												: undefined,
-										},
-										ctx.modelRegistry,
-									);
+									// The parent grant is the real parent's live model: the root session for its
+									// direct children, else the parent's live registry session. A parked or vanished
+									// parent grants nothing; the transcript never does.
+									const parentSession =
+										ref.parentId === (ctx.session.getAgentId?.() ?? MAIN_AGENT_ID)
+											? ctx.session
+											: registry.get(ref.parentId ?? "")?.session;
+									const parentModel = parentSession?.model;
+									try {
+										assertPerCallModelApproved(
+											model,
+											{
+												settings: ctx.settings,
+												agentName: init.agent ?? ref.displayName,
+												agentModel: configuredAgent?.model,
+												agentSource: configuredAgent?.source,
+												agentRemoved: configuredAgent === undefined,
+												parentModelPattern: parentModel
+													? formatModelStringWithRouting(parentModel)
+													: undefined,
+											},
+											ctx.modelRegistry,
+										);
+									} catch (error) {
+										if (parentSession || !(error instanceof PerCallModelError)) throw error;
+										throw new PerCallModelError(
+											`${error.message} Parent agent "${ref.parentId ?? "unknown"}" of revived subagent "${ref.id}" is not live, so its model grants nothing.`,
+										);
+									}
 									assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(ctx.settings));
 								},
 							}
@@ -341,11 +364,21 @@ export function createPersistedSubagentReviverFactory(
 				mcpFollower?.dispose();
 				throw error;
 			}
-			// A per-call worker whose model cannot run at or below the live ceiling fails instead
-			// of running at the model's floor, as its spawn would.
-			if (init.perCallModel && session.model) {
+			// A per-call worker runs only on its exact saved model, never a similarly named
+			// survivor, and fails instead of running at the model's floor above the live ceiling.
+			if (init.perCallModel) {
 				try {
-					assertModelSupportsEffortCeiling(session.model, cfgTaskMaxEffort.get(ctx.settings));
+					const saved = init.resolvedModel!;
+					const identity = session.model ? formatModelStringWithRouting(session.model) : undefined;
+					if (
+						identity === undefined ||
+						(identity !== saved && identity !== splitThinkingSuffix(saved, -1, MAX_THINKING_SUFFIX_OPTIONS).base)
+					) {
+						throw new PerCallModelError(
+							`Cannot revive subagent "${ref.id}": its per-call model ${saved} is no longer available${identity ? ` (resolution found ${identity})` : ""}. A per-call worker revives only on its exact saved model.`,
+						);
+					}
+					assertModelSupportsEffortCeiling(session.model!, cfgTaskMaxEffort.get(ctx.settings));
 				} catch (error) {
 					mcpFollower?.dispose();
 					await session.dispose();
