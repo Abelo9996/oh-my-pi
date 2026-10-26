@@ -36,7 +36,13 @@ import {
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
-import { resolveApproval, resolveApprovalFromContext } from "./tools/approval";
+import {
+	approvalRestrictions,
+	resolveApproval,
+	resolveApprovalFromContext,
+	restrictedFolderReason,
+} from "./tools/approval";
+import { approvalTargetKey } from "./tools/approval-targets";
 import { getApprovalGrants } from "./tools/approval-cache";
 import {
 	confineToWorkspace,
@@ -378,7 +384,17 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 		userPolicies,
 		getApprovalGrants(context?.settings?.getAgentDir(), context?.sessionManager?.getSessionId()),
 	);
-	if (approval.policy === "allow") return null;
+	if (approval.policy === "allow") {
+		// The frame names its file only in `pathArg`, so the restriction check keys it here.
+		const cwd = options.getCwd?.() ?? options.cwd;
+		const target = approvalTargetKey(cwd, pathArg);
+		const restriction = restrictedFolderReason(
+			{ name: toolName, approvalCacheTargets: () => (target === undefined ? undefined : [target]) },
+			undefined,
+			approvalRestrictions(context?.settings, cwd),
+		);
+		if (restriction === undefined) return null;
+	}
 	return approval.policy === "deny"
 		? `Tool "${toolName}" is blocked by user policy.`
 		: `Tool "${toolName}" requires approval, which this channel cannot request.`;
@@ -1105,6 +1121,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			approvalMode,
 			userPolicies,
 			getApprovalGrants(context?.settings?.getAgentDir(), context?.sessionManager?.getSessionId()),
+			approvalRestrictions(context?.settings, this.options.getCwd?.() ?? this.options.cwd),
 		);
 		return approval.policy === "allow";
 	}

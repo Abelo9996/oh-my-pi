@@ -809,7 +809,7 @@ function buildExecutorOptions(
 		enableMCP,
 		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
-		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+		contextFiles: session.contextFiles,
 		noContextFiles: session.noContextFiles,
 		skills,
 		// Autoload runs after session start, outside the seance isolation options.

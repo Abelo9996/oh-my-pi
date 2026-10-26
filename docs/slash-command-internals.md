@@ -308,9 +308,9 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 
 ## 10) Built-in command note: `/pause`
 
-`/pause` is available only in the interactive TUI. It engages a process-global gate for the main agent, in-process subagents, and the advisor. Each agent parks at its next safe boundary: in-flight calls finish, nothing is aborted, and no new work starts until the gate is released.
+`/pause` (host interactive sessions only) holds agents at safe boundaries; in-flight calls finish. The screen counts draining turns and running jobs; parked or finished turns stop counting. When both counts reach zero, it hides the rows and signals readiness.
 
-From the pause screen, press the configured interrupt key (Esc by default), Enter, Space, or Ctrl+C to resume. Ctrl+C resumes rather than aborting any agent.
+The interrupt key (Esc by default), Enter, Space, or Ctrl+C resumes; Ctrl+C does not abort agents.
 
 ## 11) Built-in command note: `/btw`
 

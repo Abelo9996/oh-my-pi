@@ -110,6 +110,17 @@ import {
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
 import { yieldIfDue } from "./utils/yield";
+
+async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal): Promise<void> {
+	try {
+		while (agentPauseGate.paused && !signal?.aborted) {
+			config.onPauseChange?.(true);
+			await agentPauseGate.waitUntilResumed(signal);
+		}
+	} finally {
+		config.onPauseChange?.(false);
+	}
+}
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
 
@@ -1331,7 +1342,7 @@ async function runLoopBody(
 				// Park at the turn boundary while the process-wide pause gate is
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
-				if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
+				if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1443,6 +1454,7 @@ async function runLoopBody(
 				let recovered: HarmonyRecoveredToolCall | undefined;
 				let message: AssistantMessage;
 				try {
+					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 					message = await streamAssistantResponse(
 						currentContext,
 						config,
@@ -3367,6 +3379,18 @@ async function executeToolCalls(
 		};
 	});
 
+	// Derive batch readiness from existing dispatch records, not extra participants.
+	const refreshPauseState = (): void => {
+		config.onPauseChange?.(
+			agentPauseGate.paused &&
+				!signal?.aborted &&
+				!speculationCoordinator?.isRunning &&
+				records.some(record => !record.started && !record.skipped && !record.toolResultMessage) &&
+				!records.some(record => record.started && !record.toolResultMessage),
+		);
+	};
+	if (speculationCoordinator) speculationCoordinator.onIdle = refreshPauseState;
+
 	const checkAsideInterrupts = async (): Promise<void> => {
 		// Asides only fire once: an interrupt already recorded on interruptState
 		// must not re-abort, and (unlike steering) never re-consumes a queue.
@@ -3517,7 +3541,11 @@ async function executeToolCalls(
 		// Park before starting this tool while the process-wide pause gate is
 		// engaged. Tools already executing are unaffected (pausing never aborts);
 		// a batch interrupted mid-pause unwinds via the signal checks below.
-		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(record.signal);
+		while (agentPauseGate.paused && !record.signal.aborted) {
+			refreshPauseState();
+			await agentPauseGate.waitUntilResumed(record.signal);
+		}
+		config.onPauseChange?.(false);
 
 		const { toolCall, tool } = record;
 		// Validation (and the beforeToolCall hook) ran in the prepare phase; a
@@ -3851,7 +3879,13 @@ async function executeToolCalls(
 			concurrency = concurrencyMode ?? "shared";
 		}
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
-		const task = start.then(() => runTool(record, index));
+		const task = start.then(async () => {
+			try {
+				await runTool(record, index);
+			} finally {
+				refreshPauseState();
+			}
+		});
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
@@ -3863,6 +3897,8 @@ async function executeToolCalls(
 	try {
 		await Promise.allSettled(tasks);
 	} finally {
+		if (speculationCoordinator) speculationCoordinator.onIdle = undefined;
+		config.onPauseChange?.(false);
 		steeringWatchAbortController.abort();
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);

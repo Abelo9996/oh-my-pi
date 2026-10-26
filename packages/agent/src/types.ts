@@ -175,6 +175,9 @@ export interface SteeringQueueState {
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model;
 
+	/** Reports whether this loop has reached a safe process-pause boundary. */
+	onPauseChange?: (paused: boolean) => void;
+
 	/**
 	 * When to interrupt tool execution for steering messages.
 	 * - "immediate" = cut interruptible waits short and raise the cooperative

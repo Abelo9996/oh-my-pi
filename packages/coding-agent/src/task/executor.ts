@@ -4737,6 +4737,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					requireYieldTool: structured,
 					contextFiles: options.contextFiles,
 					noContextFiles: options.noContextFiles,
+					// Subagents never receive AGENTS.md, including from additional workspace roots they rediscover.
+					excludeAgentsMd: true,
 					skills: options.skills,
 					promptTemplates: options.promptTemplates,
 					workspaceTree: options.workspaceTree,

@@ -243,6 +243,7 @@ import {
 	composeAppendPrompt,
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
+	withoutAgentsMd,
 } from "./system-prompt";
 import type { AgentDefinition } from "./task/types";
 import { AgentOutputManager } from "./task/output-manager";
@@ -778,6 +779,8 @@ export interface CreateAgentSessionOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Discover no context files: not from cwd (on start or a cwd change), not for additional workspace roots, and no nested AGENTS.md list. Explicit `contextFiles` still load. Inherited by subagents. */
 	noContextFiles?: boolean;
+	/** Drop every context file named `AGENTS.md`: from `contextFiles`, cwd discovery, and additional workspace roots. Set for task subagents. */
+	excludeAgentsMd?: boolean;
 	/** Pre-built workspace tree (skips re-scanning; passed by parents to subagents). */
 	workspaceTree?: WorkspaceTree;
 	/** Prompt templates. Default: discovered from cwd/.omp/prompts/ + agentDir/prompts/ */
@@ -1901,10 +1904,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
 	// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
 	// session-context build, tool creation, MCP discovery, and extension discovery.
-	const pinnedContextFiles = options.contextFiles ?? (options.noContextFiles ? [] : undefined);
+	const excludeAgentsMd = options.excludeAgentsMd === true;
+	const contextFileFilter = <T extends { path: string }>(files: T[]): T[] =>
+		excludeAgentsMd ? withoutAgentsMd(files) : files;
+	const pinnedContextFiles = options.contextFiles
+		? contextFileFilter(options.contextFiles)
+		: options.noContextFiles
+			? []
+			: undefined;
 	const contextFilesPromise = pinnedContextFiles
 		? Promise.resolve(pinnedContextFiles)
-		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
+		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir).then(contextFileFilter);
 	contextFilesPromise.catch(() => {});
 	const resolveRepoContext = async (repoCwd: string) => {
 		try {
@@ -3991,9 +4001,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
 				: initialActiveRepoContext;
 			if (hasSession && pinnedContextFiles === undefined) {
-				contextFiles = await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
-					...cfgDisabledExtensions.get(settings),
-				]);
+				contextFiles = contextFileFilter(
+					await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
+						...cfgDisabledExtensions.get(settings),
+					]),
+				);
 				toolSession.contextFiles = contextFiles;
 				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
 			}
@@ -4152,6 +4164,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd: promptCwd,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				noContextFiles: options.noContextFiles,
+				excludeAgentsMd,
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",
 				resolvedCustomPrompt: options.customSystemPrompt,

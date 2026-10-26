@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Hosts can distinguish safely paused agents from turns still draining with `Agent.isPaused` ([#17073](https://github.com/can1357/oh-my-pi/pull/17073) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
 ## [18.13.0] - 2026-10-26
 
 ### Added

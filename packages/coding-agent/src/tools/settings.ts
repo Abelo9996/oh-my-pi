@@ -349,6 +349,28 @@ export const cfgToolsApprovalMode = register({
 	},
 });
 
+// Folders where every action asks, in every approval mode and whatever was remembered.
+export const cfgToolsRestrictedFolders = register({
+	id: "tools.restrictedFolders",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Restricted Folders",
+		editor: "json",
+		description:
+			'Folders where every read, write, edit, search, or command needs an explicit approval, whatever the approval mode or a remembered grant. The folder and everything under it is restricted; commands are matched by the directory they run in. A JSON list of paths, e.g. ["~/secrets"].',
+		condition: "restrictedFoldersNotProject",
+	},
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw) || raw.some(entry => typeof entry !== "string" || entry.trim().length === 0)) {
+			throw new Error("tools.restrictedFolders must be a list of folder paths");
+		}
+	},
+});
+
 // Todo tool
 // Todo settings deliberately have no `protocolDefault`: protocol embedders need project-level opt-outs
 // for reminder/prelude prompt injection.
