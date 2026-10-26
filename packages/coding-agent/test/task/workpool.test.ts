@@ -459,6 +459,43 @@ describe("WorkPool dispatch", () => {
 });
 
 describe("WorkPool model selection", () => {
+	it("omits perCallModel when the pool has no model selection", async () => {
+		const session = makeSession();
+		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const workpool = pool(session, "unselected");
+		workpool.push(["one"]);
+		await finishPool(session, workpool);
+
+		expect(initial.mock.calls).toHaveLength(1);
+		expect(initial.mock.calls[0]?.[0]).not.toHaveProperty("perCallModel");
+	});
+
+	it("forwards the pool model to every fresh worker", async () => {
+		const session = makeSession([], 1, true);
+		const selected = "p/reviewer:high";
+		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const follow = vi.spyOn(executor, "runSubagentFollowUpTurn");
+		const workpool = new WorkPool(session, { name: "fresh-models", policy: POLICY, model: selected });
+		workpool.push(["one", "two", "three"]);
+		await finishPool(session, workpool);
+
+		expect(initial.mock.calls.map(([request]) => request.perCallModel)).toEqual([selected, selected, selected]);
+		expect(initial.mock.calls.map(([request]) => request.identity?.id)).toEqual([
+			"fresh-models-1",
+			"fresh-models-2",
+			"fresh-models-3",
+		]);
+		expect(follow).not.toHaveBeenCalled();
+	});
+
 	it("selects each worker on the first turn and reuses its session on subsequent turns", async () => {
 		const session = makeSession([], 1);
 		const first = Promise.withResolvers<void>();

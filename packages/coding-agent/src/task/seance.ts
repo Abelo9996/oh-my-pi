@@ -206,7 +206,8 @@ export function validateSeanceParams(context: {
 	const { params, batchEnabled, defaultAgent, seanceAdvertised } = context;
 	if (batchEnabled && params.tasks !== undefined) {
 		if (params.sourceSession !== undefined) {
-			return `Put \`sourceSession\` and \`model\` on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
+			const fields = params.model !== undefined ? "`sourceSession` and `model`" : "`sourceSession`";
+			return `Put ${fields} on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
 		}
 		if (params.model !== undefined) return "Put `model` on the individual items inside `tasks[]`.";
 		for (let index = 0; index < params.tasks.length; index++) {

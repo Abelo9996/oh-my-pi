@@ -4,11 +4,12 @@
 
 ### Added
 
-- Added `task.perCallModel` (`off` by default, `eval`, `on`): task items and eval `agent()`/`workpool()` can pick a subagent's model with one exact `provider/model-id[:level]`, limited to models already named by a configured chat role, the selected agent's own frontmatter (bundled or user-level agents only), or the parent session; `task.perCallModelAllow` can narrow that to a list of exact models, and a per-call subagent fails instead of switching to a fallback or larger-context model or running above `task.maxEffort` (an `off` the model cannot honor or an unset level is pinned under it), including after cold revival, which restores only the exact saved model and grants only the live real parent's model; a project agent that shadows the `seance` name gets no exemption, while the bundled seance keeps its own model selectors when named with padding or reached as the default agent ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+- Added `task.perCallModel` (`off` by default, `eval`, `on`): task items and eval `agent()`/`workpool()` can select one exact `provider/model-id[@upstream][:level]`, limited to configured chat-role values, the selected bundled or user-level agent's own frontmatter while it is still discovered and not disabled, or the parent's live model; `task.perCallModelAllow` narrows those grants to exact models. Per-call workers recheck approval on every main-loop request and cold revival, disable retry fallback, context promotion and prewalk, and refuse Factory models with attached server-side fallback chains. `task.maxEffort` caps the requested effort, though an endpoint's effort-negotiation retry may round to its nearest supported tier ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
 - A task call, eval `agent()` or `workpool()` that passes `model` while `task.perCallModel` does not allow it now fails with an error instead of having `model` silently dropped ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed advisors dropping their review and showing a rate-limit error when the provider returns a timed 429 such as Codex's `turn_rate_limit_exceeded`; the advisor now waits out the Retry-After (within `retry.maxDelayMs`) and retries like the main agent ([#17087](https://github.com/can1357/oh-my-pi/pull/17087) by [@H4vC](https://github.com/H4vC))

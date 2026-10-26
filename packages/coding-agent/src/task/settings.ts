@@ -302,7 +302,7 @@ export const cfgTaskPerCallModel = register({
 		group: "Subagents",
 		label: "Per-Call Model",
 		description:
-			"Whether a subagent call may pick its model with one exact provider/model-id[:level] selector. Only models the configuration already routes to are accepted.",
+			"Whether a subagent call may pick its model with one exact provider/model-id[@upstream][:level] selector. An @upstream pin is part of the model identity and is supported only by aggregators. Only models the configuration already routes to are accepted.",
 		options: [
 			{ value: "off", label: "Off", description: "Reject `model` on task items and eval agent()/workpool()" },
 			{ value: "eval", label: "Eval only", description: "Accept `model` in eval agent() and workpool() only" },

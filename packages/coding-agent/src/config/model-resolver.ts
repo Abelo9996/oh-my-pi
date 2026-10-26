@@ -211,6 +211,22 @@ export function formatModelStringWithRouting(model: Model<Api>): string {
 	return upstream ? `${selector}@${upstream}` : selector;
 }
 
+/** Restore a canonical model identity without interpreting any part of its id as a thinking selector. */
+export function resolveExactModelIdentity(
+	identity: string,
+	modelRegistry: ModelLookupRegistry,
+): Model<Api> | undefined {
+	const models = modelRegistry.getAvailable();
+	const literal = models.find(model => formatModelStringWithRouting(model) === identity);
+	if (literal) return literal;
+	const routing = splitUpstreamRouting(identity);
+	if (!routing) return undefined;
+	const base = models.find(model => formatModelString(model) === routing.base);
+	if (!base || !supportsUpstreamRouting(base)) return undefined;
+	const routed = applyUpstreamRouting(base, routing.upstream);
+	return formatModelStringWithRouting(routed) === identity ? routed : undefined;
+}
+
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
 	const colonIdx = modelId.lastIndexOf(":");
 	if (colonIdx === -1) {

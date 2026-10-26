@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -1440,14 +1441,21 @@ describe("agent frontmatter structured opt-in", () => {
 describe("per-call model preflight", () => {
 	const target = createMockModel({ id: "target" });
 	const painter = { ...createMockModel({ id: "painter" }), kind: "image" as const };
-	function perCallSession(settings: Record<string, unknown>, warm = true, refreshPending = false): ToolSession {
+	function perCallSession(
+		settings: Record<string, unknown>,
+		warm = true,
+		refreshPending = false,
+		parentModel?: Model,
+	): ToolSession {
 		return Object.assign(
 			session({
 				settings: Settings.isolated({ "task.isolation.enabled": false, "task.maxRecursionDepth": 2, ...settings }),
 			}),
 			{
 				getActiveModelString: () => "mock/parent",
+				...(parentModel ? { getActiveModel: () => parentModel } : {}),
 				modelRegistry: {
+					getAll: () => [target, painter],
 					getAvailable: (kind?: string) => (!warm ? [] : kind === "chat" ? [target] : [target, painter]),
 					isBackgroundRefreshPending: () => refreshPending,
 				},
@@ -1544,6 +1552,23 @@ describe("per-call model preflight", () => {
 		);
 		expect(policy.perCallModelGrants).toBeDefined();
 	});
+
+	it.each([{ only: ["anthropic", "google-vertex"] }, { order: ["anthropic", "google-vertex"] }])(
+		"does not grant from a parent route that cannot be represented exactly: %j",
+		async routing => {
+			mockDiscovery();
+			// The mock API has no routing compat type; preflight reads routing generically from the live parent.
+			const parent = { ...target, compat: { openRouterRouting: routing } } as unknown as Model;
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: perCallSession({ "task.perCallModel": "on" }, true, false, parent),
+						perCallModel: "mock/target",
+					}),
+				),
+			).rejects.toThrow(/not approved/);
+		},
+	);
 
 	it("leaves calls without model on their configured routing", async () => {
 		mockDiscovery({ ...AGENT, model: ["mock/agent-own"] });

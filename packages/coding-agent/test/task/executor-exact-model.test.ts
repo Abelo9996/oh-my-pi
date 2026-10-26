@@ -11,6 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -248,6 +249,80 @@ describe("per-call exact selection after background discovery", () => {
 					/no supported thinking effort at or below task\.maxEffort=low/,
 				);
 			}
+		} finally {
+			await AgentRegistry.global().get(agentId)?.session?.dispose();
+			AgentRegistry.global().unregister(agentId);
+			unregisterCustomApis(sourceId);
+			authStorage.close();
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{ id: "coding-router", selector: "mock/coding-router:low", identity: "mock/coding-router", level: Effort.Low },
+		{
+			id: "coding-router:low",
+			selector: "mock/coding-router:low:high",
+			identity: "mock/coding-router:low",
+			level: Effort.High,
+		},
+	])("persists $selector as separate identity and thinking fields", async ({ id, selector, identity, level }) => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-executor-per-call-identity-"));
+		const authStorage = await AuthStorage.create(":memory:");
+		const sourceId = `executor-per-call-identity-${id}`;
+		const agentId = `PerCallIdentity${id.length}`;
+		try {
+			authStorage.keys.setRuntime("mock", "test-key");
+			registerMockApi(sourceId);
+			const model = Object.assign(
+				createMockModel({ id, reasoning: true, handler: () => ({ content: ["Persisted."] }) }),
+				{ thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] } satisfies ThinkingConfig },
+			);
+			const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+			vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => [model]);
+			vi.spyOn(modelRegistry, "getAll").mockImplementation(() => [model]);
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+				agents: [{ name: "worker", description: "test", systemPrompt: "test", source: "bundled", tools: ["read"] }],
+				projectAgentsDir: null,
+			});
+			const init = vi.spyOn(SessionManager.prototype, "appendSessionInit");
+			const session = {
+				cwd,
+				hasUI: false,
+				settings: Settings.isolated({
+					"task.maxRecursionDepth": 2,
+					"task.perCallModel": "on",
+					"task.maxEffort": "high",
+					"task.isolation.enabled": false,
+					"compaction.enabled": false,
+					modelRoles: { review: `mock/${id}` },
+				}),
+				authStorage,
+				modelRegistry,
+				restrictToolNames: true,
+				enableMCP: false,
+				enableLsp: false,
+				enableIrc: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				getSessionAgents: () => [],
+			} as unknown as ToolSession;
+			const execution = await runStructuredSubagent({
+				session,
+				invocationKind: "task",
+				assignment: "Answer the question.",
+				agent: "worker",
+				perCallModel: selector,
+				structured: false,
+				identity: { id: agentId },
+				keepAlive: false,
+			});
+			expect(execution.result.exitCode).toBe(0);
+			expect(init.mock.calls[0]?.[0]).toMatchObject({
+				perCallModel: true,
+				perCallModelIdentity: identity,
+				perCallThinkingLevel: level,
+			});
 		} finally {
 			await AgentRegistry.global().get(agentId)?.session?.dispose();
 			AgentRegistry.global().unregister(agentId);

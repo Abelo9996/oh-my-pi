@@ -4,20 +4,24 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
-import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { getModelMatchPreferences, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
 	assertPerCallModelApproved,
-	isPerCallModelApproved,
+	parentModelGrantPattern,
+	PerCallModelError,
 	type PerCallModelGrants,
 } from "@oh-my-pi/pi-coding-agent/task/model-approval";
+import { cfgTaskPerCallModelAllow } from "@oh-my-pi/pi-coding-agent/task/settings";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 
 const target = createMockModel({ id: "target" });
 const other = createMockModel({ id: "other" });
 const bracketed = createMockModel({ id: "glm[1m]" });
+const bracketImposter = createMockModel({ id: "glm1" });
 const image = { ...createMockModel({ id: "painter" }), kind: "image" as const };
 const routerModel = (provider: string, id: string, baseUrl: string) =>
 	buildModel({
@@ -48,10 +52,36 @@ const droidModel = (id: string, rotation: string[]) =>
 const droidFable = droidModel("claude-fable-5", ["anthropic"]);
 const droidVertexFable = droidModel("claude-fable-5.1", ["vertex_anthropic"]);
 const droidOpus = droidModel("claude-opus-5", ["anthropic"]);
-const chat = [target, other, bracketed, sonnet, codingRouter, codingRouterLow, droidFable, droidVertexFable, droidOpus];
+const chat = [
+	target,
+	other,
+	bracketed,
+	bracketImposter,
+	sonnet,
+	codingRouter,
+	codingRouterLow,
+	droidFable,
+	droidVertexFable,
+	droidOpus,
+];
 const registry = {
+	getAll: () => [...chat, image],
 	getAvailable: (kind?: string) => (kind === "chat" ? chat : [...chat, image]),
-} as Parameters<typeof isPerCallModelApproved>[2];
+};
+
+function approved(
+	model: Model,
+	grants: PerCallModelGrants,
+	modelRegistry: Parameters<typeof assertPerCallModelApproved>[2] = registry,
+): boolean {
+	try {
+		assertPerCallModelApproved(model, grants, modelRegistry);
+		return true;
+	} catch (error) {
+		if (!(error instanceof PerCallModelError)) throw error;
+		return false;
+	}
+}
 
 interface Row {
 	name: string;
@@ -61,6 +91,7 @@ interface Row {
 	agentRemoved?: boolean;
 	parentModelPattern?: string;
 	model?: Model;
+	unavailable?: Model;
 	/** Settings injected by a subagent overlay on top of `settings`. */
 	overlay?: Record<string, unknown>;
 	approved: boolean;
@@ -77,6 +108,32 @@ const rows: Row[] = [
 	},
 	{ name: "role value naming another model", settings: { modelRoles: { review: "mock/other" } }, approved: false },
 	{ name: "glob role value", settings: { modelRoles: { review: "mock/*" } }, approved: true },
+	{ name: "bare-id glob role value", settings: { modelRoles: { review: "tar?et" } }, approved: true },
+	{ name: "glob role value with a level", settings: { modelRoles: { review: "mock/*:high" } }, approved: true },
+	{
+		name: "a provider-scoped glob never matches a different provider's bare id",
+		settings: { modelRoles: { review: "anthropic/*" } },
+		model: sonnet,
+		approved: false,
+	},
+	{
+		name: "a glob keeps an explicit upstream pin",
+		settings: { modelRoles: { review: "openrouter/anthropic/*@anthropic" } },
+		model: pinnedSonnet,
+		approved: true,
+	},
+	{
+		name: "an unpinned provider glob does not grant a pinned route",
+		settings: { modelRoles: { review: "openrouter/*" } },
+		model: pinnedSonnet,
+		approved: false,
+	},
+	{
+		name: "a provider glob spans slashes in aggregator ids",
+		settings: { modelRoles: { review: "openrouter/*" } },
+		model: sonnet,
+		approved: true,
+	},
 	{ name: "non-chat role value", settings: { modelRoles: { image: "mock/target" } }, approved: false },
 	{ name: "role alias is not expanded into defaults", settings: { modelRoles: { review: "@smol" } }, approved: false },
 	{ name: "bare * is @default, not a glob", settings: { modelRoles: { review: "*" } }, approved: false },
@@ -118,6 +175,26 @@ const rows: Row[] = [
 		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/target"] },
 		approved: true,
 	},
+	{
+		name: "the allowlist compares a level-shaped entry literally",
+		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/target:high"] },
+		approved: false,
+	},
+	{
+		name: "the allowlist never resolves a bare id",
+		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["target"] },
+		approved: false,
+	},
+	{
+		name: "the allowlist never expands a glob",
+		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/*"] },
+		approved: false,
+	},
+	{
+		name: "the allowlist trims literal entries",
+		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": [" mock/target "] },
+		approved: true,
+	},
 	{ name: "allowlist alone grants nothing", settings: { "task.perCallModelAllow": ["mock/target"] }, approved: false },
 	{
 		name: "brackets in a literal id are not a glob",
@@ -129,6 +206,19 @@ const rows: Row[] = [
 		name: "a literal bracketed grant approves only itself",
 		settings: { modelRoles: { review: "mock/glm[1m]" } },
 		approved: false,
+	},
+	{
+		name: "an unavailable bracketed literal never becomes a glob",
+		settings: { modelRoles: { review: "mock/glm[1m]" } },
+		unavailable: bracketed,
+		model: bracketImposter,
+		approved: false,
+	},
+	{
+		name: "brackets stay literal within an actual glob",
+		settings: { modelRoles: { review: "mock/glm[1m]*" } },
+		model: bracketed,
+		approved: true,
 	},
 	{
 		name: "a non-chat model never qualifies",
@@ -182,6 +272,20 @@ const rows: Row[] = [
 		approved: true,
 	},
 	{
+		name: "an unavailable literal with a level-shaped suffix never grants the base id",
+		settings: { modelRoles: { review: "nanogpt/nanogpt/coding-router:low" } },
+		unavailable: codingRouterLow,
+		model: codingRouter,
+		approved: false,
+	},
+	{
+		name: "an unavailable bare literal with a level-shaped suffix never grants the base id",
+		settings: { modelRoles: { review: "nanogpt/coding-router:low" } },
+		unavailable: codingRouterLow,
+		model: codingRouter,
+		approved: false,
+	},
+	{
 		name: "an allowlisted catalog id with a level-shaped suffix admits that id",
 		settings: {
 			modelRoles: { review: "nanogpt/*" },
@@ -200,16 +304,16 @@ const rows: Row[] = [
 		approved: false,
 	},
 	{
-		name: "a model whose provider always falls back server-side needs the fallback approved",
+		name: "a model whose provider may fall back server-side is refused",
 		settings: { modelRoles: { review: "factory-droid/claude-fable-5" } },
 		model: droidFable,
 		approved: false,
 	},
 	{
-		name: "a model whose server-side fallback target is approved",
+		name: "a model whose server-side fallback target is also approved is still refused",
 		settings: { modelRoles: { review: "factory-droid/claude-fable-5", smol: "factory-droid/claude-opus-5" } },
 		model: droidFable,
-		approved: true,
+		approved: false,
 	},
 	{
 		name: "a route without a server-side fallback needs no fallback approval",
@@ -234,7 +338,7 @@ describe("per-call model grants", () => {
 	it.each(rows)("$name", row => {
 		const grants: PerCallModelGrants = {
 			settings: row.overlay
-				? Settings.isolated(row.settings ?? {}).overlay(row.overlay)
+				? Settings.isolated(row.settings ?? {}).overlay(row.overlay, { derived: true })
 				: Settings.isolated(row.settings ?? {}),
 			agentName: "worker",
 			agentSource: row.agentSource,
@@ -242,16 +346,68 @@ describe("per-call model grants", () => {
 			agentRemoved: row.agentRemoved,
 			parentModelPattern: row.parentModelPattern,
 		};
-		expect(isPerCallModelApproved(row.model ?? target, grants, registry)).toBe(row.approved);
+		const available = chat.filter(model => model !== row.unavailable);
+		const modelRegistry = { ...registry, getAvailable: () => available };
+		expect(approved(row.model ?? target, grants, modelRegistry)).toBe(row.approved);
 	});
 
 	it("a role removed from the operator's settings stops granting even when a child snapshotted it", () => {
 		const root = Settings.isolated({ modelRoles: { review: "mock/target" } });
 		// Spawn-time snapshot: the child copies the root's roles into its own overrides.
-		const child = root.overlay({ modelRoles: { ...root.getModelRoles(), advisor: "mock/other" } });
+		const child = root.overlay({ modelRoles: { ...root.getModelRoles(), advisor: "mock/other" } }, { derived: true });
 		root.setModelRole("review", undefined);
-		const grandchild = child.overlay({});
-		expect(isPerCallModelApproved(target, { settings: grandchild, agentName: "worker" }, registry)).toBe(false);
+		const grandchild = child.overlay({}, { derived: true });
+		expect(approved(target, { settings: grandchild, agentName: "worker" })).toBe(false);
+	});
+
+	it("honors an SDK host overlay's allowlist", () => {
+		const settings = Settings.isolated({ modelRoles: { review: "mock/target" } }).overlay({
+			"task.perCallModelAllow": ["mock/other"],
+		});
+		expect(approved(target, { settings, agentName: "worker" })).toBe(false);
+	});
+
+	it("honors roles configured by an SDK host overlay", () => {
+		const settings = Settings.isolated().overlay({ modelRoles: { review: "mock/target" } });
+		expect(approved(target, { settings, agentName: "worker" })).toBe(true);
+	});
+
+	it("resolves grants against spawn-time preferences while role and allowlist edits remain live", () => {
+		const first = createMockModel({ id: "worker-a" });
+		const second = createMockModel({ id: "worker-b" });
+		const usageOrder = ["mock/worker-a", "mock/worker-b"];
+		const settings = Settings.isolated(
+			{ modelRoles: { review: "mock/worker" } },
+			{ storage: { getModelUsageOrder: () => usageOrder } as AgentStorage },
+		);
+		const grants: PerCallModelGrants = {
+			settings,
+			agentName: "worker",
+			matchPreferences: structuredClone(getModelMatchPreferences(settings)),
+		};
+		const modelRegistry = { getAll: () => [first, second], getAvailable: () => [first, second] };
+		expect(approved(first, grants, modelRegistry)).toBe(true);
+		usageOrder.reverse();
+		expect(approved(first, grants, modelRegistry)).toBe(true);
+		expect(approved(second, grants, modelRegistry)).toBe(false);
+		cfgTaskPerCallModelAllow.override(settings, ["mock/worker-b"]);
+		expect(approved(first, grants, modelRegistry)).toBe(false);
+		cfgTaskPerCallModelAllow.override(settings, []);
+		settings.setModelRole("review", undefined);
+		expect(approved(first, grants, modelRegistry)).toBe(false);
+	});
+
+	it.each([
+		{ only: ["anthropic", "google-vertex"] },
+		{ order: ["anthropic", "google-vertex"] },
+		{ only: ["anthropic"], allowFallbacks: true },
+	])("does not collapse a parent's routing policy into a grant: %j", routing => {
+		const model = { ...sonnet, compat: { ...sonnet.compat, openRouterRouting: routing } } as Model;
+		expect(parentModelGrantPattern(model)).toBeUndefined();
+	});
+
+	it("captures a faithfully representable parent upstream pin", () => {
+		expect(parentModelGrantPattern(pinnedSonnet)).toBe("openrouter/anthropic/claude-sonnet-4.5@anthropic");
 	});
 
 	it("never trusts a project agent file that claims a user source", () => {
@@ -268,16 +424,18 @@ describe("per-call model grants", () => {
 			agentModel: agent.model,
 			agentSource: agent.source,
 		};
-		expect(isPerCallModelApproved(target, grants, registry)).toBe(false);
+		expect(approved(target, grants)).toBe(false);
 	});
 
-	it("names the unapproved server-side fallback target in the rejection", () => {
+	it("names the server-side fallback and rejects even when its target is approved", () => {
 		const grants = {
-			settings: Settings.isolated({ modelRoles: { review: "factory-droid/claude-fable-5" } }),
+			settings: Settings.isolated({
+				modelRoles: { review: "factory-droid/claude-fable-5", smol: "factory-droid/claude-opus-5" },
+			}),
 			agentName: "worker",
 		};
 		expect(() => assertPerCallModelApproved(droidFable, grants, registry)).toThrow(
-			/server-side fallback to factory-droid\/claude-opus-5/,
+			/provider may answer with another model server-side \(factory-droid\/claude-opus-5\).*never switch models/,
 		);
 	});
 

@@ -150,15 +150,14 @@ export function resolveFactoryDroidPolicy(
 /**
  * Whether a thinking-off request still reasons on an upstream that may serve the
  * model: the wire's KDL `disabled-thinking` keeps adaptive or between-tools
- * thinking, or its completions dialect is `forced-on`. False outside the registry.
+ * thinking, or its completions dialect is `forced-on`. Follow the transport's
+ * actual model-scoped rotation and policy, including custom models.
  */
-export function factoryDroidOffKeepsReasoning(model: Pick<ModelSpec<Api>, "id" | "requestModelId">): boolean {
-	const id = model.requestModelId ?? model.id;
-	const entry = factoryDroidRegistry().find(candidate => candidate.spec.id === id);
-	if (!entry) return false;
-	const { wire, rotation } = entry.policy;
-	return (rotation.length > 0 ? rotation : [undefined]).some(upstream => {
-		const resolved = resolveModelPolicy({ ...entry.spec, api: wire }, upstream ? { upstream } : undefined);
+export function factoryDroidOffKeepsReasoning(model: ModelSpec<Api>): boolean {
+	const registry = resolveFactoryDroidPolicy(model);
+	const wire = registry?.wire ?? "openai-completions";
+	return (model.factoryDroidApiProviders ?? registry?.rotation ?? ["fireworks"]).some(upstream => {
+		const resolved = resolveModelPolicy({ ...model, api: wire }, { upstream });
 		const disabled = (resolved.compat as { disabledThinking?: string } | undefined)?.disabledThinking;
 		return (
 			disabled === "adaptive" ||

@@ -14,7 +14,7 @@ import {
 	resolveAgentModelSelection,
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
-	formatModelStringWithRouting,
+	getModelMatchPreferences,
 	resolveModelOverride,
 } from "../config/model-resolver";
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
@@ -84,7 +84,12 @@ import {
 	cfgTaskPerCallModel,
 	perCallModelEnabled,
 } from "./settings";
-import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
+import {
+	assertPerCallModelApproved,
+	parentModelGrantPattern,
+	PerCallModelError,
+	type PerCallModelGrants,
+} from "./model-approval";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
 export type StructuredSubagentSchemaResult = StructuredSubagentOutput;
@@ -403,6 +408,7 @@ function preflightPerCallModel(
 		agentModel: agent.model,
 		agentSource: agent.source,
 		parentModelPattern,
+		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
 	};
 	// A cold registry is checked again in the executor once models are loaded.
 	if (!modelRegistry || modelRegistry.getAvailable().length === 0) return grants;
@@ -569,15 +575,15 @@ export async function resolveEffectiveSubagentPolicy(
 					perCallSelector,
 					agent,
 					Object.hasOwn(agentModelOverrides, agentName),
-					// The parent's live model grants with its `@upstream` pin, so it grants only that route.
+					// A multi-upstream or otherwise richer parent route cannot grant a simpler selector.
 					parentActiveModel
-						? formatModelStringWithRouting(parentActiveModel)
+						? parentModelGrantPattern(parentActiveModel)
 						: request.session.getActiveModelString?.(),
 				);
 	const parentActiveModelPattern =
 		hasPreparedSeance || perCallModelGrants ? undefined : request.session.getActiveModelString?.();
 	const modelResolution = {
-		requestModel: preparedSeance?.modelPatterns ?? (perCallModelGrants ? (perCallSelector as string) : request.model),
+		requestModel: preparedSeance?.modelPatterns ?? request.model,
 		settingsOverride: hasPreparedSeance ? undefined : agentModelOverrides[agentName],
 		agentModel: hasPreparedSeance ? undefined : effectiveAgent.model,
 		settings: request.session.settings,

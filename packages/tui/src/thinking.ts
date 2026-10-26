@@ -1,4 +1,5 @@
 import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
+import { usesBudgetThinking } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { ConfiguredThinkingLevel } from "./render/render-utils";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
@@ -9,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
-import { factoryDroidOffKeepsReasoning } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { factoryDroidOffKeepsReasoning, resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 /** Thinking selectors accepted by CLI inputs, in display order. */
 export const CLI_THINKING_LEVELS: readonly ConfiguredThinkingLevel[] = ["off", ...THINKING_EFFORTS, "auto"];
 
@@ -339,20 +340,38 @@ function offStillReasons(model: Model): boolean {
 	return model.api === "factory-droid-agent" && factoryDroidOffKeepsReasoning(model);
 }
 
+/** True only when the request layer can leave thinking off without a caller effort. */
+function noEffortDisablesReasoning(model: Model): boolean {
+	// streamSimple neutralizes unverified thinking until an effort is picked.
+	if (model.thinking?.unverified) return true;
+	if (offStillReasons(model)) return false;
+	switch (model.api) {
+		case "anthropic-messages":
+			return usesBudgetThinking(model as Model<"anthropic-messages">);
+		case "bedrock-converse-stream":
+		case "google-generative-ai":
+		case "google-vertex":
+			return model.thinking?.mode === "budget" || model.thinking?.mode === "anthropic-budget-effort";
+		case "factory-droid-agent":
+			return resolveFactoryDroidPolicy(model)?.defaultReasoningOff === true;
+		default:
+			return false;
+	}
+}
+
 /**
  * Clamps a thinking selector to a per-session effort ceiling (e.g. a task
  * spawn's `task.maxEffort`). Levels at or below the ceiling pass through;
  * levels above it snap to the highest model-supported effort at or below it.
- * A selector that defers to the provider would let a provider default run
- * above the ceiling, so it resolves to an explicit effort instead: `off` on a
- * model whose metadata says off still reasons pins the lowest supported
- * effort; `inherit`/`undefined` pin the model's own default (`defaultLevel`,
- * else the mandatory-reasoning default) snapped under the ceiling, or the
- * highest effort at or below it when the default is unknown. `off` on a model
- * that can disable thinking stays `off`. A model whose floor exceeds the
- * ceiling has nothing valid to snap to; the requested level is returned
- * unchanged and the caller is responsible for rejecting or skipping such
- * models (see {@link modelSupportsEffortCeiling}).
+ * Unset/`inherit` stay untouched when no effort disables thinking, including
+ * unverified (opt-in) models. Otherwise a provider default could exceed the
+ * ceiling: pin the model's own default (`defaultLevel`, else the mandatory-
+ * reasoning default) under the ceiling. Verified models with unknown defaults
+ * use the highest effort at or below it, since leaving them unset is unsafe.
+ * `off` stays off when the route can disable thinking; otherwise pin its lowest
+ * supported effort. A model whose floor exceeds the ceiling has nothing valid
+ * to snap to; the requested level is returned unchanged and the caller must
+ * reject or skip such models (see {@link modelSupportsEffortCeiling}).
  */
 export function clampThinkingLevelToCeiling(
 	model: Model | undefined,
@@ -381,6 +400,7 @@ export function clampThinkingLevelToCeiling(
 			if (!offStillReasons(model)) return level;
 			return THINKING_EFFORTS.indexOf(supported[0]) <= maxIndex ? supported[0] : level;
 		}
+		if (noEffortDisablesReasoning(model)) return level;
 		const providerDefault =
 			model.thinking?.defaultLevel ?? (model.thinking?.requiresEffort ? defaultSupportedEffort(model) : undefined);
 		const pinned =
