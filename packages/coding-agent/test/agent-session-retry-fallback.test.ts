@@ -18,6 +18,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { CodexApiError } from "@oh-my-pi/pi-ai/providers/openai-codex/response-handler";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -155,6 +156,54 @@ function thinkingLoopErrorStream(model: Model<Api>): AssistantMessageEventStream
 			errorMessage:
 				"Thinking loop detected: the model repeated near-identical content (4 near-identical segments within the last 16). Treating as a stream stall and retrying.",
 			errorId: AIError.create(AIError.Flag.ThinkingLoop),
+			timestamp: Date.now(),
+		};
+		stream.push({ type: "error", reason: "error", error: partial });
+	});
+	return stream;
+}
+
+/** Finalize a real Codex `turn_rate_limit_exceeded` 429 the way the provider does. */
+async function finalizeCodexCapacityError(retryAfterSeconds: string): Promise<AIError.FinalizeResult> {
+	const response = new Response(
+		JSON.stringify({
+			error: {
+				type: "rate_limit_error",
+				code: "turn_rate_limit_exceeded",
+				message: "Codex is at capacity, please try again later",
+			},
+		}),
+		{
+			status: 429,
+			headers: {
+				"retry-after": retryAfterSeconds,
+				"x-codex-primary-used-percent": "14",
+				"x-codex-primary-reset-at": String(Math.floor(Date.now() / 1000) + 3 * 60 * 60),
+			},
+		},
+	);
+	return AIError.finalize(await CodexApiError.fromResponse(response), {
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		model: "gpt-5.6-sol",
+	});
+}
+
+/** A stream that ends with a finalized provider error, as a provider stream does. */
+function finalizedErrorStream(model: Model<Api>, failure: AIError.FinalizeResult): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		const partial: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: emptyUsage(),
+			stopReason: failure.stopReason,
+			errorMessage: failure.message,
+			errorStatus: failure.status,
+			errorId: failure.id,
 			timestamp: Date.now(),
 		};
 		stream.push({ type: "error", reason: "error", error: partial });
@@ -2576,6 +2625,83 @@ describe("AgentSession retry fallback", () => {
 			status: "quota_exhausted",
 			yielded: true,
 		});
+	});
+
+	describe("advisor on a timed Codex capacity 429", () => {
+		async function runAdvisorAgainstCapacityErrors(failures: number, maxRetries: number) {
+			const markReached = vi.spyOn(modelRegistry.authStorage.limits, "markReached");
+			const mainModel = getBundledModel("openai", "gpt-4o-mini");
+			const advisorModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+			if (!mainModel || !advisorModel) throw new Error("Expected bundled models to exist");
+			// 10ms Retry-After keeps each provider-timed wait short.
+			const failure = await finalizeCodexCapacityError("0.01");
+			let advisorRequests = 0;
+			// Settles on a completed review (yield) or a dropped batch (advisor failure notice).
+			const advisorSettled = Promise.withResolvers<void>();
+
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: createMockModel({ responses: [{ content: ["Primary complete"] }] }).stream,
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": true,
+				"retry.baseDelayMs": 0,
+				"retry.maxDelayMs": 1_000,
+				"retry.maxRetries": maxRetries,
+				"retry.modelFallback": false,
+			});
+			const advisorSelector = `${advisorModel.provider}/${advisorModel.id}`;
+			settings.setModelRole("advisor", advisorSelector);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				advisorTools: [],
+				advisorConfigs: [{ name: "capacity-test", model: advisorSelector }],
+				advisorStreamFn: model => {
+					advisorRequests++;
+					return advisorRequests <= failures
+						? finalizedErrorStream(model, failure)
+						: recoveredTextStream(model, "Advisor recovered");
+				},
+			});
+			session.subscribe(event => {
+				if (event.type === "advisor_yielded" || (event.type === "notice" && event.source === "advisor")) {
+					advisorSettled.resolve();
+				}
+			});
+
+			session.setAdvisorEnabled(true);
+			await session.prompt("Complete one primary turn");
+			await session.waitForIdle();
+			await advisorSettled.promise;
+			return {
+				advisorRequests,
+				markReached,
+				status: session.getAdvisorStatusOverview().advisors[0]?.status,
+			};
+		}
+
+		it("waits out the Retry-After and completes the review", async () => {
+			// Three failures used to exhaust the runtime's 1s retries and drop the batch.
+			const result = await runAdvisorAgainstCapacityErrors(3, 5);
+
+			expect(result.advisorRequests).toBe(4);
+			expect(result.status).toBe("running");
+			expect(result.markReached).not.toHaveBeenCalled();
+		});
+
+		it("drops the batch once retry.maxRetries waits are spent", async () => {
+			// maxRetries provider-timed waits, then the runtime's three strikes.
+			const result = await runAdvisorAgainstCapacityErrors(Number.POSITIVE_INFINITY, 2);
+
+			expect(result.advisorRequests).toBe(2 + 3);
+			expect(result.status).toBe("error");
+			expect(result.markReached).not.toHaveBeenCalled();
+		}, 15_000);
 	});
 
 	it("hops an advisor to the chain owned by the fallback it landed on", async () => {

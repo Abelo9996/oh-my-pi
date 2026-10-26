@@ -424,6 +424,41 @@ describe("openai-codex usage parser", () => {
 		expect(chat?.healthy).toBe(false);
 	});
 
+	it.each([
+		["full counters", (cap: Record<string, unknown>) => cap],
+		["only remaining: 0", (cap: Record<string, unknown>) => ({ unit: cap.unit, remaining: "0" })],
+	] as const)(
+		"does not let credits fund plan overage when the spend cap has %s and the verdict is omitted",
+		async (_name, shape) => {
+			const { reached: _omitted, ...rest } = makeSpendCapPayload(false, "500000").spend_control;
+			const spendControl = { ...rest, individual_limit: shape(rest.individual_limit) };
+			const payload = {
+				...makePayload(),
+				rate_limit: {
+					allowed: false,
+					limit_reached: true,
+					primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+					secondary_window: null,
+				},
+				credits: { has_credits: true, unlimited: false, overage_limit_reached: false, balance: "489.25" },
+				spend_control: spendControl,
+			};
+			const report = await openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+				},
+				{ fetch: fakeFetch(payload) },
+			);
+			expect(report?.metadata).toMatchObject({ allowed: false, limitReached: true });
+			const chat = report ? (codexRankingStrategy.scopeLimits?.(report, { modelId: "gpt-5.3-codex" }) ?? []) : [];
+			expect(chat.find(l => l.id === "openai-codex:primary")?.status).toBe("exhausted");
+			const scopes = report ? (codexRankingStrategy.healableBlockScopes?.(report) ?? []) : [];
+			expect(scopes.find(s => s.blockScope === "chat")?.healthy).toBe(false);
+			expect(scopes.find(s => s.blockScope === "shared")?.healthy).toBe(false);
+		},
+	);
+
 	it("surfaces rate_limit_reset_credits.available_count as report.resetCredits", async () => {
 		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 1 } };
 		const fetchImpl: FetchImpl = (async (url: string | URL | Request) => {
