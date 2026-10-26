@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
+import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
@@ -14,7 +18,36 @@ const target = createMockModel({ id: "target" });
 const other = createMockModel({ id: "other" });
 const bracketed = createMockModel({ id: "glm[1m]" });
 const image = { ...createMockModel({ id: "painter" }), kind: "image" as const };
-const chat = [target, other, bracketed];
+const routerModel = (provider: string, id: string, baseUrl: string) =>
+	buildModel({
+		id,
+		name: id,
+		api: "openai-completions",
+		provider,
+		baseUrl,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	});
+const sonnet = routerModel("openrouter", "anthropic/claude-sonnet-4.5", "https://openrouter.ai/api/v1");
+const pinnedSonnet = parseModelPattern("openrouter/anthropic/claude-sonnet-4.5@anthropic", [sonnet]).model!;
+// Separate catalog models: the base costs 8x the `:low` variant's input price.
+const codingRouter = routerModel("nanogpt", "nanogpt/coding-router", "https://nano-gpt.com/api/v1");
+const codingRouterLow = routerModel("nanogpt", "nanogpt/coding-router:low", "https://nano-gpt.com/api/v1");
+const droidModel = (id: string, rotation: string[]) =>
+	buildModel(
+		buildFactoryDroidModel(
+			factoryDroidRegistry().find(entry => entry.spec.id === id)!,
+			{ apiProviders: rotation },
+		),
+	);
+// Factory sends Fable's refusal chain to Opus 5 natively on the first-party Anthropic upstream.
+const droidFable = droidModel("claude-fable-5", ["anthropic"]);
+const droidVertexFable = droidModel("claude-fable-5.1", ["vertex_anthropic"]);
+const droidOpus = droidModel("claude-opus-5", ["anthropic"]);
+const chat = [target, other, bracketed, sonnet, codingRouter, codingRouterLow, droidFable, droidVertexFable, droidOpus];
 const registry = {
 	getAvailable: (kind?: string) => (kind === "chat" ? chat : [...chat, image]),
 } as Parameters<typeof isPerCallModelApproved>[2];
@@ -26,7 +59,9 @@ interface Row {
 	agentModel?: string[];
 	agentRemoved?: boolean;
 	parentModelPattern?: string;
-	model?: Pick<Model, "provider" | "id">;
+	model?: Model;
+	/** Settings injected by a subagent overlay on top of `settings`. */
+	overlay?: Record<string, unknown>;
 	approved: boolean;
 }
 
@@ -100,12 +135,106 @@ const rows: Row[] = [
 		model: image,
 		approved: false,
 	},
+	{
+		name: "an upstream-pinned role does not grant the unpinned model",
+		settings: { modelRoles: { review: "openrouter/anthropic/claude-sonnet-4.5@anthropic" } },
+		model: sonnet,
+		approved: false,
+	},
+	{
+		name: "an upstream-pinned role grants its pinned route",
+		settings: { modelRoles: { review: "openrouter/anthropic/claude-sonnet-4.5@anthropic" } },
+		model: pinnedSonnet,
+		approved: true,
+	},
+	{
+		name: "an unpinned role does not grant a pinned route",
+		settings: { modelRoles: { review: "openrouter/anthropic/claude-sonnet-4.5" } },
+		model: pinnedSonnet,
+		approved: false,
+	},
+	{
+		name: "an upstream-pinned parent model does not grant the unpinned model",
+		parentModelPattern: "openrouter/anthropic/claude-sonnet-4.5@anthropic",
+		model: sonnet,
+		approved: false,
+	},
+	{
+		name: "the allowlist keeps an upstream pin",
+		settings: {
+			modelRoles: { review: "openrouter/anthropic/claude-sonnet-4.5" },
+			"task.perCallModelAllow": ["openrouter/anthropic/claude-sonnet-4.5@anthropic"],
+		},
+		model: sonnet,
+		approved: false,
+	},
+	{
+		name: "a role naming a catalog id with a level-shaped suffix does not grant the base id",
+		settings: { modelRoles: { review: "nanogpt/nanogpt/coding-router:low" } },
+		model: codingRouter,
+		approved: false,
+	},
+	{
+		name: "a role naming a catalog id with a level-shaped suffix grants that id",
+		settings: { modelRoles: { review: "nanogpt/nanogpt/coding-router:low" } },
+		model: codingRouterLow,
+		approved: true,
+	},
+	{
+		name: "an allowlisted catalog id with a level-shaped suffix admits that id",
+		settings: {
+			modelRoles: { review: "nanogpt/*" },
+			"task.perCallModelAllow": ["nanogpt/nanogpt/coding-router:low"],
+		},
+		model: codingRouterLow,
+		approved: true,
+	},
+	{
+		name: "an allowlisted catalog id with a level-shaped suffix does not admit the base id",
+		settings: {
+			modelRoles: { review: "nanogpt/*" },
+			"task.perCallModelAllow": ["nanogpt/nanogpt/coding-router:low"],
+		},
+		model: codingRouter,
+		approved: false,
+	},
+	{
+		name: "a model whose provider always falls back server-side needs the fallback approved",
+		settings: { modelRoles: { review: "factory-droid/claude-fable-5" } },
+		model: droidFable,
+		approved: false,
+	},
+	{
+		name: "a model whose server-side fallback target is approved",
+		settings: { modelRoles: { review: "factory-droid/claude-fable-5", smol: "factory-droid/claude-opus-5" } },
+		model: droidFable,
+		approved: true,
+	},
+	{
+		name: "a route without a server-side fallback needs no fallback approval",
+		settings: { modelRoles: { review: "factory-droid/claude-fable-5.1" } },
+		model: droidVertexFable,
+		approved: true,
+	},
+	{
+		name: "a subagent overlay's injected role never grants",
+		overlay: { modelRoles: { advisor: "mock/target" } },
+		approved: false,
+	},
+	{
+		name: "a role the operator set still grants through a child overlay",
+		settings: { modelRoles: { review: "mock/target" } },
+		overlay: { modelRoles: { advisor: "mock/other" } },
+		approved: true,
+	},
 ];
 
 describe("per-call model grants", () => {
 	it.each(rows)("$name", row => {
 		const grants: PerCallModelGrants = {
-			settings: Settings.isolated(row.settings ?? {}),
+			settings: row.overlay
+				? Settings.isolated(row.settings ?? {}).overlay(row.overlay)
+				: Settings.isolated(row.settings ?? {}),
 			agentName: "worker",
 			agentSource: row.agentSource,
 			agentModel: row.agentModel,
@@ -113,6 +242,15 @@ describe("per-call model grants", () => {
 			parentModelPattern: row.parentModelPattern,
 		};
 		expect(isPerCallModelApproved(row.model ?? target, grants, registry)).toBe(row.approved);
+	});
+
+	it("a role removed from the operator's settings stops granting even when a child snapshotted it", () => {
+		const root = Settings.isolated({ modelRoles: { review: "mock/target" } });
+		// Spawn-time snapshot: the child copies the root's roles into its own overrides.
+		const child = root.overlay({ modelRoles: { ...root.getModelRoles(), advisor: "mock/other" } });
+		root.setModelRole("review", undefined);
+		const grandchild = child.overlay({});
+		expect(isPerCallModelApproved(target, { settings: grandchild, agentName: "worker" }, registry)).toBe(false);
 	});
 
 	it("never trusts a project agent file that claims a user source", () => {
@@ -130,6 +268,16 @@ describe("per-call model grants", () => {
 			agentSource: agent.source,
 		};
 		expect(isPerCallModelApproved(target, grants, registry)).toBe(false);
+	});
+
+	it("names the unapproved server-side fallback target in the rejection", () => {
+		const grants = {
+			settings: Settings.isolated({ modelRoles: { review: "factory-droid/claude-fable-5" } }),
+			agentName: "worker",
+		};
+		expect(() => assertPerCallModelApproved(droidFable, grants, registry)).toThrow(
+			/server-side fallback to factory-droid\/claude-opus-5/,
+		);
 	});
 
 	it("names the allowlist in the rejection when one is set", () => {

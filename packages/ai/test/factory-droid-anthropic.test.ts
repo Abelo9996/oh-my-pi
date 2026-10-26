@@ -3,7 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { streamAnthropic } from "../src/providers/anthropic";
-import { streamFactoryDroid } from "../src/providers/factory-droid";
+import { factoryDroidServerSideFallbackModels, streamFactoryDroid } from "../src/providers/factory-droid";
 import type { AnthropicFallbackCreditHandle, AssistantMessage, Message } from "../src/types";
 import {
 	anthropicChunks,
@@ -37,6 +37,25 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		// The Anthropic SDK renders its client's 600s timeout as a header.
 		expect(captured[0].headers["x-stainless-timeout"]).toBe("600");
 		expect(captured[0].headers["x-api-key"]).toBe("placeholder");
+	});
+
+	it.each([
+		[["anthropic"], ["claude-opus-5"]],
+		[["vertex_anthropic"], []],
+	])("reports the refusal fallback targets a %j rotation always sends", async (rotation, expected) => {
+		const captured: CapturedRequest[] = [];
+		const model = factoryModel("claude-fable-5", rotation);
+		await streamFactoryDroid(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")) },
+		).result();
+
+		// Callers cannot opt out, so approval must see exactly what the request carries.
+		expect((captured[0]!.body.fallbacks as { model: string }[] | undefined)?.map(entry => entry.model) ?? []).toEqual(
+			expected,
+		);
+		expect(factoryDroidServerSideFallbackModels(model)).toEqual(expected);
 	});
 
 	it("withholds refusal fallbacks on vertex/bedrock rotations, which gate the beta themselves", async () => {

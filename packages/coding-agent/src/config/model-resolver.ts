@@ -1609,7 +1609,8 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
  * Resolve a list of override patterns to the first matching model.
  *
  * `exactOnly` matches each pattern only as a literal `provider/model-id`,
- * optionally followed by a supported `:level`: no role aliases, globs, or fuzzy ids.
+ * optionally followed by a supported `:level` and an aggregator `@upstream` pin:
+ * no role aliases, globs, or fuzzy ids.
  */
 export function resolveModelOverride(
 	modelPatterns: string[],
@@ -1621,21 +1622,31 @@ export function resolveModelOverride(
 	const availableModels = modelRegistry.getAvailable();
 	if (options?.exactOnly) {
 		const find = (selector: string) => availableModels.find(model => `${model.provider}/${model.id}` === selector);
-		for (const pattern of modelPatterns) {
-			const selector = pattern.trim();
+		const exact = (selector: string) => {
 			// Some real ids end in a level-shaped segment, so the literal id wins over a suffix split.
 			const literal = find(selector);
 			if (literal) return { model: literal, explicitThinkingLevel: false };
 			const { base, level } = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
-			if (!level) continue;
+			if (!level) return undefined;
 			const model = find(base);
-			if (!model) continue;
+			if (!model) return undefined;
 			return {
 				model,
 				thinkingLevel:
 					level === AUTO_THINKING ? AUTO_THINKING : (resolveThinkingLevelForModel(model, level) ?? level),
 				explicitThinkingLevel: true,
 			};
+		};
+		for (const pattern of modelPatterns) {
+			const selector = pattern.trim();
+			const direct = exact(selector);
+			if (direct) return direct;
+			// The pin is part of the selection: it rides the resolved model to dispatch.
+			const routing = splitUpstreamRouting(selector);
+			const routed = routing ? exact(routing.base) : undefined;
+			if (routing && routed && supportsUpstreamRouting(routed.model)) {
+				return { ...routed, model: applyUpstreamRouting(routed.model, routing.upstream) };
+			}
 		}
 		return { explicitThinkingLevel: false };
 	}

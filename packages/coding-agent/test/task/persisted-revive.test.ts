@@ -629,6 +629,7 @@ describe("persisted subagent revival", () => {
 			const check = options?.assertDispatchModel;
 			if (!check) throw new Error("Expected a per-call dispatch check");
 			expect(options?.disableModelFallback).toBe(true);
+			expect(options?.disableServerSideFallback).toBe(true);
 			return check;
 		};
 

@@ -768,6 +768,14 @@ export class Settings {
 	}
 
 	/**
+	 * The operator's own instance: an {@link overlay} resolves to the instance it was built from
+	 * (recursively), so a subagent overlay's writes and injected roles never reach the result.
+	 */
+	rootSettings(): Settings {
+		return this.#parent ? this.#parent.rootSettings() : this;
+	}
+
+	/**
 	 * Child view for a subagent or other derived session: reads fall through to this instance
 	 * live (a later edit here reaches the child and its listeners), while `overrides` and every
 	 * later write on the child stay in the child — never persisted, never written back here.

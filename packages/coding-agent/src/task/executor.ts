@@ -4671,6 +4671,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
 								},
 								disableModelFallback: true,
+								disableServerSideFallback: true,
 							}
 						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,

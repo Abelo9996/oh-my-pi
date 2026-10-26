@@ -412,6 +412,16 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
 
+		it("never injects fallbacks for a session that disables server-side fallback", () => {
+			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base, { disableServerSideFallback: true });
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toBeUndefined();
+		});
+
 		it("caller-supplied fallbacks always win over the settings default", () => {
 			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
 			const { fn: base, calls } = captureBase();

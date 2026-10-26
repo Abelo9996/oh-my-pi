@@ -14,6 +14,7 @@ import {
 	resolveAgentModelSelection,
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
+	formatModelStringWithRouting,
 	resolveModelOverride,
 } from "../config/model-resolver";
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
@@ -539,6 +540,7 @@ export async function resolveEffectiveSubagentPolicy(
 	const hasPreparedSeance = preparedSeance !== undefined;
 	// A `seance` name that resolved to anything but the bundled agent is an ordinary agent: its `model` is per-call.
 	const perCallSelector: unknown = request.perCallModel ?? (isBundledSeance(agent) ? undefined : request.seanceModel);
+	const parentActiveModel = request.session.getActiveModel?.();
 	const perCallModelGrants =
 		perCallSelector === undefined
 			? undefined
@@ -547,7 +549,10 @@ export async function resolveEffectiveSubagentPolicy(
 					perCallSelector,
 					agent,
 					Object.hasOwn(agentModelOverrides, agentName),
-					request.session.getActiveModelString?.(),
+					// The parent's live model grants with its `@upstream` pin, so it grants only that route.
+					parentActiveModel
+						? formatModelStringWithRouting(parentActiveModel)
+						: request.session.getActiveModelString?.(),
 				);
 	const parentActiveModelPattern =
 		hasPreparedSeance || perCallModelGrants ? undefined : request.session.getActiveModelString?.();

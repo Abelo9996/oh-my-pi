@@ -618,6 +618,8 @@ export interface CreateAgentSessionOptions {
 	assertDispatchModel?: (model: Model) => void;
 	/** Never switch to a retry fallback model; the turn fails instead. Per-call `model` subagents set it. */
 	disableModelFallback?: boolean;
+	/** Never opt requests into a provider's optional server-side model fallback. Per-call `model` subagents set it. */
+	disableServerSideFallback?: boolean;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -4482,6 +4484,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						anthropicSlowModeHasNoSiblingHeadroom(modelRegistry.authStorage, streamModel, session?.sessionId),
 					notify: (level, message) => session?.emitNotice(level, message, "anthropic-slow-mode"),
 					onLane: lane => session?.noteAnthropicSlowModeLane(lane),
+					disableServerSideFallback: options.disableServerSideFallback,
 				}),
 			),
 			() => blobBroker.current,

@@ -1417,6 +1417,19 @@ describe("resolveModelFromString", () => {
 });
 
 describe("resolveModelOverride", () => {
+	test("exactOnly keeps an @upstream pin on the resolved model", () => {
+		const registry = { getAvailable: () => allModels } as Parameters<typeof resolveModelOverride>[1];
+
+		const pinned = resolveModelOverride(["openrouter/z-ai/glm-4.7@cerebras:high"], registry, undefined, {
+			exactOnly: true,
+		});
+		const unpinned = resolveModelOverride(["openrouter/z-ai/glm-4.7"], registry, undefined, { exactOnly: true });
+
+		expect(pinned.model && formatModelStringWithRouting(pinned.model)).toBe("openrouter/z-ai/glm-4.7@cerebras");
+		expect(pinned.thinkingLevel).toBe(Effort.High);
+		expect(unpinned.model && formatModelStringWithRouting(unpinned.model)).toBe("openrouter/z-ai/glm-4.7");
+	});
+
 	test("preserves explicit off and explicit-thinking metadata", () => {
 		const registry = {
 			getAvailable: () => allModels,

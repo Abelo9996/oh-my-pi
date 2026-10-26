@@ -85,6 +85,7 @@ describe("per-call exact selection after background discovery", () => {
 				// The worker never switches models and every request stays held to the grants.
 				const options = created.mock.calls[0]?.[0];
 				expect(options?.disableModelFallback).toBe(true);
+				expect(options?.disableServerSideFallback).toBe(true);
 				expect(options?.prewalk).toBeUndefined();
 				expect(() => options?.assertDispatchModel?.(createMockModel({ id: "other" }))).toThrow(/not approved/);
 			} else {

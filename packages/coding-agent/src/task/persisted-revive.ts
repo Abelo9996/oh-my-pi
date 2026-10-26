@@ -6,7 +6,7 @@ import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../config/model-registry";
-import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
+import { formatModelStringWithRouting, resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
@@ -287,6 +287,7 @@ export function createPersistedSubagentReviverFactory(
 						? {
 								thinkingLevelCeiling: cfgTaskMaxEffort.get(ctx.settings),
 								disableModelFallback: true,
+								disableServerSideFallback: true,
 								assertDispatchModel: (model: Model) => {
 									assertPerCallModelApproved(
 										model,
@@ -297,7 +298,7 @@ export function createPersistedSubagentReviverFactory(
 											agentSource: configuredAgent?.source,
 											agentRemoved: configuredAgent === undefined,
 											parentModelPattern: ctx.session.model
-												? `${ctx.session.model.provider}/${ctx.session.model.id}`
+												? formatModelStringWithRouting(ctx.session.model)
 												: undefined,
 										},
 										ctx.modelRegistry,

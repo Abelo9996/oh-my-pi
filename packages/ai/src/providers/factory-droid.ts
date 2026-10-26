@@ -238,6 +238,24 @@ function resolveRoute(
 	return route;
 }
 
+/**
+ * Every server-side refusal fallback target a request for `model` can carry on
+ * any upstream it may route to. Factory sends the chain natively, so callers
+ * cannot opt out: the request may switch to these models server-side.
+ */
+export function factoryDroidServerSideFallbackModels(model: Model<"factory-droid-agent">): string[] {
+	const registry = resolveFactoryDroidPolicy(model);
+	const wire = registry?.wire ?? "openai-completions";
+	if (wire === "google-generate") return [];
+	const targets = new Set<string>();
+	for (const upstream of model.factoryDroidApiProviders ?? registry?.rotation ?? []) {
+		const fallbackModels = resolveModelPolicy({ ...model, api: wire }, { upstream }).catalog.serverSideFallbackModels;
+		if (!Array.isArray(fallbackModels)) continue;
+		for (const entry of fallbackModels) if (typeof entry === "string") targets.add(entry);
+	}
+	return [...targets];
+}
+
 /** The attempt's effort: undefined when reasoning is off. */
 function selectEffort(
 	model: Model<"factory-droid-agent">,
