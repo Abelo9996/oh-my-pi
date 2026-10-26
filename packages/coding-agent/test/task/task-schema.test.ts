@@ -36,11 +36,6 @@ const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
-	it("requires task", () => {
-		const parsed = taskSchema({ agent: "scout", solutionSpace: "c" });
-		expect(parsed instanceof type.errors).toBe(true);
-	});
-
 	it("removes eval tool names from the wire shape when eval.tools.enabled is off", () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
@@ -217,7 +212,7 @@ describe("task spawn validation", () => {
 
 	it("rejects a missing task", async () => {
 		const text = await executeText({ agent: "scout" });
-		expect(text).toContain("Missing `task`");
+		expect(text).toContain("exactly one of `task` or `taskFile`");
 	});
 	it("rejects a model override for an ordinary task after the enabled schema accepts it", async () => {
 		const schema = getTaskSchema({

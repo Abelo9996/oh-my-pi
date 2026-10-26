@@ -2222,8 +2222,9 @@ export interface TaskItem {
 	sourceSession?: string;
 	/** Optional model selector override for the historical source session. */
 	model?: string | string[];
-	/** The work; required by the schema. */
+	/** Inline instructions; exactly one of task or taskFile is required. */
 	task?: string;
+	taskFile?: string;
 	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
@@ -2255,6 +2256,8 @@ export interface TaskParams {
 	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;
+	/** Absolute UTF-8 file path (flat form), mutually exclusive with task. */
+	taskFile?: string;
 	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
@@ -2343,6 +2346,9 @@ export interface AgentProgress {
 	status: "pending" | "running" | "completed" | "failed" | "aborted";
 	task: string;
 	assignment?: string;
+	taskFile?: string;
+	/** SHA-256 of the exact task file bytes before decoding and trimming. */
+	taskFileSha256?: string;
 	description?: string;
 	lastIntent?: string;
 	currentTool?: string;
@@ -2451,6 +2457,8 @@ export interface SingleResult {
 	agentSource: AgentSource;
 	task: string;
 	assignment?: string;
+	taskFile?: string;
+	taskFileSha256?: string;
 	description?: string;
 	lastIntent?: string;
 	exitCode: number;

@@ -306,7 +306,7 @@ describe("task.batch validation", () => {
 		expect(empty).toContain("Missing `tasks`");
 
 		const missing = await executeText({ tasks: [{ task: "Work." }, { name: "Beta" }] }, { "task.batch": true });
-		expect(missing).toContain("Task 2 (`Beta`) is missing `task`");
+		expect(missing).toContain("Task 2 (`Beta`) must provide exactly one of `task` or `taskFile`");
 	});
 
 	it("requires a shared context for batch calls", async () => {

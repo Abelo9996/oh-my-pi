@@ -31,6 +31,8 @@ export const MAX_OUTPUT_BYTES = parseNumber($env.PI_TASK_MAX_OUTPUT_BYTES, 500_0
 /** Maximum output lines per agent */
 export const MAX_OUTPUT_LINES = parseNumber($env.PI_TASK_MAX_OUTPUT_LINES, 5000);
 
+export const MAX_TASK_FILE_BYTES = 4 * 1024 * 1024;
+
 /** EventBus channel for raw subagent events */
 export const TASK_SUBAGENT_EVENT_CHANNEL = "task:subagent:event";
 
@@ -48,7 +50,8 @@ const effortRule = '"lo" | "med" | "hi"' as const;
 export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
-	task: "string",
+	"task?": "string",
+	"taskFile?": "string",
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
@@ -58,7 +61,8 @@ export const taskItemSchema = type({
 const taskItemSchemaIsolated = type({
 	"name?": "string",
 	agent: "string = 'task'",
-	task: "string",
+	"task?": "string",
+	"taskFile?": "string",
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
@@ -70,7 +74,8 @@ const taskItemSchemaIsolated = type({
 export const taskSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
-	task: "string",
+	"task?": "string",
+	"taskFile?": "string",
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
@@ -81,7 +86,8 @@ export const taskSchema = type({
 const taskSchemaNoIsolation = type({
 	"name?": "string",
 	agent: "string = 'task'",
-	task: "string",
+	"task?": "string",
+	"taskFile?": "string",
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
@@ -158,7 +164,8 @@ function createTaskSchema(options: {
 			const item = type.raw({
 				"name?": "string",
 				agent,
-				task: "string",
+				"task?": "string",
+				"taskFile?": "string",
 				solutionSpace: "string",
 				...effortField,
 				...schemaFields,
@@ -178,7 +185,8 @@ function createTaskSchema(options: {
 		const item = type.raw({
 			"name?": "string",
 			agent,
-			task: "string",
+			"task?": "string",
+			"taskFile?": "string",
 			solutionSpace: "string",
 			...effortField,
 			...schemaFields,
@@ -198,7 +206,8 @@ function createTaskSchema(options: {
 		return type.raw({
 			"name?": "string",
 			agent,
-			task: "string",
+			"task?": "string",
+			"taskFile?": "string",
 			solutionSpace: "string",
 			...effortField,
 			...schemaFields,
@@ -211,7 +220,8 @@ function createTaskSchema(options: {
 	return type.raw({
 		"name?": "string",
 		agent,
-		task: "string",
+		"task?": "string",
+		"taskFile?": "string",
 		solutionSpace: "string",
 		...effortField,
 		...schemaFields,
