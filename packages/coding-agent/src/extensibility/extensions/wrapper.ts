@@ -352,12 +352,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// Outer approvals only cover the original input. `xd://` approval skips
-		// tier-only prompts while the same object flows through; ACP approval also
-		// satisfies explicit prompts, but compares against a deep snapshot because
-		// handlers can mutate the original argument object in place. Denies were
-		// enforced above, and provider safety checks remain independently required.
-		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
-		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
+		// tier-only prompts, and an explicit prompt under the policy key the outer
+		// gate already asked about, while the same object flows through; ACP
+		// approval also satisfies explicit prompts, but compares against a deep
+		// snapshot because handlers can mutate the original argument object in
+		// place. Denies were enforced above, and provider safety checks remain
+		// independently required.
+		const policyKey = resolved.policyKey ?? this.tool.name;
+		const explicitPrompt =
+			resolved.override || (Object.hasOwn(userPolicies, policyKey) && policyKey !== context?.xdevPolicyKey);
+		const xdevBypass = context?.xdevPolicyKey !== undefined && effectiveParams === params;
 		const acpBypass =
 			context !== undefined &&
 			Object.hasOwn(context, "acpApprovedArgs") &&

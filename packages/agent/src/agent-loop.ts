@@ -1125,6 +1125,9 @@ interface StepCounter {
 	count: number;
 }
 
+/** Largest setTimeout delay before 32-bit overflow (Node/Bun fire in ~1 ms past this). */
+const MAX_TIMER_MS = 2_147_483_647;
+
 function isDeadlineExceeded(deadline: number | undefined): boolean {
 	return deadline !== undefined && Date.now() >= deadline;
 }
@@ -1211,16 +1214,17 @@ async function runLoopBody(
 ): Promise<void> {
 	let deadlineTimer: Timer | undefined;
 	if (config.deadline !== undefined) {
+		const deadline = config.deadline;
 		const deadlineAbortController = new AbortController();
 		const deadlineReason = new DOMException("Deadline exceeded", "TimeoutError");
-		const delay = config.deadline - Date.now();
-		if (delay <= 0) {
-			deadlineAbortController.abort(deadlineReason);
-		} else {
-			deadlineTimer = setTimeout(() => {
-				deadlineAbortController.abort(deadlineReason);
-			}, delay);
-		}
+		// setTimeout overflows past 2^31-1 ms and fires in ~1 ms, so a valid `--max-time 600h`
+		// aborted the first turn at once: wait in bounded slices and recheck the deadline.
+		const armDeadline = (): void => {
+			const delay = deadline - Date.now();
+			if (delay <= 0) deadlineAbortController.abort(deadlineReason);
+			else deadlineTimer = setTimeout(armDeadline, Math.min(delay, MAX_TIMER_MS));
+		};
+		armDeadline();
 		signal = signal ? AbortSignal.any([signal, deadlineAbortController.signal]) : deadlineAbortController.signal;
 	}
 

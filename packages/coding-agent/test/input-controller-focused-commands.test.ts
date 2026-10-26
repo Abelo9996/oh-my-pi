@@ -137,7 +137,7 @@ describe("focused subagent view slash commands", () => {
 
 	it("runs /btw with its question from the focused view instead of steering the agent", async () => {
 		const { raw, prompt } = await submit("/btw what is it doing?");
-		expect(raw.handleBtwCommand).toHaveBeenCalledWith("what is it doing?");
+		expect(raw.handleBtwCommand).toHaveBeenCalledWith("what is it doing?", undefined);
 		expect(prompt).not.toHaveBeenCalled();
 	});
 
@@ -161,6 +161,7 @@ describe("focused subagent view slash commands", () => {
 		await focused.ctx.editor.onSubmit?.("/sitrep the migration");
 		expect(focused.raw.handleBtwCommand).toHaveBeenCalledWith(
 			"Report. Focus: the migration",
+			undefined,
 			"/sitrep the migration",
 		);
 		expect(focused.editor.clearDraft).toHaveBeenCalledTimes(1);

@@ -2430,15 +2430,22 @@ export class SessionManager {
 	}
 
 	/**
-	 * Start a new session and persist its header before returning.
+	 * Start a new session and persist its header before returning, except for a
+	 * `drop` (/delete) successor.
 	 *
 	 * The durable empty boundary prevents a later process on another terminal
-	 * from selecting the previous conversation as the most recent session.
+	 * from selecting the previous conversation as the most recent session. The
+	 * drop path does not need it: the fresh terminal breadcrumb already pins
+	 * this terminal to the successor, and if deleting the predecessor failed,
+	 * that surviving non-empty transcript is the correct resume target.
+	 * Materializing the successor there would only leave a zero-turn stub
+	 * behind when the user quits, so it keeps the ordinary lazy gate and writes
+	 * once it has content.
 	 */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
 		await this.#drainAndCloseWriter();
 		const sessionFile = this.#resetToNewSession(options);
-		await this.ensureOnDisk();
+		if (options?.drop !== true) await this.ensureOnDisk();
 		return sessionFile;
 	}
 
@@ -3238,6 +3245,15 @@ export class SessionManager {
 
 	async getArtifactPath(id: string): Promise<string | null> {
 		return (await this.#artifactManagerForSession()?.getPath(id)) ?? null;
+	}
+
+	/**
+	 * Content of a spill artifact kept in memory by a non-persistent session.
+	 * Null for unknown ids and for file-backed sessions, whose artifacts resolve
+	 * through {@link getArtifactPath}.
+	 */
+	getArtifactContent(id: string): string | null {
+		return this.#inMemoryArtifacts?.get(id) ?? null;
 	}
 
 	async saveDraft(text: string): Promise<void> {

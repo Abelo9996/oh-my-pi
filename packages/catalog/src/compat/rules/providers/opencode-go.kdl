@@ -65,9 +65,9 @@ provider "opencode-go" {
 			max-tokens 384000
 		}
 	}
-	// Live Go discovery lists Argon without capabilities; its native Gemini
-	// endpoint requires a thinking level and accepts LOW, MEDIUM, or HIGH.
-	models "gemini-4-argon-contributor" {
+	// Go rosters can list either Argon ID without capabilities; the native
+	// Gemini endpoint requires a thinking level and accepts LOW, MEDIUM, or HIGH.
+	models "gemini-4-argon" "gemini-4-argon-contributor" {
 		thinking-upgrade-neutral #true
 		thinking-mode "google-level"
 		thinking-efforts "low" "medium" "high"

@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -39,6 +39,7 @@ function createAssistantMessage(text: string): AssistantMessage {
 
 interface RunEphemeralTurnArgs {
 	promptText: string;
+	promptImages?: ImageContent[];
 	onTextDelta?: (delta: string) => void;
 	signal?: AbortSignal;
 }
@@ -225,6 +226,22 @@ describe("BtwController", () => {
 		await controller.dispose();
 	});
 
+	it("sends the images attached to /btw with its side turn", async () => {
+		const runEphemeralTurn = vi.fn(async (_args: RunEphemeralTurnArgs) => ({
+			replyText: "Red",
+			assistantMessage: createAssistantMessage("Red"),
+		}));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const controller = new BtwController(ctx);
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+
+		expect(await controller.start("What colour is this? [Image #1]", [screenshot])).toBe(true);
+		await drainBtwRequest();
+
+		expect(runEphemeralTurn.mock.calls[0]?.[0]?.promptImages).toEqual([screenshot]);
+		await controller.dispose();
+	});
+
 	it("shows an error message when no model is configured", async () => {
 		const runEphemeralTurn = vi.fn(async () => ({
 			replyText: "n/a",
@@ -365,7 +382,7 @@ describe("BtwController", () => {
 		const controller = new BtwController(ctx);
 		const template = "Sitrep template: list milestones and ETAs.";
 		try {
-			await controller.start(template, "/sitrep");
+			await controller.start(template, undefined, "/sitrep");
 			await drainBtwRequest();
 			await controller.flush();
 
@@ -525,7 +542,7 @@ describe("BtwController", () => {
 		await branchPromise;
 	});
 
-	it("branches the sanitized reply text while preserving non-text assistant content", async () => {
+	it("branches the sanitized reply text and the question's images while preserving non-text assistant content", async () => {
 		const assistantMessage: AssistantMessage = {
 			...createAssistantMessage("raw repeated repeated repeated"),
 			content: [
@@ -544,7 +561,8 @@ describe("BtwController", () => {
 		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
 		const controller = new BtwController(ctx);
 
-		await controller.start("Question?");
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		await controller.start("Question?", [screenshot]);
 		await drainBtwRequest();
 
 		expect(await controller.handleBranch()).toBe(true);
@@ -559,6 +577,7 @@ describe("BtwController", () => {
 			},
 			"leaf-1",
 			"session-1",
+			[screenshot],
 		);
 	});
 	it("copies the sanitized visible reply text after a complete non-empty reply", async () => {
@@ -675,6 +694,7 @@ describe("BtwController", () => {
 			},
 			"leaf-1",
 			"session-1",
+			undefined,
 		);
 	});
 

@@ -19,6 +19,7 @@ import {
 	isRecord,
 	prompt,
 	untilAborted,
+	withFileLock,
 } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveMemberContent,
@@ -30,7 +31,14 @@ import {
 } from "@oh-my-pi/pi-utils/ar";
 import { detectLineEnding, normalizeToLF, restoreLineEndings } from "../edit/normalize";
 
-import { extractUriScheme, InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
+import {
+	extractUriScheme,
+	InternalUrlRouter,
+	LocalProtocolHandler,
+	resolveLocalRoot,
+	sessionResolveContext,
+	sessionWriteContext,
+} from "../internal-urls";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
 
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
@@ -39,6 +47,7 @@ import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
+import writeDeviceOnlyRefusal from "../prompts/tools/write-device-only-refusal.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
@@ -489,6 +498,17 @@ function isArchivePathNotFound(error: unknown): boolean {
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOTDIR";
 }
 
+/**
+ * On-disk form of `local://<name>`, resolved the way the write itself resolves
+ * it (session context, then process override, then main session) and shortened
+ * to `~` so the refusal does not carry the home directory into transcripts;
+ * undefined when `local://` has no root for this session.
+ */
+function localFileDiskPathHint(session: ToolSession): string | undefined {
+	const options = LocalProtocolHandler.resolveOptions(sessionResolveContext(session));
+	return options ? shortenPath(path.join(resolveLocalRoot(options), "<name>")) : undefined;
+}
+
 function normalizeArchiveWriteSubPath(rawPath: string): string {
 	const normalized = rawPath.replace(/\\/g, "/");
 	if (normalized.length === 0) {
@@ -664,13 +684,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		contentBytes: number,
 		rawContent: string,
 		resolvedArchivePath: ResolvedArchiveWritePath,
+		signal?: AbortSignal,
 	): Promise<AgentToolResult<WriteToolDetails>> {
-		// Resolve symlinks before the tmp+rename swap: renaming over a symlink
-		// replaces the link itself with a regular file instead of writing
-		// through to its target.
-		const finalPath = resolvedArchivePath.exists
-			? await fs.realpath(resolvedArchivePath.absolutePath).catch(() => resolvedArchivePath.absolutePath)
-			: resolvedArchivePath.absolutePath;
+		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
+		if (parentDir && parentDir !== ".") {
+			await fs.mkdir(parentDir, { recursive: true });
+		}
+		// Canonicalize the parent when the archive is not yet present. Existing
+		// archive symlinks resolve to their target, so every spelling locks the
+		// same resource before reading any members.
+		const finalPath = await fs.realpath(resolvedArchivePath.absolutePath).catch(async error => {
+			if (!isEnoent(error)) throw error;
+			return path.join(await fs.realpath(parentDir), path.basename(resolvedArchivePath.absolutePath));
+		});
 		// A realpath swap can land on a name without an archive extension; a
 		// whole-archive rewrite then defaults to an uncompressed tar.
 		const inferredFormat = archiveFormatFromPath(finalPath);
@@ -678,56 +704,70 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		if (!isWritableArchiveFormat(format)) {
 			throw new ToolError(`Writing entries inside ${format} archives is not supported (read-only format).`);
 		}
-		// Rewrites are whole-archive: write to a temp file and rename so a
-		// crash/disk-full mid-write can't destroy the original archive.
-		const tmpPath = `${finalPath}.tmp-${process.pid}`;
 
-		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
-		if (parentDir && parentDir !== ".") {
-			await fs.mkdir(parentDir, { recursive: true });
-		}
-
-		const entries = new Map<string, ArchiveMemberContent>();
-		if (resolvedArchivePath.exists) {
-			try {
-				const existing = await readArchiveEntries({ path: finalPath, format });
-				for (const [entryPath, data] of existing) {
-					entries.set(entryPath, data);
+		return withFileLock(
+			finalPath,
+			async () => {
+				signal?.throwIfAborted();
+				// A second writer may have created the archive while this one waited.
+				let exists = resolvedArchivePath.exists;
+				if (!exists) {
+					try {
+						await fs.stat(finalPath);
+						exists = true;
+					} catch (error) {
+						if (!isEnoent(error)) throw error;
+					}
 				}
-			} catch (error) {
-				throw new ToolError(error instanceof Error ? error.message : String(error));
-			}
-		}
-		const writeTarget = `${resolvedArchivePath.archivePath}:${resolvedArchivePath.archiveSubPath}`;
-		const sel = readSelectorForEmptyWrite(writeTarget, content);
-		if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
-			throwReadSelectorMisfire(writeTarget, sel);
-		}
-		const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
-		if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
-			const existingBytes =
-				existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
-			const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
-			assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined, content);
-		}
-		entries.set(resolvedArchivePath.archiveSubPath, content);
 
-		try {
-			await writeArchive(tmpPath, format, entries);
-			await fs.rename(tmpPath, finalPath);
-		} catch (error) {
-			await fs.rm(tmpPath, { force: true }).catch(() => {});
-			throw new ToolError(error instanceof Error ? error.message : String(error));
-		}
+				const entries = new Map<string, ArchiveMemberContent>();
+				if (exists) {
+					try {
+						const existing = await readArchiveEntries({ path: finalPath, format });
+						for (const [entryPath, data] of existing) {
+							entries.set(entryPath, data);
+						}
+					} catch (error) {
+						throw new ToolError(error instanceof Error ? error.message : String(error));
+					}
+				}
+				const writeTarget = `${resolvedArchivePath.archivePath}:${resolvedArchivePath.archiveSubPath}`;
+				const sel = readSelectorForEmptyWrite(writeTarget, content);
+				if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
+					throwReadSelectorMisfire(writeTarget, sel);
+				}
+				const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
+				if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
+					const existingBytes =
+						existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
+					const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
+					assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined, content);
+				}
+				entries.set(resolvedArchivePath.archiveSubPath, content);
 
-		invalidateFsScanAfterWrite(resolvedArchivePath.absolutePath);
-		const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
-			resolvedArchivePath.archiveSubPath
-		}`;
-		return {
-			content: [{ type: "text", text: `Successfully wrote ${contentBytes} bytes to ${outputPath}` }],
-			details: { resolvedPath: resolvedArchivePath.absolutePath },
-		};
+				// Publish atomically while holding the lock; a distinct temporary
+				// path also avoids collisions with stale files left by prior runs.
+				const tmpPath = `${finalPath}.tmp-${process.pid}-${Bun.randomUUIDv7()}`;
+				try {
+					await writeArchive(tmpPath, format, entries);
+					signal?.throwIfAborted();
+					await fs.rename(tmpPath, finalPath);
+				} catch (error) {
+					await fs.rm(tmpPath, { force: true }).catch(() => {});
+					throw new ToolError(error instanceof Error ? error.message : String(error));
+				}
+
+				invalidateFsScanAfterWrite(resolvedArchivePath.absolutePath);
+				const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
+					resolvedArchivePath.archiveSubPath
+				}`;
+				return {
+					content: [{ type: "text", text: `Successfully wrote ${contentBytes} bytes to ${outputPath}` }],
+					details: { resolvedPath: resolvedArchivePath.absolutePath },
+				};
+			},
+			{ signal },
+		);
 	}
 
 	async #resolveSqliteWritePath(writePath: string, signal?: AbortSignal): Promise<ResolvedSqliteWritePath | null> {
@@ -800,6 +840,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			db = new Database(resolvedSqlitePath.absolutePath, { create: false, strict: true });
 			db.run("PRAGMA busy_timeout = 3000");
+			// FK enforcement is per-connection and off by default; enable it so edits
+			// honor the schema's REFERENCES constraints and ON DELETE/UPDATE actions.
+			db.run("PRAGMA foreign_keys = ON");
 
 			const trimmedContent = content.trim();
 			let resultText: string;
@@ -911,14 +954,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// briefing names a file path. Without naming the channel that does work,
 			// the rejection reads as a dead end (#14308). Keyed on `yield` being
 			// active rather than on an `isReadOnlyAgent` flag, which never reaches
-			// this session: a caller without `yield` keeps today's message verbatim.
-			const yieldFallback =
-				this.session.isToolActive?.("yield") === true
-					? " To deliver results to the caller, return the content in `yield` instead."
-					: "";
+			// this session. When both the disk path and `yield` apply, the template
+			// names them as one route (return the path or the content through
+			// `yield`) instead of two competing deliverables.
 			throw new ToolError(
-				"This `write` tool is limited to the xd:// device transport and local:// session scratch: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices), or write a `local://<name>` file. Filesystem writes are not available elsewhere." +
-					yieldFallback,
+				prompt.render(writeDeviceOnlyRefusal, {
+					diskPath: localFileDiskPathHint(this.session),
+					canYield: this.session.isToolActive?.("yield") === true,
+				}),
 			);
 		}
 		return untilAborted(signal, async () => {
@@ -994,7 +1037,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, cleanBytes, content, resolvedArchivePath);
+				const archiveResult = await this.#writeArchiveEntry(
+					cleanContent,
+					cleanBytes,
+					content,
+					resolvedArchivePath,
+					signal,
+				);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
 						(block): block is { type: "text"; text: string } =>

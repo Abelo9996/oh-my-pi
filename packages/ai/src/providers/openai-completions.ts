@@ -89,6 +89,7 @@ import {
 } from "./openai-reasoning-fallback";
 import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
 import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
+import { getNativeFinishReasonError } from "./native-finish-reason";
 import {
 	applyChatCompletionsReasoningParams,
 	applyChatCompletionsToolStream,
@@ -143,6 +144,10 @@ type OpenAICompletionsChoiceUsage = ChatCompletionChunk.Choice & {
 
 type OpenAICompletionsRepetitionChoice = ChatCompletionChunk.Choice & {
 	stop_reason?: unknown;
+};
+
+type OpenAICompletionsNativeFinishChoice = ChatCompletionChunk.Choice & {
+	native_finish_reason?: unknown;
 };
 
 type OpenAICompletionsDeltaWithReasoningDetails = ChatCompletionChunk.Choice["delta"] & {
@@ -1333,6 +1338,7 @@ const streamOpenAICompletionsOnce = (
 			let awaitTrailingUsageDetails = false;
 			/** Server-declared repetition stop; classified after the finalization sweep. */
 			let repetitionStop: string | undefined;
+			let nativeFinishError: string | undefined;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(
 					rawUsage,
@@ -1429,7 +1435,16 @@ const streamOpenAICompletionsOnce = (
 				repetitionStop ??= detectRepetitionStop(choice);
 				if (repetitionStop) streamFinishedAt ??= Date.now();
 
-				if (choice.finish_reason) {
+				// Gateways may normalize an upstream failure to stop/tool_calls. Latch
+				// the explicit native failure so trailing finishes cannot revive it.
+				nativeFinishError ??= getNativeFinishReasonError(
+					(choice as OpenAICompletionsNativeFinishChoice).native_finish_reason,
+				);
+				if (nativeFinishError) {
+					output.stopReason = "error";
+					output.errorMessage = nativeFinishError;
+					streamFinishedAt ??= Date.now();
+				} else if (choice.finish_reason) {
 					const finishReasonResult = mapStopReason(choice.finish_reason);
 					output.stopReason = finishReasonResult.stopReason;
 					if (finishReasonResult.errorMessage) {
@@ -2319,10 +2334,13 @@ export function parseChunkUsage(
 function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: ChatCompletionMessageParam[]): void {
 	if (compat.cacheControlFormat !== "anthropic") return;
 	// Anthropic-style caching requires cache_control on a text part. Add a breakpoint
-	// on the last user/assistant message (walking backwards until we find text content).
+	// on the last message with text content so the cached prefix advances every
+	// request. Tool results count: during a tool loop the request tail is
+	// assistant(tool_calls) + tool, and anchoring on the turn's user message
+	// would re-send every in-turn tool result uncached.
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
-		if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "developer") continue;
+		if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "developer" && msg.role !== "tool") continue;
 
 		const content = msg.content;
 		if (typeof content === "string") {

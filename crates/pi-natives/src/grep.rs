@@ -445,14 +445,14 @@ impl<M: Matcher> Sink for StreamingCollector<'_, M> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn truncate_line(line: String, max_columns: Option<usize>) -> (String, bool) {
+fn truncate_line(line: Cow<'_, str>, max_columns: Option<usize>) -> (String, bool) {
 	match max_columns {
 		Some(max) if line.len() > max => {
 			let cut = max.saturating_sub(3);
 			let boundary = line.floor_char_boundary(cut);
 			(format!("{}...", &line[..boundary]), true)
 		},
-		_ => (line, false),
+		_ => (line.into_owned(), false),
 	}
 }
 
@@ -508,6 +508,7 @@ fn first_match_in_line<M: Matcher>(
 	matcher: &M,
 	mat: &SinkMatch<'_>,
 	line: &str,
+	lossy: bool,
 ) -> Option<(usize, usize)> {
 	let buffer = mat.buffer();
 	let range = mat.bytes_range_in_buffer();
@@ -540,7 +541,6 @@ fn first_match_in_line<M: Matcher>(
 	// decoding replaced invalid bytes, which changes the byte lengths before
 	// them. An offset in the trimmed trailing whitespace maps to the end of
 	// `line`, the last column it shows.
-	let lossy = std::str::from_utf8(block).is_err();
 	let to_line = |offset: usize| -> usize {
 		let offset = if lossy {
 			String::from_utf8_lossy(&block[..offset]).len()
@@ -552,10 +552,10 @@ fn first_match_in_line<M: Matcher>(
 	Some((to_line(start), to_line(stop)))
 }
 
-fn bytes_to_trimmed_string(bytes: &[u8]) -> String {
+fn bytes_to_trimmed_str(bytes: &[u8]) -> Cow<'_, str> {
 	match std::str::from_utf8(bytes) {
-		Ok(text) => text.trim_end().to_string(),
-		Err(_) => String::from_utf8_lossy(bytes).trim_end().to_string(),
+		Ok(text) => Cow::Borrowed(text.trim_end()),
+		Err(_) => Cow::Owned(String::from_utf8_lossy(bytes).trim_end().to_owned()),
 	}
 }
 
@@ -584,14 +584,20 @@ impl<M: Matcher> Sink for MatchCollector<'_, M> {
 		}
 
 		if self.collect_matches {
-			let raw_line = bytes_to_trimmed_string(mat.bytes());
+			let raw_line = bytes_to_trimmed_str(mat.bytes());
 			let (line, truncated, column) = match self.max_columns {
 				Some(max) if raw_line.len() > max => {
-					let first_match = first_match_in_line(searcher, self.matcher, mat, &raw_line);
+					let first_match = first_match_in_line(
+						searcher,
+						self.matcher,
+						mat,
+						&raw_line,
+						matches!(raw_line, Cow::Owned(_)),
+					);
 					let (line, column) = window_matched_line(&raw_line, max, first_match);
 					(line, true, column)
 				},
-				_ => (raw_line, false, None),
+				_ => (raw_line.into_owned(), false, None),
 			};
 			let line_number = mat.line_number().unwrap_or(0);
 
@@ -627,7 +633,7 @@ impl<M: Matcher> Sink for MatchCollector<'_, M> {
 			return Ok(true);
 		}
 
-		let raw_line = bytes_to_trimmed_string(ctx.bytes());
+		let raw_line = bytes_to_trimmed_str(ctx.bytes());
 		let (line, _) = truncate_line(raw_line, self.max_columns);
 		let line_number = ctx.line_number().unwrap_or(0);
 

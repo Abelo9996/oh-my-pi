@@ -3334,6 +3334,13 @@
 				"updatedAt": {
 					"type": "integer"
 				},
+				"images": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ImageContent"
+					},
+					"description": "Images attached to the question."
+				},
 				"error": {
 					"type": "string"
 				}
@@ -3377,6 +3384,13 @@
 							"type": "null"
 						}
 					]
+				},
+				"images": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ImageContent"
+					},
+					"description": "Images attached to the question."
 				},
 				"error": {
 					"type": "string"

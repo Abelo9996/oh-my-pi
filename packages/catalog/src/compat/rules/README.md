@@ -223,7 +223,7 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `long-context-window-uncapped #true` keeps a model's `long-context-cost` tier from capping its runtime context window while extended context is off: the coding agent normally lowers the window to the tier's input threshold so compaction fires before a request crosses into premium pricing. Use it where the tier is an API-equivalent estimate on a subscription host (`xai-oauth`) or where the model is served at its full window regardless (GPT-5.4, except on GitHub Copilot). `buildModel` materializes it as `Model.longContextWindowUncapped`; explicit user context overrides still apply.
 
-`max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it). Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
+`max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it); the ceiling also lowers discovered Antigravity per-SKU `maxOutputTokens` (`antigravityWireProfiles`, row and per-account), which the transport sends verbatim. Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
 
 `inline-image-byte-budget` caps retained base64 image characters for a deployment's request body. It leaves room for tool schemas and text beneath the provider's body-size limit; the coding agent reads it through `resolveInlineImageByteBudget` before sending live history, and snapcompact gives its archive frames half of it (`frameDataBytesBudget`). The budget applies only while the request reaches the host the rules describe (the Anthropic API, first-party OpenAI, the Codex backend at its default URL, DeepSeek's API, or Factory Droid's own global or EU API host), which callers decide with pi-ai's `reachesBudgetedHost`: `compat.officialEndpoint` for the configured `baseUrl`, for first-party Anthropic models also the `ANTHROPIC_BASE_URL` or Foundry `FOUNDRY_BASE_URL` reroute applied at request time, and for Factory Droid models the `baseUrl` origin. A custom or rerouted endpoint imposes its own body limit.
 
@@ -327,6 +327,7 @@ behavior {
         exclude-substring "embedding"
     }
     model-operations provider="openai" { exact "o3"; prefix "gpt-"; operation "generate_image" }
+    append-only-context-providers "deepseek" "ollama" "google-antigravity" "google" "google-vertex"
     cursor-effort family-marker="gpt-" { tier "minimal" "low" "medium" "high" "xhigh" "max" }
     cursor-model-parameter model="composer-2.5" id="fast" value="false"
     quota-tiers provider="openai-codex" {
@@ -354,6 +355,8 @@ behavior {
 ```
 
 `exclude-discovery-modes` takes one or more exact, case-sensitive upstream mode strings plus `provider=`; discovery mappers preserve missing, malformed, and unknown modes unless the provider policy explicitly lists them. Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
+
+`append-only-context-providers` names hosts whose prefix caches benefit from append-only message history. The coding agent uses this list for `provider.appendOnlyContext: auto`; user `on`/`off` always takes precedence, and URL/explicit stored-request signals remain separate.
 
 `role-defaults "<role>"` declares one agent role's built-in default model selector chain, one `model "<selector>"` child per entry, most preferred first. Selectors are copied verbatim (`provider/id`, bare ids, fuzzy fragments such as `-mini`, and `@role` references); duplicates within a role and repeated roles are compile errors. `roleDefaultModels()` returns every chain keyed by role in declaration order.
 

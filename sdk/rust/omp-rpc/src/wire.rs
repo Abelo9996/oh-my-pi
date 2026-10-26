@@ -3432,6 +3432,9 @@ pub struct BtwHistoryTurn {
 	pub created_at: i64,
 	#[serde(rename = "updatedAt")]
 	pub updated_at: i64,
+	/// Images attached to the question.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub images: Option<Vec<ImageContent>>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 }
@@ -3449,6 +3452,9 @@ pub struct BtwHistoryRecord {
 	pub id: String,
 	#[serde(rename = "leafId", deserialize_with = "Deserialize::deserialize")]
 	pub leaf_id: Option<String>,
+	/// Images attached to the question.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub images: Option<Vec<ImageContent>>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 	#[serde(rename = "followUps", default, skip_serializing_if = "Option::is_none")]

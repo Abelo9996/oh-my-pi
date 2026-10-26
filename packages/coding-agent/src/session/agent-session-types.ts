@@ -343,6 +343,8 @@ export interface AgentSessionConfig {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/** Installs a host-owned MCP instructions source; see {@link AgentSession.setMcpServerInstructionsSource}. */
+	setMcpServerInstructionsSource?: (source: (() => Map<string, string> | undefined) | undefined) => void;
 	/** Time-traveling stream-rule manager. */
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */
@@ -606,6 +608,8 @@ export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
 /** Options for the same ephemeral side turn used by /btw. */
 export interface EphemeralTurnOptions {
 	promptText: string;
+	/** Images sent with `promptText`, normalized for the model like a prompt's attachments. */
+	promptImages?: ImageContent[];
 	/** Detached prior side-turn messages to prepend to this request. They are copied and never appended to the session history. */
 	history?: readonly Message[];
 	/** Opaque provider-lineage key for a series of related side turns. Rotate it after cancellation or failure before retrying. */

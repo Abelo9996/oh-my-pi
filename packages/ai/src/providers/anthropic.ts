@@ -1427,26 +1427,62 @@ const ANTHROPIC_PING_EVENT: RawMessagePingEvent = { type: "ping" };
 /**
  * In-stream `error` SSE frames carry an Anthropic error envelope:
  * `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`.
- * Surface the structured type + message instead of the raw JSON blob; the
- * error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
+ * Surface the structured type, code and message instead of the raw JSON blob;
+ * the error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
  * the message so `isProviderRetryableError`'s classification keys off the
  * structured type rather than incidental JSON substrings.
+ *
+ * `midMessage` marks a frame that lands inside an open message envelope — after
+ * `message_start`, before the terminal frame (`message_stop`, or a
+ * `message_delta` carrying `stop_reason`). Such a frame ends a message the wire
+ * can never complete, exactly as a connection dropped before `message_stop`
+ * does, so it is reported as a stream-envelope truncation
+ * ({@link AIError.AnthropicStreamEnvelopeError}) rather than as a completed-turn
+ * provider rejection: the envelope wording makes the turn retryable before
+ * replay-unsafe content streams and lets turn recovery continue a turn whose
+ * text is already committed instead of ending it. The provider's `type` and
+ * `code` stay in the diagnostic as `type=`/`code=` tokens, the same shape the
+ * Codex native-lane steer rejection uses, so a gateway-cut stream is
+ * identifiable after the `Error` instance is gone.
+ *
+ * Only frame types the provider loop already retries take the truncation path.
+ * A deterministic rejection (`invalid_request_error`, `authentication_error`,
+ * `billing_error`, `permission_error`, an account cap) is a decision the
+ * provider made about the request, not a cut wire: rewriting it as a truncation
+ * would replay a request that can never succeed and, once text is committed,
+ * continue a turn the provider refused. The gate is
+ * {@link AIError.isProviderRetryableError} on the very error that is otherwise
+ * thrown, so a frame keeps exactly the verdict it had before this classification
+ * existed — the retry decision moves nowhere, only the shape of a retryable
+ * failure changes.
  */
-function createAnthropicSseStreamError(data: string): Error {
+function createAnthropicSseStreamError(data: string, midMessage: boolean): Error {
+	let parsed: { error?: { type?: unknown; code?: unknown; message?: unknown } } | undefined;
 	try {
-		const parsed = JSON.parse(data) as { error?: { type?: unknown; message?: unknown } };
-		const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
-		const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
-		if (message) {
-			return new AIError.ProviderResponseError(
-				errorType ? `Anthropic stream error (${errorType}): ${message}` : `Anthropic stream error: ${message}`,
-				{ provider: "anthropic", kind: "output" },
-			);
-		}
+		parsed = JSON.parse(data) as { error?: { type?: unknown; code?: unknown; message?: unknown } };
 	} catch {
-		// Not a JSON envelope; fall through to the raw payload.
+		// Not a JSON envelope; the raw payload is the diagnostic.
 	}
-	return new AIError.ProviderResponseError(data, { provider: "anthropic", kind: "output" });
+	const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
+	const errorCode = typeof parsed?.error?.code === "string" ? parsed.error.code : undefined;
+	const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
+	const rejection = new AIError.ProviderResponseError(
+		message
+			? errorType
+				? `Anthropic stream error (${errorType}): ${message}`
+				: `Anthropic stream error: ${message}`
+			: data,
+		{ provider: "anthropic", kind: "output" },
+	);
+	if (!midMessage || !AIError.isProviderRetryableError(rejection)) {
+		return rejection;
+	}
+	const fields = [errorType ? `type=${errorType}` : undefined, errorCode ? `code=${errorCode}` : undefined]
+		.filter(field => field !== undefined)
+		.join(" ");
+	return new AIError.AnthropicStreamEnvelopeError(
+		`error frame received before message_stop${fields ? ` (${fields})` : ""}: ${message ?? data}`,
+	);
 }
 
 async function* iterateAnthropicEvents(
@@ -1460,13 +1496,21 @@ async function* iterateAnthropicEvents(
 
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
+	// A `message_delta` carrying `stop_reason` is the consumer's terminal stop
+	// signal: generation finished there, and a non-conforming gateway only omits
+	// the trailing `message_stop`. A later `error` frame is a completed-turn
+	// report, not a truncation, so the envelope has to count as closed here too.
+	let sawTerminalDelta = false;
 
 	// Capture `raw` only when the diagnostic observer exists; otherwise the
 	// per-frame wire-line array is pure token-path garbage.
 	for await (const sse of readSseEvents(response.body, signal, onSseEvent ? { captureRaw: true } : undefined)) {
 		notifyRawSseEvent(onSseEvent, sse);
+		// A frame inside an open message envelope ends a message the wire can never
+		// complete: classify it as the truncation family so the failure is
+		// retryable/continuable instead of a completed-turn provider rejection.
 		if (sse.event === "error") {
-			throw createAnthropicSseStreamError(sse.data);
+			throw createAnthropicSseStreamError(sse.data, sawMessageStart && !sawMessageEnd && !sawTerminalDelta);
 		}
 
 		if (sse.event === "ping") {
@@ -1488,6 +1532,8 @@ async function* iterateAnthropicEvents(
 				sawMessageStart = true;
 			} else if (event.type === "message_stop") {
 				sawMessageEnd = true;
+			} else if (event.type === "message_delta" && event.delta?.stop_reason) {
+				sawTerminalDelta = true;
 			}
 			yield event;
 		} catch (error) {
@@ -2512,21 +2558,6 @@ const streamAnthropicOnce = (
 						if (!extraBetas.includes(beta)) extraBetas.push(beta);
 					}
 				}
-				// `context_management.clear_thinking_20251015` requires this beta. OAuth
-				// requests carry it in `claudeCodeAgentBetaDefaults`; API-key requests
-				// need it added explicitly so the field is honored instead of rejected
-				// (#3288). Provider deployment contracts that cannot deliver or accept
-				// context management disable it through model compatibility policy.
-				if (
-					model.reasoning &&
-					options?.thinkingEnabled &&
-					model.compat.supportsContextManagement !== false &&
-					!(compactionSupported && options?.anthropicCompaction) &&
-					!isVertexRawPredictUrl(baseUrl) &&
-					!extraBetas.includes(contextManagementBeta)
-				) {
-					extraBetas.push(contextManagementBeta);
-				}
 				// Vertex rawPredict takes betas in the body; other routes use the
 				// header. Legacy encrypted replay keeps its original beta.
 				if (compactionSupported && !isVertexRawPredictUrl(baseUrl)) {
@@ -3021,6 +3052,27 @@ const streamAnthropicOnce = (
 								? perRequestHeaders
 								: (clientDefaultHeaders ?? {}),
 							THINKING_BINDING_CONTROLS_BETA,
+						),
+					};
+				}
+				// `context_management.clear_thinking_20251015` requires its beta, so the
+				// beta rides exactly with the finalized body's edit (#3288). The edit
+				// follows the built `thinking`, which a thinking-off request still sends
+				// as adaptive when prefix binding re-adds it; `thinkingEnabled` is no
+				// proxy for it. OAuth defaults already carry the beta; the merge dedupes.
+				if (
+					!usingFallbackCredit &&
+					options?.client === undefined &&
+					!isVertexRawPredictUrl(baseUrl) &&
+					params.context_management?.edits.some(edit => edit.type === "clear_thinking_20251015")
+				) {
+					perRequestHeaders = {
+						...perRequestHeaders,
+						...mergeAnthropicBetaHeader(
+							perRequestHeaders?.["anthropic-beta"] !== undefined
+								? perRequestHeaders
+								: (clientDefaultHeaders ?? {}),
+							contextManagementBeta,
 						),
 					};
 				}
@@ -5705,11 +5757,13 @@ function buildParams(
 			replayCompaction: compactionSupported,
 			replayLegacyCompaction: compactionReplay?.legacy,
 			dropAllThinking: dropAllThinking || stripThinkingHistory,
+			thinkingEnabled: thinking?.type === "adaptive" || thinking?.type === "enabled",
 			droppedThinkingBlocks,
 			credentialId: options?.credentialId,
 			compactionRequest,
 		},
 	);
+
 	// Anchor the stable tools+system head so it stays cached across turns; the
 	// moving message tail is anchored separately in applyPromptCaching below.
 	applyHeadCaching(systemBlocks, tools, cacheControl);
@@ -6043,6 +6097,10 @@ function collapseFallbackSegments(content: AssistantMessage["content"]): Assista
  * before the compaction block, so the assistant turn carrying it may open
  * the conversation; the request must send the compaction beta (the stream
  * entry point adds it whenever such a payload is present).
+ *
+ * `opts.thinkingEnabled` — the CURRENT request enables thinking. Combined with
+ * `model.compat.requiresThinkingPresence` this pads assistant turns that carry
+ * no thinking block at all (see the guard below).
  */
 export function convertAnthropicMessages(
 	messages: Message[],
@@ -6053,6 +6111,7 @@ export function convertAnthropicMessages(
 		replayCompaction?: boolean;
 		replayLegacyCompaction?: boolean;
 		dropAllThinking?: boolean;
+		thinkingEnabled?: boolean;
 		droppedThinkingBlocks?: ReadonlySet<string>;
 		credentialId?: number;
 		/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
@@ -6115,6 +6174,30 @@ export function convertAnthropicMessages(
 	// follows, the failed one is history and gets the omission note, so the
 	// session never stays stuck. A compaction request only summarizes, so it
 	// never fails on an attachment.
+	// Strict thinking-replay validators (DeepSeek's Anthropic endpoint) validate
+	// only the current turn: every assistant message that follows the last
+	// text-bearing `user` message must carry a `thinking` block, while turns
+	// before it are exempt. Proven against the live endpoint — appending one user
+	// prompt moves the window past a thinking-less turn (accepted), while a
+	// thinking-less assistant after that boundary re-triggers the 400. Skip the
+	// scan entirely for every other request: no compat member reads the result.
+	const padsThinkingWindow =
+		opts?.thinkingEnabled === true && !opts.dropAllThinking && model.compat.requiresThinkingPresence === true;
+	let thinkingWindowStart = -1;
+	if (padsThinkingWindow) {
+		for (let index = transformedMessages.length - 1; index >= 0; index--) {
+			const message = transformedMessages[index];
+			if (message.role !== "user" && message.role !== "developer") continue;
+			const content = message.content;
+			const hasText =
+				typeof content === "string"
+					? content.trim().length > 0
+					: content.some(block => block.type === "text" && block.text.trim().length > 0);
+			if (!hasText) continue;
+			thinkingWindowStart = index;
+			break;
+		}
+	}
 	let unansweredUserIndex = -1;
 	if (!opts?.compactionRequest) {
 		for (let index = transformedMessages.length - 1; index >= 0; index--) {
@@ -6377,6 +6460,25 @@ export function convertAnthropicMessages(
 				blocks.push(...nonToolUse, ...toolUse);
 			}
 			if (blocks.length === 0) continue;
+			// Strict replay validators (DeepSeek's Anthropic endpoint) reject a
+			// thinking-mode request when an assistant turn inside the current turn
+			// carries no `thinking` block — "The `content[].thinking` in the
+			// thinking mode must be passed back to the API." A gateway model group
+			// that can fail over to such an endpoint inherits the stricter
+			// contract, so a turn another upstream produced without reasoning still
+			// needs the block. Presence is the only requirement there, but the text
+			// must be non-blank: the litellm Anthropic adapter drops blank thinking
+			// blocks while normalizing the body, which turns the pad back into a
+			// missing block (verified 400). Turns before the last user prompt are
+			// exempt (verified 200).
+			// Only a `thinking` block satisfies the strict contract: a turn carrying
+			// just `redacted_thinking` still serializes without one. (DeepSeek's
+			// endpoint rejects `redacted_thinking` outright — "unknown variant" — so
+			// that shape fails for a different reason, but the presence rule stays
+			// literal.)
+			if (padsThinkingWindow && i > thinkingWindowStart && !blocks.some(block => block.type === "thinking")) {
+				blocks.unshift({ type: "thinking", thinking: "(no reasoning was returned for this turn)", signature: "" });
+			}
 			const assistantParam: AnthropicMessageParam = {
 				role: "assistant",
 				content: blocks,

@@ -167,7 +167,14 @@ import { createExtensionModelQuery } from "../extensibility/extensions/model-api
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
-import type { Skill, SkillWarning } from "../extensibility/skills";
+import {
+	type BuiltSkillPromptMessage,
+	loadSkillPromptBody,
+	renderSkillPromptMessage,
+	type Skill,
+	type SkillPromptInput,
+	type SkillWarning,
+} from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
@@ -1060,6 +1067,7 @@ export class AgentSession implements SettingsScope {
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
+	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
 	#skillDescriptions: SkillDescriptionCatalog;
 	#promptSkillsSource: readonly Skill[] | undefined;
 	#promptSkills: readonly Skill[] = [];
@@ -1995,6 +2003,7 @@ export class AgentSession implements SettingsScope {
 		}
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
+		this.#setMcpServerInstructionsSource = config.setMcpServerInstructionsSource;
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
 			agent: this.agent,
@@ -2170,11 +2179,22 @@ export class AgentSession implements SettingsScope {
 					this.#foldStrandedIrcAsidesIntoContext(messages);
 					return;
 				}
+				const observation =
+					this.#ircWakeTurnObserver && !this.#openTurnObservation
+						? this.#startTurnObservation(messages)
+						: undefined;
+				let turnError: unknown;
 				const inFlightEpoch = this.#beginInFlight();
 				try {
 					await this.agent.prompt(messages.length === 1 ? first : messages);
+				} catch (error) {
+					turnError = error;
+					throw error;
 				} finally {
 					this.#endInFlight(inFlightEpoch);
+					// The delivery receipt settles when injectIdle returns; waiting for
+					// owned deliveries here would wait on this very flush.
+					void this.#finishTurnObservation(observation, turnError);
 				}
 			},
 			scheduleIdleFlush: run => {
@@ -5086,6 +5106,7 @@ export class AgentSession implements SettingsScope {
 		signal: AbortSignal,
 		request: ScheduledAgentContinueRequest,
 		coalescedSources: Set<string>,
+		onStart?: () => void,
 	): Promise<AgentContinueOutcome> {
 		try {
 			// During an automatic-retry saga the primary model's selector cooldown
@@ -5120,6 +5141,7 @@ export class AgentSession implements SettingsScope {
 			}
 			for (;;) {
 				try {
+					if (!this.agent.state.isStreaming) onStart?.();
 					await this.agent.continue(signal);
 					return { status: "completed" };
 				} catch (error) {
@@ -5228,7 +5250,13 @@ export class AgentSession implements SettingsScope {
 
 				const inFlightEpoch = this.#beginInFlight();
 				const coalescedSources = new Set([options.source]);
-				const promise = this.#runAgentContinue(signal, request, coalescedSources);
+				let observation: TurnObservation | undefined;
+				const onStart = this.#ircWakeTurnObserver
+					? () => {
+							observation = this.#startTurnObservation([]);
+						}
+					: undefined;
+				const promise = this.#runAgentContinue(signal, request, coalescedSources, onStart);
 				const attempt: ActiveAgentContinue = {
 					schedulerToken: request.schedulerToken,
 					turnEnded: false,
@@ -5237,8 +5265,10 @@ export class AgentSession implements SettingsScope {
 					promise,
 				};
 				this.#activeAgentContinue = attempt;
+				let outcome: AgentContinueOutcome | undefined;
 				try {
-					this.#handleAgentContinueOutcome(await promise, request);
+					outcome = await promise;
+					this.#handleAgentContinueOutcome(outcome, request);
 				} finally {
 					// Clear the active attempt BEFORE #endInFlight(): the settle drain it
 					// triggers (#drainStrandedQueuedMessages -> queued-message-drain) runs
@@ -5249,6 +5279,7 @@ export class AgentSession implements SettingsScope {
 					}
 					this.#usagePreflightReadyForNextModelCall = false;
 					this.#endInFlight(inFlightEpoch);
+					void this.#finishTurnObservation(observation, outcome?.status === "failed" ? outcome.error : undefined);
 				}
 			},
 			{
@@ -6981,6 +7012,16 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.refreshMCPTools(mcpTools);
 	}
 
+	/**
+	 * Feeds instructions from MCP servers the host connects outside the session's
+	 * own manager (ACP `session/new.mcpServers`) into the "## MCP Server
+	 * Instructions" prompt section. Takes effect on the next prompt rebuild, which
+	 * {@link refreshMCPTools} triggers when the instructions changed.
+	 */
+	setMcpServerInstructionsSource(source: (() => Map<string, string> | undefined) | undefined): void {
+		this.#setMcpServerInstructionsSource?.(source);
+	}
+
 	/** Makes turns wait, bounded, for in-flight MCP discovery before building their system prompt. */
 	setPendingMCPDiscovery(discovery: Promise<void>): void {
 		const settled = () => {
@@ -7758,13 +7799,20 @@ export class AgentSession implements SettingsScope {
 	 * let abort() cancel it. Either way the image stays saved and the notice says the
 	 * description is unavailable.
 	 */
-	async #buildImageDescriptionNotice(normalizedImages: ImageContent[]): Promise<CustomMessage | undefined> {
+	async #buildImageDescriptionNotice(
+		normalizedImages: ImageContent[],
+		signal?: AbortSignal,
+	): Promise<CustomMessage | undefined> {
 		const controller = new AbortController();
 		this.#imageDescriptionAbortControllers.add(controller);
 		try {
 			return await this.#providerBoundary.buildImageDescriptionNotice(
 				normalizedImages,
-				AbortSignal.any([controller.signal, AbortSignal.timeout(IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS)]),
+				AbortSignal.any([
+					controller.signal,
+					AbortSignal.timeout(IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS),
+					...(signal ? [signal] : []),
+				]),
 			);
 		} finally {
 			this.#imageDescriptionAbortControllers.delete(controller);
@@ -8597,6 +8645,13 @@ export class AgentSession implements SettingsScope {
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
+					// `@image.png` mentions are attachments too: a text-only model gets the
+					// same vision-description companion as `options.images`.
+					const mentionImages = fileMentionMessage.files.flatMap(file => (file.image ? [file.image] : []));
+					const descriptionNotice = mentionImages.length
+						? await this.#buildImageDescriptionNotice(mentionImages)
+						: undefined;
+					if (descriptionNotice) messages.push(descriptionNotice);
 				}
 			}
 
@@ -10196,6 +10251,25 @@ export class AgentSession implements SettingsScope {
 	/** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
 	get skills(): readonly Skill[] {
 		return this.#tools.skills;
+	}
+
+	/** Load a user-invoked skill and authorize model tags in its arguments. */
+	async buildUserSkillPrompt(
+		skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+		input: SkillPromptInput,
+	): Promise<BuiltSkillPromptMessage> {
+		return this.renderUserSkillPrompt(skill, input, await loadSkillPromptBody(skill));
+	}
+
+	/** Render an already-loaded skill only after the invoking submission is still current. */
+	renderUserSkillPrompt(
+		skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+		input: SkillPromptInput,
+		body: string,
+	): BuiltSkillPromptMessage {
+		return renderSkillPromptMessage(skill, input, body, "user", {
+			expandUserArgs: args => this.#modelMentions.expandMentions(args),
+		});
 	}
 
 	/** Descriptions frozen when this session's system prompt was built. */
@@ -12130,8 +12204,8 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Installs task-executor monitoring around turns no executor drives: autonomous IRC
-	 * wake turns and user prompts (focused-session steering of a kept-alive subagent).
+	 * Installs task-executor monitoring around kept-alive subagent turns that
+	 * have no executor caller: IRC wakes, focused prompts and bare continuations.
 	 */
 	setIrcWakeTurnObserver(
 		observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
@@ -12235,9 +12309,16 @@ export class AgentSession implements SettingsScope {
 				`Model ${modelDescription} does not support tools: false for ephemeral turns because its transport requires native tools.`,
 			);
 		}
+		// Images, those of earlier side turns too, get a prompt's handling: normalized
+		// for the model, and described by a vision model for a text-only one.
+		const promptImages = await this.#normalizeImagesForModel(args.promptImages);
+		const imageDescriptionNotice = promptImages?.length
+			? await this.#buildImageDescriptionNotice(promptImages, args.signal)
+			: undefined;
+		const history = args.history && (await this.#prepareSideHistory(args.history, args.signal));
 		assertEphemeralTurnReady();
 		const cacheSessionId = this.sessionId;
-		const snapshot = this.#buildEphemeralSnapshot(args.promptText, args.history);
+		const snapshot = this.#buildEphemeralSnapshot(args.promptText, history, promptImages, imageDescriptionNotice);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		assertEphemeralTurnReady();
 		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
@@ -12374,13 +12455,33 @@ export class AgentSession implements SettingsScope {
 		};
 	}
 
+	async #prepareSideHistory(history: readonly Message[], signal?: AbortSignal): Promise<AgentMessage[]> {
+		const prepared: AgentMessage[] = [];
+		for (const message of history) {
+			const normalized = await this.#normalizeAgentMessageImages(message);
+			const images =
+				normalized.role === "user" && Array.isArray(normalized.content)
+					? normalized.content.filter((part): part is ImageContent => part.type === "image")
+					: [];
+			const notice = images.length > 0 ? await this.#buildImageDescriptionNotice(images, signal) : undefined;
+			if (notice) prepared.push(notice);
+			prepared.push(normalized);
+		}
+		return prepared;
+	}
+
 	/**
 	 * Build a message snapshot for an ephemeral side-channel turn.  Includes
 	 * the in-flight streaming assistant message (if any) so the model sees
 	 * the partial response in context, then appends detached side-channel history
 	 * and the current prompt after the no-tools reminder.
 	 */
-	#buildEphemeralSnapshot(promptText: string, history?: readonly Message[]): AgentMessage[] {
+	#buildEphemeralSnapshot(
+		promptText: string,
+		history?: readonly AgentMessage[],
+		images?: ImageContent[],
+		imageDescriptionNotice?: CustomMessage,
+	): AgentMessage[] {
 		const messages = [...this.messages];
 		const streaming = this.agent.state.streamMessage;
 		if (streaming && streaming.role === "assistant" && Array.isArray(streaming.content)) {
@@ -12421,9 +12522,10 @@ export class AgentSession implements SettingsScope {
 			// Detach before the conversion pipeline can await or mutate caller-owned messages.
 			messages.push(...structuredClone(history));
 		}
+		if (imageDescriptionNotice) messages.push(imageDescriptionNotice);
 		messages.push({
 			role: "user",
-			content: [{ type: "text", text: promptText }],
+			content: [{ type: "text", text: promptText }, ...(images ?? [])],
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
@@ -13053,6 +13155,7 @@ export class AgentSession implements SettingsScope {
 		assistantMessage: AssistantMessage,
 		leafId: string,
 		sessionId: string,
+		images?: ImageContent[],
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
@@ -13081,6 +13184,12 @@ export class AgentSession implements SettingsScope {
 		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
 		}
+
+		// The promoted question gets a prompt's image handling, description included.
+		const promotedImages = await this.#normalizeImagesForModel(images);
+		const imageDescriptionNotice = promotedImages?.length
+			? await this.#buildImageDescriptionNotice(promotedImages)
+			: undefined;
 
 		await withTimeout(
 			this.#cancelPostPromptTasks(),
@@ -13125,9 +13234,10 @@ export class AgentSession implements SettingsScope {
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
+			if (imageDescriptionNotice) this.sessionManager.appendMessage(imageDescriptionNotice);
 			this.sessionManager.appendMessage({
 				role: "user",
-				content: [{ type: "text", text: question }],
+				content: [{ type: "text", text: question }, ...(promotedImages ?? [])],
 				attribution: "user",
 				timestamp: Date.now(),
 			});

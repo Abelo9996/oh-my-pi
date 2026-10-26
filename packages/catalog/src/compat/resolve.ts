@@ -925,6 +925,7 @@ function resolveAnthropicPolicy(
 		supportsSamplingParams: true,
 		requiresToolResultId: false,
 		requiresThinkingEnabled,
+		requiresThinkingPresence: false,
 		replayUnsignedThinking:
 			!signingEndpoint && (compatReasoning(spec, axes) || modelMatchesHost(spec, "deepseekFamily")),
 		escapeBuiltinToolNames: false,

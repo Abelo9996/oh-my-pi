@@ -6,10 +6,23 @@
 
 - A failed `EditStore.apply` outcome carries `errorKind`, a stable class of the refusal (`unseen_lines`, `stale_tag`, `parse`, …), and `editErrorKinds()` lists every class ([#16608](https://github.com/can1357/oh-my-pi/pull/16608) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `exclude` to `grep()` options: glob patterns of files and folders to leave out of a directory search; a matched folder is not walked ([#16920](https://github.com/can1357/oh-my-pi/pull/16920) by [@will-bogusz](https://github.com/will-bogusz))
+### Changed
+
+- Faster native grep on minified and long lines ([#17016](https://github.com/can1357/oh-my-pi/pull/17016) by [@GTanger](https://github.com/GTanger))
+- Faster native ANSI text wrapping on long lines with many words ([#16927](https://github.com/can1357/oh-my-pi/pull/16927) by [@GTanger](https://github.com/GTanger))
+- Faster native memory reranking when selecting many results ([#16921](https://github.com/can1357/oh-my-pi/pull/16921) by [@GTanger](https://github.com/GTanger))
+- Faster structural code summaries on large files ([#16993](https://github.com/can1357/oh-my-pi/pull/16993) by [@GTanger](https://github.com/GTanger))
+- Faster native edit diff formatting and fuzzy line matching on large files ([#16926](https://github.com/can1357/oh-my-pi/pull/16926) by [@GTanger](https://github.com/GTanger))
+- Reduced native word-diff allocation overhead when joining tokens and deduplicating boundary whitespace ([#16922](https://github.com/can1357/oh-my-pi/pull/16922) by [@GTanger](https://github.com/GTanger))
 
 ### Fixed
 
 - Fixed macOS `ax()` and `find()` leaving a text field with no label of its own, such as Reminders' Add Date and Add Location fields, unnamed; such a field is now named by its placeholder ([#16915](https://github.com/can1357/oh-my-pi/pull/16915) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed minimized `ruff check --output-format full` output counting code-frame lines with function calls, such as `14 | assert skill.read() == …`, as diagnostics and files, which inflated the `N diagnostics in M files` summary ([#16837](https://github.com/can1357/oh-my-pi/issues/16837))
+- Fixed omp crashing with a stack overflow when an edit's path did not resolve to an existing file and the workspace search for it reached a deeply nested directory tree; directory walks no longer use a stack frame per nesting level ([#16857](https://github.com/can1357/oh-my-pi/issues/16857))
+- Fixed the built-in `ps` crashing the shell on a non-ASCII character in an option cluster such as `ps -é`; it now reports `unsupported option '-é'` like any other unknown option ([#17019](https://github.com/can1357/oh-my-pi/pull/17019) by [@sjawhar](https://github.com/sjawhar))
+- Fixed macOS `ax()` and `find()` leaving a text field with no label of its own, such as Reminders' Add Date and Add Location fields, unnamed; such a field is now named by its placeholder ([#16915](https://github.com/can1357/oh-my-pi/pull/16915) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed computer use on macOS being unable to finish renaming a file in Finder: keys, `el.type` and `el.press` sent to the rename field were refused, and so were clicks in its window while Finder was your frontmost app ([#16910](https://github.com/can1357/oh-my-pi/pull/16910) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a UTF-8 char-boundary panic when parsing `stateDiagram-v2` lines where `>` follows a multibyte character ([#16749](https://github.com/can1357/oh-my-pi/pull/16749) by [@berney](https://github.com/berney))
 - Fixed the bash tool's `rg` and `fd` on macOS and Linux finding nothing under a path that is a symlink to a directory, such as `/tmp` or `/etc` on macOS or a symlinked skill folder; like ripgrep and fd, they now search the folder the link points to ([#16598](https://github.com/can1357/oh-my-pi/pull/16598) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed minimized `git diff`, `git show` and `diff -u` output dropping a hunk's changes and listing a made-up file when a changed line starts with `-- ` or `++ ` (SQL comments, Markdown `---` rules) ([#16588](https://github.com/can1357/oh-my-pi/pull/16588) by [@will-bogusz](https://github.com/will-bogusz))
@@ -26,6 +39,13 @@
 ### Added
 
 - On macOS, `openApplication` also opens a file, folder or URL in its default application or `ApplicationOpenOptions.app`, and `reveal` shows a file or folder selected in Finder; other platforms return `Unsupported` for a URL, `app` or `reveal` ([#16403](https://github.com/can1357/oh-my-pi/pull/16403) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a rerouted parallel Mermaid flowchart edge running over other edges, ports and labels at the same two nodes; the route no longer depends on declaration order, and it can pass outside the first row or column of nodes to reach a free port ([#16773](https://github.com/can1357/oh-my-pi/issues/16773), [#16774](https://github.com/can1357/oh-my-pi/pull/16774) by [@berney](https://github.com/berney))
+- Fixed the built-in `ps` reporting an unsupported long option such as `--forest` as `unsupported option '--'`; it now names the option, and every unsupported-option error says that a system `ps`, if installed, may support more options when run by its full path ([#17018](https://github.com/can1357/oh-my-pi/pull/17018) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `kill %N` on a backgrounded compound command (such as `(while :; do :; done) &`) in a persistent shell session: the job was reported done but the in-process loop kept spinning until the process exited; it now stops at the next interpreter check ([#16937](https://github.com/can1357/oh-my-pi/pull/16937) by [@holny](https://github.com/holny))
+- Fixed `sort -t=` (and clusters such as `-nrt=`) failing with "separator must be exactly one character long"; an attached `=` now selects `=` as the field separator, as in GNU sort, and `-t=X` such as `-t==` is rejected as two characters ([#17017](https://github.com/can1357/oh-my-pi/pull/17017) by [@sjawhar](https://github.com/sjawhar))
+- Fixed macOS `press()` on a control with no press action, such as a button on a Chrome page, failing without saying what to do; the error now tells you to `click()` it instead ([#16916](https://github.com/can1357/oh-my-pi/pull/16916) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `kill %N` on a backgrounded compound command (such as `(while :; do :; done) &`) in a persistent shell session: the job was reported done but the in-process loop kept spinning until the process exited; it now stops at the next interpreter check ([#16937](https://github.com/can1357/oh-my-pi/pull/16937) by [@holny](https://github.com/holny))
+- Fixed `sort -t=` (and clusters such as `-nrt=`) failing with "separator must be exactly one character long"; an attached `=` now selects `=` as the field separator, as in GNU sort, and `-t=X` such as `-t==` is rejected as two characters ([#17017](https://github.com/can1357/oh-my-pi/pull/17017) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.12.5] - 2026-10-21
 
