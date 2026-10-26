@@ -2,25 +2,22 @@
 
 ## [Unreleased]
 
+## [18.13.0] - 2026-10-26
+
 ### Added
 
 - Added `parseHeifImageMimeType()`, which identifies HEIC, HEIF and AVIF images from a file header ([#16612](https://github.com/can1357/oh-my-pi/pull/16612) by [@will-bogusz](https://github.com/will-bogusz))
-### Fixed
-
-- `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
-### Added
-
 - Added `$whichAll()`, which returns every PATH match for a command in PATH order ([#16824](https://github.com/can1357/oh-my-pi/issues/16824))
 
-### Fixed
-
-- `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
-### Fixed
-
-- Fixed inline code spans rendering flush against the surrounding text when a backslash preceded the closing backtick ([#16972](https://github.com/can1357/oh-my-pi/pull/16972) by [@akainth015](https://github.com/akainth015))
 ### Changed
 
 - Faster lenient JSONL session parsing when recovering past malformed lines ([#16995](https://github.com/can1357/oh-my-pi/pull/16995) by [@GTanger](https://github.com/GTanger))
+
+### Fixed
+
+- `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
+- `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
+- Fixed inline code spans rendering flush against the surrounding text when a backslash preceded the closing backtick ([#16972](https://github.com/can1357/oh-my-pi/pull/16972) by [@akainth015](https://github.com/akainth015))
 
 ## [18.12.6] - 2026-10-21
 

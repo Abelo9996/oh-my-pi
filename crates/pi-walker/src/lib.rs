@@ -6134,7 +6134,8 @@ mod tests {
 
 		for contents_first in [false, true] {
 			// 400 nested dirs exceed Windows' MAX_PATH; walk through the verbatim
-			// prefix so the listing reaches the leaf instead of stopping at ~260 chars.
+			// prefix so the listing reaches the leaf instead of stopping at ~260
+			// chars.
 			let root = if cfg!(windows) {
 				std::path::PathBuf::from(format!(r"\\?\{}", tree.path().display()))
 			} else {

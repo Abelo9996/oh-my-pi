@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.13.0] - 2026-10-26
+
 ### Breaking Changes
 
 - Renamed the `task-sibling-prompt-cache` axis to `shared-prompt-cache` (catalog field `sharedPromptCache`); it now also covers forks and explicit prompt-cache keys ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))

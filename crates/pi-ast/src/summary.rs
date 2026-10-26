@@ -871,10 +871,10 @@ fn build_segments(source: &str, total_lines: u32, spans: &[LineSpan]) -> Vec<Sum
 		if cursor < span.start {
 			let end_line = span.start - 1;
 			segments.push(SummarySegment {
-				kind:       "kept".to_string(),
+				kind: "kept".to_string(),
 				start_line: cursor,
 				end_line,
-				text:       Some(join_line_range(&source_lines, cursor, end_line)),
+				text: Some(join_line_range(&source_lines, cursor, end_line)),
 			});
 		}
 
@@ -1429,10 +1429,9 @@ mod tests {
 		assert!(result.parsed);
 		assert!(result.elided);
 		assert_eq!(result.total_lines, 16);
-		assert_eq!(
-			segment_kinds(&result),
-			vec!["kept", "elided", "kept", "elided", "kept", "elided", "kept"]
-		);
+		assert_eq!(segment_kinds(&result), vec![
+			"kept", "elided", "kept", "elided", "kept", "elided", "kept"
+		]);
 		assert_eq!(result.segments[0].start_line, 1);
 		assert_eq!(result.segments[0].end_line, 2);
 		assert_eq!(
@@ -1441,10 +1440,7 @@ mod tests {
 		);
 		assert_eq!(result.segments[1].start_line, 3);
 		assert_eq!(result.segments[1].end_line, 5);
-		assert_eq!(
-			result.segments[2].text.as_deref(),
-			Some(" */\nuse std::collections::HashMap;")
-		);
+		assert_eq!(result.segments[2].text.as_deref(), Some(" */\nuse std::collections::HashMap;"));
 		assert_eq!(result.segments[3].start_line, 8);
 		assert_eq!(result.segments[3].end_line, 9);
 		assert_eq!(result.segments[4].text.as_deref(), Some("use std::io;\npub fn run() {"));
