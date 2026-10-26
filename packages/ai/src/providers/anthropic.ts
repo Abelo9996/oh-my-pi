@@ -44,6 +44,7 @@ import type {
 	AnthropicToolChange,
 	Api,
 	AssistantMessage,
+	AssistantMessageEvent,
 	CacheRetention,
 	Context,
 	DeveloperMessage,
@@ -1603,6 +1604,36 @@ function unwrapAnthropicThinkingEnvelope(text: string): string | undefined {
 }
 
 /**
+ * Whether the block at `index` is output a model streamed before declining at
+ * a server-side fallback handoff (the last `fallback` block, `boundary`): its
+ * reasoning or a tool call. The serving model never saw those tool calls, so
+ * they must not run, and replaying reasoning signed on both sides of a
+ * handoff is refused by the API. Text is not: the serving model continued
+ * from it. Server tool blocks are kept as they are: an unpaired
+ * `server_tool_use` before the boundary is still replayed.
+ */
+function isDeclinedBeforeFallback(
+	block: AssistantMessage["content"][number],
+	index: number,
+	boundary: number,
+): boolean {
+	return (
+		index < boundary && (block.type === "thinking" || block.type === "redactedThinking" || block.type === "toolCall")
+	);
+}
+
+/**
+ * `content` without the declining model's output (see
+ * {@link isDeclinedBeforeFallback}); `content` itself when the turn had no
+ * handoff. Never mutates it: streamed events index into the live message.
+ */
+function withoutDeclinedFallbackOutput(content: AssistantMessage["content"]): AssistantMessage["content"] {
+	const boundary = content.findLastIndex(block => block.type === "fallback");
+	if (boundary <= 0) return content;
+	return content.filter((block, index) => !isDeclinedBeforeFallback(block, index, boundary));
+}
+
+/**
  * The refused response's content as the continuation prefix: client tool
  * calls (no matching tool_result) are omitted and a trailing text block is
  * right-trimmed, per the fallback-credit continuation contract.
@@ -2243,6 +2274,38 @@ const streamAnthropicOnce = (
 
 		const onSseEvent = options?.onSseEvent;
 		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;
+		// A request that opts into server-side fallbacks holds its tool-call events
+		// until the turn ends: a model that declines later in the same response
+		// hands it to the fallback model, and its tool calls must not reach
+		// speculative execution, a gateway client or the UI first. Each event keeps
+		// the block it belongs to, so a retry that resets the content releases none.
+		type ToolCallEvent = Extract<
+			AssistantMessageEvent,
+			{ type: "toolcall_start" | "toolcall_delta" | "toolcall_end" }
+		>;
+		let holdToolCallEvents = false;
+		const heldToolCallEvents: Array<{
+			event: ToolCallEvent;
+			block: AssistantMessage["content"][number] | undefined;
+		}> = [];
+		const pushToolCallEvent = (event: ToolCallEvent): void => {
+			if (holdToolCallEvents) heldToolCallEvents.push({ event, block: output.content[event.contentIndex] });
+			else stream.push(event);
+		};
+		// Release the held events except the declining model's, with the indices
+		// every earlier event of the stream used, and return the content the
+		// finished turn keeps. The live message stays whole: queued events index
+		// into it.
+		const settleFallbackHandoff = (): AssistantMessage["content"] => {
+			const boundary = output.content.findLastIndex(block => block.type === "fallback");
+			for (const { event, block } of heldToolCallEvents) {
+				if (!block || output.content[event.contentIndex] !== block) continue;
+				if (isDeclinedBeforeFallback(block, event.contentIndex, boundary)) continue;
+				stream.push(event);
+			}
+			heldToolCallEvents.length = 0;
+			return withoutDeclinedFallbackOutput(output.content);
+		};
 
 		try {
 			// Built inside the try so a copilot credential/header failure surfaces as
@@ -2493,14 +2556,16 @@ const streamAnthropicOnce = (
 				// `dropCacheControlOptions` short-circuits it because the breakpoint
 				// it does carry has no `ttl` left to authorize. Both this gate and
 				// buildParams resolve the breakpoint behind the same flags so the
-				// header and the body can never disagree. Vertex rawPredict honors
-				// `ttl: "1h"` without the beta and rejects it in either channel.
+				// header and the body can never disagree. Routes that honor
+				// `ttl: "1h"` without the beta and reject it (Vertex rawPredict,
+				// Factory's proxy) skip it: Vertex by URL, others via `extendedCacheTtlBeta: false`.
 				const isOAuth = options?.isOAuth ?? isAnthropicOAuthToken(apiKey);
 				if (
 					!isOAuth &&
 					!dropCacheControl &&
 					!dropCacheControlOptions &&
 					!isVertexRawPredictUrl(baseUrl) &&
+					model.compat.extendedCacheTtlBeta !== false &&
 					getCacheControl(model, options?.cacheRetention, isOAuth).cacheControl?.ttl === "1h" &&
 					!extraBetas.includes(extendedCacheTtlBeta)
 				) {
@@ -2723,6 +2788,9 @@ const streamAnthropicOnce = (
 			// server-side-fallback beta chain. Leaving `fallbacks` unset preserves
 			// the pre-fallback stream shape on every event.
 			const serverSideFallback = !!fallbacks?.length;
+			// A fallback-credit redemption sends its frozen body without `fallbacks`, so
+			// no handoff can happen on it until the credit is forfeited.
+			holdToolCallEvents = serverSideFallback && !usingFallbackCredit;
 			type Block = (
 				| ThinkingContent
 				| RedactedThinkingContent
@@ -2780,7 +2848,7 @@ const streamAnthropicOnce = (
 						);
 					}
 					clearStreamingPartialJson(block);
-					stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
+					pushToolCallEvent({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
 				}
 			};
 			stream.push({ type: "start", partial: output });
@@ -2822,6 +2890,7 @@ const streamAnthropicOnce = (
 				}
 				usingFallbackCredit = false;
 				fallbackCreditShape = undefined;
+				holdToolCallEvents = serverSideFallback;
 			};
 			const rebuildParams = async (streamFailure: unknown): Promise<MessageCreateParamsStreaming> => {
 				if (usingFallbackCredit) forfeitFallbackCredit(streamFailure);
@@ -3258,7 +3327,7 @@ const streamAnthropicOnce = (
 								output.content.push(block);
 								const contentIndex = output.content.length - 1;
 								openBlocks.set(event.index, { contentIndex, kind: "toolCall" });
-								stream.push({
+								pushToolCallEvent({
 									type: "toolcall_start",
 									contentIndex,
 									partial: output,
@@ -3337,7 +3406,7 @@ const streamAnthropicOnce = (
 									block.arguments = throttled.value;
 									block[kStreamingLastParseLen] = throttled.parsedLen;
 								}
-								stream.push({
+								pushToolCallEvent({
 									type: "toolcall_delta",
 									contentIndex: openBlock.contentIndex,
 									delta: event.delta.partial_json,
@@ -3960,12 +4029,15 @@ const streamAnthropicOnce = (
 					firstTokenTime = undefined;
 				}
 			}
+			const retained = settleFallbackHandoff();
 			if (usingFallbackCredit && fallbackCreditShape === "continuation" && frozenRedemption?.refusedContent) {
 				// The response continues the echoed prefix; keep it, signatures included, in
 				// the stored turn. A tool loop requires the turn to open with its thinking
 				// block, and a later rejection of the refused model's signature is
 				// recovered by the invalid-signature retry.
-				output.content.unshift(...refusalContinuationPrefix(frozenRedemption.refusedContent));
+				const prefix = refusalContinuationPrefix(frozenRedemption.refusedContent);
+				output.content.unshift(...prefix);
+				if (retained !== output.content) retained.unshift(...prefix);
 			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -4003,12 +4075,17 @@ const streamAnthropicOnce = (
 					providerSessionState.cacheControlOptionsUnsupported = true;
 				}
 			}
-			stream.push({ type: "done", reason: output.stopReason, message: output });
+			stream.push({
+				type: "done",
+				reason: output.stopReason,
+				message: retained === output.content ? output : { ...output, content: retained },
+			});
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				if (block.type === "toolCall") clearStreamingPartialJson(block);
 			}
+			const retained = settleFallbackHandoff();
 			const result = await AIError.finalize(error, {
 				api: sourceModel.api,
 				provider: sourceModel.provider,
@@ -4021,7 +4098,11 @@ const streamAnthropicOnce = (
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({
+				type: "error",
+				reason: output.stopReason,
+				error: retained === output.content ? output : { ...output, content: retained },
+			});
 			stream.end();
 		}
 	})();
@@ -4291,6 +4372,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			: mergedCopilotHeaders;
 		applyInferenceHeaders(defaultHeaders, {
 			provider: model.provider,
+			providerType: model.providerType,
 			protocol: "anthropic",
 			sessionId,
 		});
@@ -4362,6 +4444,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	});
 	applyInferenceHeaders(defaultHeaders, {
 		provider: model.provider,
+		providerType: model.providerType,
 		protocol: "anthropic",
 		sessionId,
 	});
@@ -6834,6 +6917,12 @@ type AnthropicStrictBudget = {
 	unionCount: number;
 };
 
+type AnthropicStrictSchemaResult = {
+	schema: Record<string, unknown>;
+	optionalCount: number;
+	unionCount: number;
+};
+
 function hasAnthropicUnionType(schema: Record<string, unknown>): boolean {
 	return Array.isArray(schema.type) || Array.isArray(schema.anyOf);
 }
@@ -6881,7 +6970,7 @@ function makeAnthropicNullableSchema(schema: unknown, budget: AnthropicStrictBud
 function normalizeAnthropicStrictSchemaNode(
 	schema: unknown,
 	budget: AnthropicStrictBudget,
-	cache: WeakMap<Record<string, unknown>, Record<string, unknown>>,
+	cache: WeakMap<Record<string, unknown>, AnthropicStrictSchemaResult | null>,
 ): unknown | undefined {
 	if (Array.isArray(schema)) {
 		const result: unknown[] = [];
@@ -6896,8 +6985,21 @@ function normalizeAnthropicStrictSchemaNode(
 	if (!isRecord(schema)) return schema;
 
 	const cached = cache.get(schema);
-	if (cached) return cached;
+	if (cached === null) return undefined;
+	if (
+		cached !== undefined &&
+		cached.optionalCount <= budget.optionalRemaining &&
+		cached.unionCount <= budget.unionRemaining
+	) {
+		// JSON repeats shared nodes; Anthropic charges every serialized occurrence.
+		budget.optionalRemaining -= cached.optionalCount;
+		budget.optionalCount += cached.optionalCount;
+		budget.unionRemaining -= cached.unionCount;
+		budget.unionCount += cached.unionCount;
+		return cached.schema;
+	}
 
+	// Re-normalize an overflowing occurrence so optionals can become nullable-required.
 	if (!hasAnthropicSchemaDefiningKeyword(schema)) return undefined;
 
 	// Strict tool use only supports closed objects. Open maps stay available on
@@ -6907,7 +7009,10 @@ function normalizeAnthropicStrictSchemaNode(
 	}
 
 	const result: Record<string, unknown> = { ...schema };
-	cache.set(schema, result);
+	const optionalCountBefore = budget.optionalCount;
+	const unionCountBefore = budget.unionCount;
+	// An unfinished entry denotes a cycle, not a reusable serialized subtree.
+	cache.set(schema, null);
 
 	if (hasAnthropicUnionType(result)) {
 		if (budget.unionRemaining <= 0) return undefined;
@@ -6986,6 +7091,11 @@ function normalizeAnthropicStrictSchemaNode(
 		result[defsKey] = normalizedDefinitions;
 	}
 
+	cache.set(schema, {
+		schema: result,
+		optionalCount: budget.optionalCount - optionalCountBefore,
+		unionCount: budget.unionCount - unionCountBefore,
+	});
 	return result;
 }
 
@@ -7025,7 +7135,7 @@ function normalizeAnthropicStrictSchema(
 	schema: Record<string, unknown>,
 	optionalRemaining: number,
 	unionRemaining: number,
-): { schema: Record<string, unknown>; optionalCount: number; unionCount: number } | undefined {
+): AnthropicStrictSchemaResult | undefined {
 	const budget: AnthropicStrictBudget = {
 		optionalRemaining,
 		unionRemaining,

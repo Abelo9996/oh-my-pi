@@ -3051,6 +3051,14 @@
 						"type": "number"
 					}
 				},
+				"editRejections": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {
+						"type": "number"
+					},
+					"description": "Failed edits by the engine's `errorKind`."
+				},
 				"contextUsage": {
 					"$ref": "#/$defs/ContextUsage"
 				}
@@ -4342,6 +4350,10 @@
 				},
 				"httpStatus": {
 					"type": "integer"
+				},
+				"code": {
+					"const": "cost_cap",
+					"description": "`cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request."
 				}
 			},
 			"required": [

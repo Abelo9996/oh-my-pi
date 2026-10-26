@@ -4,6 +4,7 @@ import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-cata
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
+	CatalogPolicyInputs,
 	OpenAICompat,
 	OpenAIReasoningDisableMode,
 	OpenAIStreamMarkupHealingPattern,
@@ -124,7 +125,12 @@ import type {
 	ResponseStatus,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
-import { applyInferenceHeaders, applySessionHeader, setHeaderIfAbsent } from "./inference-headers";
+import {
+	applyInferenceHeaders,
+	applySessionHeader,
+	resolveOpenCodeGoCacheAffinity,
+	setHeaderIfAbsent,
+} from "./inference-headers";
 import { isValidToolCallId, transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
@@ -147,7 +153,15 @@ export interface OpenAIStrictToolsState {
 	};
 }
 
-export interface OpenAIRequestSetupModel extends OpenAIModelIdentity {
+/**
+ * The model a request setup may be built from: the transport facts it reads
+ * plus every fact the catalog policy cascade reads ({@link CatalogPolicyInputs}).
+ * `api` is required — the Go sibling cache-affinity rules are all `on-api`
+ * scoped, so a reduced model that omits it used to typecheck and silently
+ * leave the family header off. Callers handing a reduced model object must
+ * pass the real policy inputs; there is no default, inference, or fallback.
+ */
+export interface OpenAIRequestSetupModel extends OpenAIModelIdentity, CatalogPolicyInputs {
 	headers?: Record<string, string>;
 	premiumMultiplier?: number;
 	compat?: Pick<ResolvedOpenAISharedCompat, "promptCacheSessionHeader" | "sessionHeader">;
@@ -174,6 +188,15 @@ export interface OpenAIRequestSetupOptions {
 	};
 	sessionId?: string;
 	promptCacheSessionId?: string;
+	/**
+	 * Explicit prompt-cache identity only, never the sessionId fallback:
+	 * callers set it from the already-resolved `promptCacheSessionId` when an
+	 * explicit `promptCacheKey` was supplied, and leave it unset otherwise.
+	 * Feeds the Go sibling cache-affinity header so an ordinary conversation
+	 * id (especially one long enough to normalize to a `pc_` hash) can never
+	 * flip `x-opencode-session` on opted-in lanes.
+	 */
+	promptCacheAffinityKey?: string;
 }
 
 export interface OpenAIRequestSetup {
@@ -321,11 +344,17 @@ export function resolveOpenAIRequestSetup(
 		query = { "api-version": options.azureChatCompletions.apiVersion };
 	}
 
+	// The conversation id stays authoritative for every native session header.
+	// On Go lanes opted into KDL `shared-prompt-cache`, `x-opencode-session`
+	// carries the explicit shared cache key instead (see
+	// resolveOpenCodeGoCacheAffinity).
 	const sessionId = options.sessionId ?? options.promptCacheSessionId;
 	applyInferenceHeaders(headers, {
 		provider: model.provider,
+		providerType: model.providerType,
 		protocol: "openai",
 		sessionId,
+		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, options.promptCacheAffinityKey),
 	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);

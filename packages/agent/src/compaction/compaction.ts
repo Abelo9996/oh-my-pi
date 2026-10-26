@@ -728,8 +728,15 @@ export interface SummaryOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** Session routing key for remote compaction transports with sticky provider sessions. */
 	sessionId?: string;
-	/** Prompt-cache key for remote compaction transports that support provider prefix caching. */
+	/** Prompt-cache key for conventional summary requests, gated against the summarizing model. */
 	promptCacheKey?: string;
+	/**
+	 * Prompt-cache key for remote compaction requests, gated against the request
+	 * they send (`remoteCompaction.api`/`model` override, see
+	 * `remoteCompactionPolicyModel`). Defaults to {@link promptCacheKey} only when
+	 * omitted; an explicit `undefined` means the remote target gets no key.
+	 */
+	remotePromptCacheKey?: string;
 	/** Mutable provider state used to keep Codex compaction on the live session identity. */
 	providerSessionState?: Map<string, ProviderSessionState>;
 	/** Whether Codex remote compaction should prefer the provider WebSocket transport. */
@@ -1677,6 +1684,10 @@ export async function compact(
 		thinkingLevel: options?.thinkingLevel,
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
+		remotePromptCacheKey:
+			options && Object.hasOwn(options, "remotePromptCacheKey")
+				? options.remotePromptCacheKey
+				: options?.promptCacheKey,
 		providerSessionState: options?.providerSessionState,
 		preferWebsockets: options?.preferWebsockets,
 		codexCompaction: options?.codexCompaction,
@@ -1815,7 +1826,7 @@ export async function compact(
 						forceReasoningOff: summaryOptions.thinkingLevel === ThinkingLevel.Off,
 						responsesLite: model.useResponsesLite,
 						sessionId: summaryOptions.sessionId,
-						promptCacheKey: summaryOptions.promptCacheKey,
+						promptCacheKey: summaryOptions.remotePromptCacheKey,
 						providerSessionState: summaryOptions.providerSessionState,
 						codexCompaction: createOpenAICodexCompactionRequestContext({
 							context: summaryOptions.codexCompaction,
@@ -1888,7 +1899,7 @@ export async function compact(
 			assertRemoteCompactionInputFits(trimmed, model);
 			const requestOptions = {
 				sessionId: summaryOptions.sessionId,
-				promptCacheKey: summaryOptions.promptCacheKey,
+				promptCacheKey: summaryOptions.remotePromptCacheKey,
 				retainedMessageBudget: settings.v2RetainedMessageBudget,
 				retainedUserItems,
 			};
@@ -1970,6 +1981,7 @@ export async function compact(
 						{
 							fetch: summaryOptions.fetch,
 							sessionId: summaryOptions.sessionId,
+							promptCacheKey: summaryOptions.remotePromptCacheKey,
 							providerSessionState: summaryOptions.providerSessionState,
 							codexCompaction: summaryOptions.codexCompaction,
 							rewriteOutputs,

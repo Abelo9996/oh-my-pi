@@ -2,13 +2,20 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed the `task-sibling-prompt-cache` axis to `shared-prompt-cache` (catalog field `sharedPromptCache`); it now also covers forks and explicit prompt-cache keys ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- OpenCode Go `muse-spark-1.3-contributor`, `muse-spark-1.2-contributor`, `gpt-5.6-luna`, `gpt-6-luna`, `grok-4.6` (Responses) and `deepseek-v4-pro`, `omen-alpha` (Completions) opt into shared prompt caching; lanes that warmed under any key stay off ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+- Added `CatalogPolicyInputs` so catalog-policy lookups accept a reduced model view ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 
 ### Changed
 
 - llama.cpp login instructions now list both default local base URLs (`http://127.0.0.1:8080`, then `http://127.0.0.1:9931`) ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+- Devin requests now identify as Devin CLI 3000.11.205, the current stable release, instead of 3000.11.3 ([#16906](https://github.com/can1357/oh-my-pi/pull/16906) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -18,6 +25,10 @@
 - Fixed GPT-5.6 Sol requests over 272K input tokens (`openai` and `openai-codex`) being priced at the retired $10/$45 long-context card instead of $8/$30 ([#16742](https://github.com/can1357/oh-my-pi/issues/16742))
 - Fixed DeepSeek's official vision requests being held to the 5-image unknown-host floor: the catalog endpoint now carries DeepSeek's documented 600-image and 40 MiB inline-image budgets, while a custom `baseUrl` keeps the conservative floor ([vision limits](https://api-docs.deepseek.com/guides/vision#limits); [#16737](https://github.com/can1357/oh-my-pi/pull/16737) by [@Fun10165](https://github.com/Fun10165))
 - Fixed Devin model discovery falling back to the two SWE-1.6 seed models when the catalog takes longer than 5s to respond; it now waits up to 15s ([#16668](https://github.com/can1357/oh-my-pi/pull/16668) by [@DusKing1](https://github.com/DusKing1))
+- Fixed Go Task keeping stale prompt-cache affinity after a model's wire model changed ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+- Fixed Devin models all showing a 200K context window: each model now reports its own (1M for Claude Opus 5.5 and the `-1m` lanes, 262K for SWE-2), and GPT and Grok models with a long-context price tier start at that tier's threshold, with `/extended-context on` opening their full window ([#16905](https://github.com/can1357/oh-my-pi/pull/16905) by [@will-bogusz](https://github.com/will-bogusz))
+- Added the `extended-cache-ttl-beta` compat axis so a route can opt out of the `extended-cache-ttl-2025-04-11` beta (Factory Droid does), and prompt-cache lifetimes and long-retention support for Factory Droid's Claude models ([#16296](https://github.com/can1357/oh-my-pi/pull/16296) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Factory Droid's image models (GPT Image 2.5, GPT Image 2.5 Flare, Gemini 3 Pro Image) to the `image` role's choices, listed only while your Factory organization allows image generation and that model ([#16316](https://github.com/can1357/oh-my-pi/pull/16316) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 

@@ -758,6 +758,8 @@ interface SessionManagerStateSnapshot {
 	needsRewrite: boolean;
 	draftOnlySessionCleanupArmed: boolean;
 	fallbackRuntimeOnly: boolean;
+	/** Stashed sibling family candidate; moveTo drops it, so a rollback must restore it. */
+	taskSiblingCandidate: string | undefined;
 	header: SessionHeader;
 	entries: SessionEntry[];
 }
@@ -899,6 +901,12 @@ export class SessionManager {
 	readonly #blobs: BlobStore;
 
 	#sessionId = "";
+	/**
+	 * Parent-derived sibling family candidate stashed by the Task executor once
+	 * the child session exists. Session-scoped and non-persisted: the header
+	 * never sees it, and forks, moves, and new-session resets start without it.
+	 */
+	#taskSiblingCandidate: string | undefined;
 	#sessionName: string | undefined;
 	#titleSource: SessionTitleSource | undefined;
 	#titleRevision = 0;
@@ -1265,6 +1273,7 @@ export class SessionManager {
 		const previousSessionId = this.#sessionId;
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
 		const to = path.join(path.dirname(from), `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#header = {
 			...this.#header,
@@ -2000,6 +2009,7 @@ export class SessionManager {
 			this.#storage.ensureDirSync(this.#sessionDir);
 		}
 		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -2225,6 +2235,7 @@ export class SessionManager {
 			needsRewrite: this.#rewriteRequired,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
+			taskSiblingCandidate: this.#taskSiblingCandidate,
 			// Entries are snapshotted by reference (switch/reload replaces the
 			// array wholesale). The header is cloned: moveTo mutates it in place
 			// (cwd, additionalDirectories), so a by-reference capture would let
@@ -2269,6 +2280,8 @@ export class SessionManager {
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
+		// A completed moveTo drops the stash, so a rollback restores it here.
+		this.#taskSiblingCandidate = snapshot.taskSiblingCandidate;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
@@ -2286,11 +2299,12 @@ export class SessionManager {
 	/**
 	 * Undo a {@link moveTo} using a {@link captureState} snapshot: rename the
 	 * session and artifacts back into the captured bucket, then restore the
-	 * captured metadata (cwd, header, additionalDirectories). The captured
-	 * header is persisted after relocation so a fresh open of the source
-	 * session sees the pre-move metadata, including workspace roots the move
-	 * filtered out. Rollbacks must not re-enter forward-move hooks, so this
-	 * bypasses AgentSession entirely. If the rename-back itself fails, the
+	 * captured metadata (cwd, header, additionalDirectories) and the stashed
+	 * sibling candidate the forward move dropped. The captured header is
+	 * persisted after relocation so a fresh open of the source session sees the
+	 * pre-move metadata, including workspace roots the move filtered out.
+	 * Rollbacks must not re-enter forward-move hooks, so this bypasses
+	 * AgentSession entirely. If the rename-back itself fails, the
 	 * manager stays pointed at the actual moved file (restoring the snapshot
 	 * would split the transcript across a recreated source and the stranded
 	 * target) and the error names where the session file actually lives.
@@ -2453,6 +2467,7 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#expectedDiskSize = null;
 		this.#header = {
@@ -2664,6 +2679,12 @@ export class SessionManager {
 			this.#cwd = resolvedCwd;
 			this.#sessionDir = nextSessionDir;
 			this.#header.cwd = resolvedCwd;
+			// The stash is scoped to the conversation's pre-move state: a completed
+			// move must not let a later opted-in request promote it. Refusals and
+			// the internal rollback rethrow above, and the no-op early return never
+			// relocates, so all three keep it; a caller undoing this completed move
+			// through rollbackMove() re-derives it from the captureState() snapshot.
+			this.clearTaskSiblingCandidate();
 			// Clear only after the rename has landed. If the move threw,
 			// keep the flag so the next relocation retries.
 			this.#fallbackRuntimeOnly = false;
@@ -3826,6 +3847,27 @@ export class SessionManager {
 		await this.#rewriteAtomically();
 	}
 
+	/**
+	 * Stash the parent-derived sibling family candidate without touching the
+	 * header. Unlike {@link setTaskPromptCacheKey} this is neither persisted nor
+	 * carried into forks, moves, or new-session resets, so a fresh identity
+	 * starts without it while the per-request policy gate still decides whether
+	 * this session's requests consume it.
+	 */
+	setTaskSiblingCandidate(key: string): void {
+		this.#taskSiblingCandidate = key;
+	}
+
+	/** Stashed sibling family candidate; consumed only when the request model opts in. */
+	getTaskSiblingCandidate(): string | undefined {
+		return this.#taskSiblingCandidate;
+	}
+
+	/** Drop the stash: a committed switch to a different session adopts that session's identity. */
+	clearTaskSiblingCandidate(): void {
+		this.#taskSiblingCandidate = undefined;
+	}
+
 	/** All session entries (excludes header). Returns a shallow copy. */
 	getEntries(): SessionEntry[] {
 		return [...this.#entries];
@@ -3965,6 +4007,7 @@ export class SessionManager {
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
+		this.#taskSiblingCandidate = undefined;
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = timestamp;

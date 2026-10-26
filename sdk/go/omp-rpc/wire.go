@@ -2966,7 +2966,9 @@ type SessionStats struct {
 	SessionFile       *string            `json:"sessionFile,omitempty"`
 	Credits           *SessionCredits    `json:"credits,omitempty"`
 	RoutedModels      map[string]float64 `json:"routedModels,omitempty"`
-	ContextUsage      *ContextUsage      `json:"contextUsage,omitempty"`
+	// Failed edits by the engine's `errorKind`.
+	EditRejections map[string]float64 `json:"editRejections,omitempty"`
+	ContextUsage   *ContextUsage      `json:"contextUsage,omitempty"`
 }
 
 func (v *SessionStats) UnmarshalJSON(data []byte) error {
@@ -2988,6 +2990,7 @@ func (v *SessionStats) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("sessionFile", &out.SessionFile)
 	d.optional("credits", &out.Credits)
 	d.optional("routedModels", &out.RoutedModels)
+	d.optional("editRejections", &out.EditRejections)
 	d.optional("contextUsage", &out.ContextUsage)
 	if d.err != nil {
 		return d.err
@@ -4606,6 +4609,8 @@ type PromptError struct {
 	Provider   *string `json:"provider,omitempty"`
 	Model      *string `json:"model,omitempty"`
 	HTTPStatus *int64  `json:"httpStatus,omitempty"`
+	// `cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request.
+	Code *PromptErrorCode `json:"code,omitempty"`
 }
 
 func (v *PromptError) UnmarshalJSON(data []byte) error {
@@ -4620,11 +4625,31 @@ func (v *PromptError) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("provider", &out.Provider)
 	d.optional("model", &out.Model)
 	d.optional("httpStatus", &out.HTTPStatus)
+	d.optional("code", &out.Code)
 	if d.err != nil {
 		return d.err
 	}
 	*v = out
 	return nil
+}
+
+type PromptErrorCode string
+
+const (
+	PromptErrorCodeCostCap PromptErrorCode = "cost_cap"
+)
+
+func (v *PromptErrorCode) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "PromptErrorCode")
+	if err != nil {
+		return err
+	}
+	switch value := PromptErrorCode(s); value {
+	case PromptErrorCodeCostCap:
+		*v = value
+		return nil
+	}
+	return unknownValue("PromptErrorCode", s)
 }
 
 // Terminal outcome of one accepted `prompt` / `abort_and_prompt`, keyed by request `id`.

@@ -11,6 +11,7 @@ import { type BtwHistoryRecord, BtwHistoryStore, getBtwTurns } from "@oh-my-pi/p
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
+import * as atomicFile from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
 import { Container, Input, type KeyId, type TUI } from "@oh-my-pi/pi-tui";
 import type { DictationTarget } from "@oh-my-pi/pi-coding-agent/stt/push-to-talk";
 import { SPACE_HOLD_MECHANICAL_RUN, type SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
@@ -214,18 +215,18 @@ describe("BTW follow-up lifecycle", () => {
 		const h = await harness();
 		await h.controller.start("Survive a storage error");
 		const failed = Promise.withResolvers<void>();
-		const writeFile = fs.writeFile;
+		const writeFileAtomically = atomicFile.writeFileAtomically;
 		const storageError = new Error(
 			`\x1b[2JEACCES: open '${os.homedir()}/blocked directory/btw.json'\r\n\t${"detail ".repeat(100)}`,
 		);
 		const shown = vi.spyOn(h.ctx, "showError");
 		let unavailable = true;
-		vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-			if (unavailable && typeof file === "string" && file.startsWith(h.directory) && file.endsWith(".tmp")) {
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (file, content, mode) => {
+			if (unavailable && file.startsWith(h.directory) && file.endsWith(".json")) {
 				failed.resolve();
 				throw storageError;
 			}
-			return writeFile(file, data, options);
+			return writeFileAtomically(file, content, mode);
 		});
 		try {
 			h.requests.at(-1)!.resolve(answer("Retained answer"));
@@ -375,15 +376,15 @@ describe("BTW follow-up lifecycle", () => {
 		await h.controller.start("Save before moving");
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
-		const writeFile = fs.writeFile;
+		const writeFileAtomically = atomicFile.writeFileAtomically;
 		let hold = true;
-		vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-			if (hold && typeof file === "string" && file.startsWith(h.directory) && file.endsWith(".tmp")) {
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (file, content, mode) => {
+			if (hold && file.startsWith(h.directory) && file.endsWith(".json")) {
 				hold = false;
 				entered.resolve();
 				await release.promise;
 			}
-			return writeFile(file, data, options);
+			return writeFileAtomically(file, content, mode);
 		});
 		const flush = h.controller.flush.bind(h.controller);
 		vi.spyOn(h.controller, "flush").mockImplementation(() => flush(25));

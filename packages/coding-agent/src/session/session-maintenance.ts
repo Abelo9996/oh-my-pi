@@ -36,6 +36,7 @@ import {
 	prepareCompaction,
 	promptBudgetTokens,
 	RESCUE_SHAKE_CONFIG,
+	remoteCompactionPolicyModel,
 	remotePreserveReusable,
 	resolveBudgetReserveTokens,
 	resolveThresholdTokens,
@@ -67,6 +68,7 @@ import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/o
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isRecord, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { writeArtifact } from "./artifacts";
@@ -481,6 +483,8 @@ export interface SessionMaintenanceHost {
 	): Promise<Context>;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation;
+	/** Gated cache identity: the agent's explicit key, else the Task family key when `model` opts in. */
+	getPromptCacheKeyForModel(model: CatalogPolicyInputs | undefined): string | undefined;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
 	resetPlanReference(): void;
@@ -3582,7 +3586,12 @@ export class SessionMaintenance {
 						thinkingLevel: this.#host.thinkingLevel(),
 						tools: this.#host.agent.state.tools,
 						sessionId: this.#host.sessionId(),
-						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
+						// Explicit cache keys only (never a sessionId fallback): V2
+						// treats any truthy key as provenance for x-opencode-session.
+						// Conventional summaries run on `candidate`; remote compaction
+						// may send a different api/model, so it is gated separately.
+						promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
+						remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(),
 						// Route every summarization HTTP request through the
@@ -5403,7 +5412,12 @@ export class SessionMaintenance {
 									thinkingLevel: this.#host.thinkingLevel(),
 									tools: this.#host.agent.state.tools,
 									sessionId: this.#host.sessionId(),
-									promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
+									// Same key split as the manual callsite in
+									// #compactWithFallbackModel.
+									promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
+									remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(
+										remoteCompactionPolicyModel(candidate),
+									),
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets(),
 									codexCompaction,
