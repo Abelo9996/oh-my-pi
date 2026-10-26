@@ -483,6 +483,12 @@ function renderTaskSection(
 	return lines;
 }
 
+function taskPreviewText(task: unknown, taskFile: unknown): string {
+	if (typeof task === "string") return task;
+	if (typeof taskFile !== "string") return "";
+	return flattenLine(replaceTabs(shortenPath(sanitizeText(taskFile))));
+}
+
 /**
  * First line of a streamed `task` brief, trimmed — a row's secondary text.
  * The args stream in token by token, so non-string values fall through to "".
@@ -523,7 +529,7 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 
 	const rawName = typeof args.name === "string" ? args.name.trim() : "";
 	const idLabel = rawName ? formatTaskId(rawName) : "";
-	const brief = taskFirstLine(args.task);
+	const brief = taskFirstLine(taskPreviewText(args.task, args.taskFile));
 	if (idLabel || brief) {
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel || "agent"))}`;
 		if (brief) {
@@ -559,7 +565,7 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 		const rawName = typeof item?.name === "string" ? item.name.trim() : "";
 		const idLabel = rawName ? formatTaskId(rawName) : `#${i + 1}`;
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel))}`;
-		const brief = taskFirstLine(item?.task);
+		const brief = taskFirstLine(taskPreviewText(item?.task, item?.taskFile));
 		if (brief) {
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
@@ -2034,12 +2040,13 @@ function describeTaskCall(args: TaskParams | undefined): NativeToolView {
 			key,
 		);
 	const flatName = typeof args?.name === "string" ? args.name.trim() : "";
-	if (flatName || taskFirstLine(args?.task)) {
+	const flatBrief = taskPreviewText(args?.task, args?.taskFile);
+	if (flatName || taskFirstLine(flatBrief)) {
 		agents.push(
 			pending(
 				flatName ? formatTaskId(flatName) : "agent",
 				args?.agent,
-				args?.task,
+				flatBrief,
 				args?.isolated,
 				flatName || "agent",
 			),
@@ -2052,7 +2059,7 @@ function describeTaskCall(args: TaskParams | undefined): NativeToolView {
 				pending(
 					name ? formatTaskId(name) : `#${index + 1}`,
 					entry?.agent,
-					entry?.task,
+					taskPreviewText(entry?.task, entry?.taskFile),
 					entry?.isolated,
 					name || `#${index + 1}`,
 				),

@@ -25,7 +25,7 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -37,10 +37,10 @@ import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specializa
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
-import { approvalCacheKeyForPath, approvalDirectoryKey } from "../tools/approval-cache";
 import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
+import { approvedTaskFile, taskFileApprovalTargets, taskFileMatchesApproval } from "./file-approval";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, type ResolvedSpawnPolicy, resolveSpawnPolicy } from "./spawn-policy";
 import { isBundledSeance, seanceTaskGuidance, seanceTaskSchemaFields, validateSeanceParams } from "./seance";
@@ -344,14 +344,21 @@ interface SpawnParams extends TaskParams {
 	taskFileSha256?: string;
 }
 
-async function resolveTaskFile(item: TaskItem): Promise<ResolvedTaskItem> {
+async function resolveTaskFile(owner: object, item: TaskItem): Promise<ResolvedTaskItem> {
 	if (item.taskFile === undefined) return item;
 	try {
+		const approved = approvedTaskFile(owner, item.taskFile);
 		// Non-blocking open lets fstat reject FIFOs without waiting for a writer.
-		const file = await fs.open(item.taskFile, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+		const file = await fs.open(
+			approved?.path ?? item.taskFile,
+			fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (approved ? fs.constants.O_NOFOLLOW : 0),
+		);
 		try {
-			const stat = await file.stat();
+			const stat = await file.stat({ bigint: true });
 			if (!stat.isFile()) throw new Error("must resolve to a regular file");
+			if (approved && !taskFileMatchesApproval(stat, approved)) {
+				throw new Error("changed after approval; retry the call");
+			}
 			if (stat.size > MAX_TASK_FILE_BYTES) throw new Error("exceeds the 4 MiB limit");
 			const bytes = await Bun.file(file.fd)
 				.slice(0, MAX_TASK_FILE_BYTES + 1)
@@ -644,13 +651,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		if (!isRecord(args)) return undefined;
 		const items = Array.isArray(args.tasks) ? args.tasks : [args];
-		const targets: string[] = [];
+		const taskFiles: string[] = [];
 		for (const item of items) {
 			if (isRecord(item) && typeof item.taskFile === "string" && path.isAbsolute(item.taskFile)) {
-				targets.push(approvalCacheKeyForPath(item.taskFile));
+				taskFiles.push(item.taskFile);
 			}
 		}
-		return targets.length > 0 ? [approvalDirectoryKey(this.session.cwd), ...targets] : undefined;
+		return taskFileApprovalTargets(this, this.session.cwd, taskFiles);
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<TaskParams>;
@@ -665,7 +672,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
 		if (typeof params.taskFile === "string") {
-			lines.push(`Task file: ${truncateForPrompt(params.taskFile)}`);
+			lines.push(`Task file: ${truncateForPrompt(sanitizeText(JSON.stringify(params.taskFile)))}`);
 		}
 		if (typeof params.context === "string" && params.context.trim()) {
 			lines.push(`Context:\n${truncateForPrompt(params.context)}`);
@@ -697,8 +704,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				if ("task" in firstTask && typeof firstTask.task === "string") {
 					lines.push(`Task:\n${truncateForPrompt(firstTask.task)}`);
 				}
-				if ("taskFile" in firstTask && typeof firstTask.taskFile === "string") {
-					lines.push(`Task file: ${truncateForPrompt(firstTask.taskFile)}`);
+			}
+			for (const [index, item] of tasks.entries()) {
+				if (isRecord(item) && typeof item.taskFile === "string") {
+					lines.push(`Task ${index + 1} file: ${truncateForPrompt(sanitizeText(JSON.stringify(item.taskFile)))}`);
 				}
 			}
 			if (tasks.length > 1) {
@@ -1046,7 +1055,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const { params } = plan;
 		const spawnItems: ResolvedTaskItem[] = [];
 		try {
-			for (const item of plan.items) spawnItems.push(await resolveTaskFile(item));
+			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this, item));
 		} catch (error) {
 			return createTaskModeError(error instanceof Error ? error.message : String(error));
 		}

@@ -1,7 +1,10 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import { taskToolRenderer } from "@oh-my-pi/pi-tui/tools/task";
+import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 describe("task renderer: streaming call preview", () => {
 	let theme: Theme;
@@ -60,6 +63,49 @@ describe("task renderer: streaming call preview", () => {
 		const out = render(args);
 
 		expect(out).toContain("First");
+	});
+
+	it("shows an unnamed streamed task file as a shortened, sanitized path in both renderers", () => {
+		const args: TaskParams = { taskFile: path.join(os.homedir(), "prompts", "review\t\x1b[31mauth\x1b[0m\n.md") };
+		const expected = "~/prompts/review auth .md";
+		const out = render(args);
+		const view = taskToolRenderer.describeCall(args, { argsComplete: false, expanded: false, isPartial: true });
+
+		expect(out).toContain(expected);
+		expect(out).not.toContain(os.homedir());
+		expect(view?.body).toMatchObject([{ k: "agent", p: { name: "agent", task: expected, status: "pending" } }]);
+	});
+
+	it("shows each batch task file alongside inline briefs in both pending previews", () => {
+		const args: TaskParams = {
+			tasks: [
+				{ task: "Inspect the parser.\nReport findings." },
+				{ taskFile: path.join(os.homedir(), "prompts", "review.md") },
+				{ name: "Implement", taskFile: "/tmp/implementation.md" },
+			],
+		};
+		const out = render(args);
+		const view = taskToolRenderer.describeCall(args, { argsComplete: true, expanded: false, isPartial: false });
+
+		expect(out).toContain("#1: Inspect the parser.");
+		expect(out).toContain("#2: ~/prompts/review.md");
+		expect(out).toContain("Implement: /tmp/implementation.md");
+		expect(view?.body).toMatchObject([
+			{ k: "agent", p: { name: "#1", task: "Inspect the parser. Report findings." } },
+			{ k: "agent", p: { name: "#2", task: "~/prompts/review.md" } },
+			{ k: "agent", p: { name: "Implement", task: "/tmp/implementation.md" } },
+		]);
+	});
+
+	it("keeps a long task file within a narrow pending call card", () => {
+		const args: TaskParams = { taskFile: path.join(os.homedir(), "prompts", `${"nested-".repeat(20)}tail.md`) };
+		const component = taskToolRenderer.renderCall(args, { expanded: false, isPartial: true }, theme);
+		const lines = component.render(40);
+		const out = Bun.stripANSI(lines.join("\n"));
+
+		expect(out).toContain("~/prompts/");
+		expect(out).not.toContain("tail.md");
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(40);
 	});
 
 	it("always renders the full task markdown, collapsed or expanded", () => {

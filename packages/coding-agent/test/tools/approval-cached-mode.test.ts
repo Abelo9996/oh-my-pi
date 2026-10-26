@@ -11,13 +11,14 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
+	ExtensionApprovalAnswer,
 	ExtensionApprovalPrompt,
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { requestApproval, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
+import { recordApprovalGrant, requestApproval, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import {
 	APPROVAL_CACHE_FILENAME,
 	approvalDirectoryKey,
@@ -25,7 +26,7 @@ import {
 	clearApprovalGrants,
 	getApprovalGrants,
 } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
-import { approvalTargetKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
+import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
 import { getAgentDir, isRecord, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 
@@ -177,17 +178,73 @@ describe("approval grant store", () => {
 });
 
 describe("grant choices in the prompt", () => {
-	function recordingUi() {
+	function recordingUi(answer: ExtensionApprovalAnswer = "once") {
 		const prompts: ExtensionApprovalPrompt[] = [];
 		const ui = {
 			select: async () => undefined,
 			approve: async (prompt: ExtensionApprovalPrompt) => {
 				prompts.push(prompt);
-				return "once" as const;
+				return answer;
 			},
 		};
 		return { ui, prompts };
 	}
+
+	it("offers a directory grant that remembers its cwd and file targets", async () => {
+		const agentDir = freshAgentDir();
+		const cwd = path.join(agentDir, "work");
+		fs.mkdirSync(cwd);
+		fs.writeFileSync(path.join(cwd, "task.md"), "Assignment.");
+		const tool: AgentTool = {
+			...pathTool("task", "exec", cwd),
+			approvalCacheTargets: () => [approvalDirectoryKey(cwd), approvalTargetKey(cwd, "task.md")!],
+		};
+		const grants = getApprovalGrants(agentDir, "s1");
+		expect(resolveApproval(tool, {}, "always-ask-cached", {}, grants).policy).toBe("prompt");
+		const { ui, prompts } = recordingUi({ grant: "folder", always: false });
+		const answer = await requestApproval(ui, tool, {}, { grants: true });
+		expect(prompts[0]!.grants?.map(grant => grant.scope)).toEqual(["folder", "target"]);
+		if (typeof answer !== "object") throw new Error("Expected the offered directory grant");
+		recordApprovalGrant(tool, {}, grants, "exec", answer);
+		expect(resolveApproval(tool, {}, "always-ask-cached", {}, grants).policy).toBe("allow");
+	});
+
+	it("offers only an effective target grant when cwd and file are in different directories", async () => {
+		const agentDir = freshAgentDir();
+		const cwd = path.join(agentDir, "work");
+		const promptsDir = path.join(agentDir, "prompts");
+		fs.mkdirSync(cwd);
+		fs.mkdirSync(promptsDir);
+		fs.writeFileSync(path.join(promptsDir, "task.md"), "Assignment.");
+		const tool: AgentTool = {
+			...pathTool("task", "exec", cwd),
+			approvalCacheTargets: () => [approvalDirectoryKey(cwd), approvalTargetKey(promptsDir, "task.md")!],
+		};
+		const grants = getApprovalGrants(agentDir, "s1");
+		expect(resolveApproval(tool, {}, "always-ask-cached", {}, grants).policy).toBe("prompt");
+		const { ui, prompts } = recordingUi({ grant: "target", always: false });
+		const answer = await requestApproval(ui, tool, {}, { grants: true });
+		expect(prompts[0]!.grants?.map(grant => grant.scope)).toEqual(["target"]);
+		if (typeof answer !== "object") throw new Error("Expected the offered target grant");
+		recordApprovalGrant(tool, {}, grants, "exec", answer);
+		expect(resolveApproval(tool, {}, "always-ask-cached", {}, grants).policy).toBe("allow");
+	});
+
+	it("does not offer a folder grant when a file shares its directory with a recursive-search target", async () => {
+		const agentDir = freshAgentDir();
+		const cwd = path.join(agentDir, "work");
+		fs.mkdirSync(cwd);
+		const tool: AgentTool = {
+			...pathTool("search", "read", cwd),
+			approvalCacheTargets: () => [
+				approvalTargetKey(cwd, "task.md")!,
+				approvalTreeSearchKey(approvalDirectoryKey(cwd)),
+			],
+		};
+		const { ui, prompts } = recordingUi();
+		await requestApproval(ui, tool, {}, { grants: true });
+		expect(prompts[0]!.grants?.map(grant => grant.scope)).toEqual(["target"]);
+	});
 
 	it("offers the folder and the file, and names and lists the folder a grant would cover", async () => {
 		const agentDir = freshAgentDir();

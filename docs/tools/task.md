@@ -58,6 +58,8 @@ There is no wire label field: the one-line UI label shown in the TUI/registry is
 
 Prefer `taskFile` for any generated prompt file larger than a few KB that must be passed verbatim. For example, a batch item can be `{ "name": "Implement", "taskFile": "/tmp/implementation-prompt.md", "solutionSpace": "one implementation, design supplied" }`. The file contents replace inline task text throughout dispatch, with the same outer-whitespace trimming. File contents are not passed through JSON escape repair. The recorded tool-call arguments retain the original `taskFile` path and do not expand the file into `task`.
 
+Approval binds each call to the resolved file. Retargeting the submitted symlink cannot redirect that call to a different file. Replacing the resolved file while approval is pending, including an editor's atomic save, requires retrying the call; in-place edits are read at dispatch. Approval dialogs list every batch file path, and pending task cards show shortened file paths before the contents are loaded.
+
 Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
 
 Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape.
