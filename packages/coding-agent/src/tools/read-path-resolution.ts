@@ -11,9 +11,7 @@ export function isRemoteMountPath(absolutePath: string): boolean {
 export function isNotFoundError(error: unknown): boolean {
 	if (!error || typeof error !== "object") return false;
 	const code = (error as { code?: string }).code;
-	// A flattened path list can exceed NAME_MAX even though every member is
-	// valid. Let the literal/archive/sqlite-first recovery try that list too.
-	return code === "ENOENT" || code === "ENOTDIR" || code === "ENAMETOOLONG";
+	return code === "ENOENT" || code === "ENOTDIR";
 }
 /** Per-execute memo of suffix-glob lookups; `null` records a confirmed miss. */
 export type SuffixMatchCache = Map<string, { absolutePath: string; displayPath: string } | null>;

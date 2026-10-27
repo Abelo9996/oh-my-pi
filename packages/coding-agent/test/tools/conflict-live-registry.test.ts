@@ -1,9 +1,10 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { reconcileRegisteredConflicts, scanFileForConflicts } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -31,7 +32,7 @@ describe("registered conflicts follow live marker blocks", () => {
 	});
 
 	beforeEach(async () => {
-		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "conflict-live-registry-"));
+		cwd = await fs.promises.mkdtemp(path.join(os.tmpdir(), "conflict-live-registry-"));
 		session = {
 			cwd,
 			hasUI: false,
@@ -45,6 +46,7 @@ describe("registered conflicts follow live marker blocks", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await removeWithRetries(cwd);
 	});
 
@@ -147,7 +149,7 @@ describe("registered conflicts follow live marker blocks", () => {
 		const file = path.join(cwd, "deleted.ts");
 		await Bun.write(file, CONFLICT);
 		await read.execute("register", { path: "deleted.ts:conflicts" });
-		await fs.unlink(file);
+		await fs.promises.unlink(file);
 		await expect(read.execute("deleted", { path: "conflict://1" })).rejects.toThrow(/not found|no longer/);
 		expect(session.conflictHistory?.entries()).toHaveLength(0);
 		await expect(write.execute("empty-bulk", { path: "conflict://*", content: "@ours" })).rejects.toThrow(
@@ -155,7 +157,7 @@ describe("registered conflicts follow live marker blocks", () => {
 		);
 		await Bun.write(file, CONFLICT);
 		await read.execute("register-again", { path: "deleted.ts:conflicts" });
-		await fs.unlink(file);
+		await fs.promises.unlink(file);
 		await expect(write.execute("deleted-bulk", { path: "conflict://*", content: "@ours" })).rejects.toThrow(
 			/nothing to resolve/,
 		);
@@ -181,5 +183,62 @@ describe("registered conflicts follow live marker blocks", () => {
 		expect(session.conflictHistory?.get(1)?.startLine).toBe(10241);
 		await write.execute("resolve-tail", { path: "conflict://1", content: "@ours" });
 		expect(await Bun.file(file).text()).toBe(`${filler}ours\n`);
+	});
+
+	it("streams beyond the discovery cap while preserving live IDs, shifts and stale detection", async () => {
+		// A small discovery cap exercises the same unscanned-region contract
+		// without making the fixture large. The unrelated first line spans chunks.
+		const prefix = `${"x".repeat(96 * 1024)}\n`;
+		const content = prefix + CONFLICT;
+		const file = path.join(cwd, "streamed.ts");
+		await Bun.write(file, content);
+		await read.execute("register-range", { path: "streamed.ts:2-6:raw" });
+		const history = session.conflictHistory!;
+		history.reconcilePath(file, await scanFileForConflicts(file, { maxBytes: 64 }));
+		expect(history.get(1)?.startLine).toBe(2);
+
+		const prototype = Object.getPrototypeOf(Bun.file(file));
+		const bytes = spyOn(prototype, "bytes");
+		const arrayBuffer = spyOn(prototype, "arrayBuffer");
+		const stream = spyOn(fs, "createReadStream");
+		expect(text(await read.execute("live-side", { path: "conflict://1/theirs:raw" }))).toBe("theirs");
+		expect(bytes).not.toHaveBeenCalled();
+		expect(arrayBuffer).not.toHaveBeenCalled();
+		expect(stream).toHaveBeenCalled();
+		for (const [, options] of stream.mock.calls) {
+			expect(options).toMatchObject({ highWaterMark: 64 * 1024 });
+		}
+
+		await Bun.write(file, `added header\n${content}`);
+		await reconcileRegisteredConflicts(history);
+		expect(history.entries().map(entry => entry.id)).toEqual([1]);
+		expect(history.get(1)?.startLine).toBe(3);
+		await Bun.write(file, `added header\n${prefix}${CONFLICT.replace("ours\n", "changed\n")}`);
+		await reconcileRegisteredConflicts(history);
+		expect(history.entries()).toHaveLength(0);
+		expect(bytes).not.toHaveBeenCalled();
+		expect(arrayBuffer).not.toHaveBeenCalled();
+	});
+
+	it("validates BOM and CRLF diff3 blocks across chunks without a final newline", async () => {
+		const file = path.join(cwd, "framing.ts");
+		await Bun.write(
+			file,
+			`\uFEFF${[
+				"<<<<<<< HEAD",
+				"x".repeat(64 * 1024 + 13),
+				"||||||| ancestor",
+				"base",
+				"=======",
+				"theirs",
+				">>>>>>> topic",
+			].join("\r\n")}`,
+		);
+		await read.execute("register-framing", { path: "framing.ts:conflicts" });
+		const history = session.conflictHistory!;
+		await reconcileRegisteredConflicts(history);
+		expect(history.entries().map(entry => entry.id)).toEqual([1]);
+		expect(history.get(1)?.baseLine).toBe(3);
+		expect(history.get(1)?.endLine).toBe(7);
 	});
 });

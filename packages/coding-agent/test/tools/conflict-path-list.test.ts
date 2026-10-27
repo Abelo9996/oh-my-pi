@@ -51,6 +51,12 @@ describe("read conflict-selector path lists", () => {
 		}
 	});
 
+	it("preserves ENAMETOOLONG for a single filename instead of recovering it as missing", async () => {
+		await expect(read.execute("long-single", { path: `${"x".repeat(260)}.ts` })).rejects.toMatchObject({
+			code: "ENAMETOOLONG",
+		});
+	});
+
 	it("retains short conflict and ordinary range selectors on their own targets", async () => {
 		await Bun.write(path.join(cwd, "a.ts"), CONFLICT);
 		await Bun.write(path.join(cwd, "b.txt"), "first\nsecond\nthird\n");
