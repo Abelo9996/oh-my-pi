@@ -1887,6 +1887,7 @@ export class CommandController {
 		const component = new BashExecutionComponent(command, this.ctx.ui, excludeFromContext);
 		this.ctx.bashComponent = component;
 		let detachInput: (() => void) | undefined;
+		let finished = false;
 
 		if (isDeferred) {
 			this.ctx.pendingMessagesContainer.addChild(this.ctx.bashComponent);
@@ -1913,7 +1914,13 @@ export class CommandController {
 						...bashPtyViewport(this.ctx.ui),
 						onChunk: chunk => this.ctx.bashComponent?.appendPtyChunk(chunk),
 						onStdin: write => {
+							if (finished) return;
+							// A TSP field without a mode handles printable keys itself and sends
+							// `edit` packets instead of raw input. Label it while the PTY owns
+							// the keyboard so Tern delivers those keys to the input listener.
 							detachInput = this.#forwardKeysToPty(component, write);
+							this.ctx.editor.nativeKeyPassthrough = true;
+							this.ctx.ui.requestRender();
 						},
 					},
 				},
@@ -1943,7 +1950,9 @@ export class CommandController {
 			}
 			this.ctx.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		} finally {
+			finished = true;
 			detachInput?.();
+			if (detachInput) this.ctx.editor.nativeKeyPassthrough = false;
 			this.ctx.bashComponent = undefined;
 			this.ctx.ui.requestRender();
 		}

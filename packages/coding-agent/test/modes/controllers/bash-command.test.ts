@@ -316,7 +316,7 @@ describe("bash shortcut command", () => {
 			globalExpansions++;
 			return { consume: true };
 		});
-		const editor = {};
+		const editor = { nativeKeyPassthrough: false };
 		let focused: unknown = editor;
 		Object.assign(ctx, {
 			editor,
@@ -335,8 +335,11 @@ describe("bash shortcut command", () => {
 		const press = (data: string) => [...listeners].some(listener => listener(data)?.consume === true);
 		const written: string[] = [];
 		const pressed: Record<string, boolean> = {};
+		let onStdin: BashPtyOptions["onStdin"];
 		executeBash.mockImplementationOnce(async (_command, _onChunk, options) => {
-			options?.pty?.onStdin?.(data => written.push(data));
+			onStdin = options?.pty?.onStdin;
+			onStdin?.(data => written.push(data));
+			expect(editor.nativeKeyPassthrough).toBe(true);
 			// The command is blocked on `read` while the user types in the composer.
 			pressed.answer = press("y");
 			pressed.nanoWrite = press("\x0f");
@@ -360,6 +363,7 @@ describe("bash shortcut command", () => {
 		const controller = new CommandController(ctx);
 
 		await controller.handleBashCommand("read -k 1 answer");
+		expect(editor.nativeKeyPassthrough).toBe(false);
 
 		expect(written).toEqual(["y", "\x0f", "\r"]);
 		expect(globalExpansions).toBe(0);
@@ -375,6 +379,11 @@ describe("bash shortcut command", () => {
 		// After exit the global Ctrl+O shortcut works again.
 		expect(press("\x0f")).toBe(true);
 		expect(globalExpansions).toBe(1);
+		expect(listeners.size).toBe(1);
+		// A native start notification queued behind command completion must not
+		// reclaim the composer after the PTY has exited.
+		onStdin?.(data => written.push(data));
+		expect(editor.nativeKeyPassthrough).toBe(false);
 		expect(listeners.size).toBe(1);
 	});
 
