@@ -20,7 +20,12 @@ import type {
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
-import type { CompactOptions, PlanReviewChoice, PlanReviewRequestedEvent } from "../extensibility/extensions/types";
+import type {
+	CompactOptions,
+	ExtensionSessionModes,
+	PlanReviewChoice,
+	PlanReviewRequestedEvent,
+} from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
@@ -643,6 +648,7 @@ export interface InteractiveModeContext {
 	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string; role?: string }): boolean;
 	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
 	openPlanReview(options?: { fromExtension?: boolean }): Promise<boolean>;
+	readonly sessionModes: ExtensionSessionModes;
 
 	// Hook UI methods
 	initHooksAndCustomTools(): Promise<void>;
