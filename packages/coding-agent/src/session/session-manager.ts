@@ -4596,16 +4596,21 @@ export class SessionManager {
 	/**
 	 * Picker-facing project list: pinned sessions first, untitled empties
 	 * dropped. Titled empties stay — a title is user intent worth resuming.
-	 * Includes the same folder in the repository's other git worktrees, so a
-	 * session `/wt` moved stays reachable from the checkout it left.
+	 * By default includes the same folder in the repository's other git worktrees,
+	 * so a session `/wt` moved stays reachable from the checkout it left.
+	 * The directory scope limits the picker to its own session bucket.
 	 */
 	static async listForPicker(
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
+		worktreeScope: "directory" | "repo" = "repo",
 	): Promise<SessionInfo[]> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
-		const [pinned, siblingDirs] = await Promise.all([loadPinnedSessionIds(), worktreeSessionDirs(cwd, dir)]);
+		const [pinned, siblingDirs] = await Promise.all([
+			loadPinnedSessionIds(),
+			worktreeScope === "repo" ? worktreeSessionDirs(cwd, dir) : [],
+		]);
 		return sortPinnedFirst(filterSessionsForPicker(await listSessions(dir, storage, siblingDirs), pinned), pinned);
 	}
 

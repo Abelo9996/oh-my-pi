@@ -46,6 +46,7 @@ import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-c
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -7138,6 +7139,69 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(primaryModel.id);
 		expect(session.thinkingLevel).toBeUndefined();
 	});
+
+	for (const { name, primaryThinking, suffix, expectedThinking } of [
+		{
+			name: "switches fixed effort to auto for an explicit :auto fallback",
+			primaryThinking: Effort.High,
+			suffix: ":auto",
+			expectedThinking: "auto",
+		},
+		{
+			name: "preserves auto thinking for a bare fallback",
+			primaryThinking: "auto",
+			suffix: "",
+			expectedThinking: "auto",
+		},
+		{
+			name: "applies an explicit concrete fallback effort instead of auto",
+			primaryThinking: "auto",
+			suffix: ":low",
+			expectedThinking: Effort.Low,
+		},
+	] satisfies Array<{
+		name: string;
+		primaryThinking: ConfiguredThinkingLevel;
+		suffix: string;
+		expectedThinking: ConfiguredThinkingLevel;
+	}>) {
+		it(name, async () => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+			if (!primaryModel || !fallbackModel) {
+				throw new Error("Expected bundled test models to exist");
+			}
+
+			const requestedModels: string[] = [];
+			const agent = createFallbackAgent(primaryModel, requestedModels);
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": {
+					default: [`${fallbackModel.provider}/${fallbackModel.id}${suffix}`],
+				},
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}:${primaryThinking}`);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				thinkingLevel: primaryThinking,
+			});
+
+			await session.prompt("Recover with the configured fallback thinking");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				`${primaryModel.provider}/${primaryModel.id}`,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+			]);
+			expect(session.model?.id).toBe(fallbackModel.id);
+			expect(session.isAutoThinking).toBe(expectedThinking === "auto");
+			expect(session.configuredThinkingLevel()).toBe(expectedThinking);
+		});
+	}
 
 	it("clamps a fallback selector's explicit thinking level to the session effort ceiling", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");

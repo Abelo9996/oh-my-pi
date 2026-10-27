@@ -574,6 +574,7 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 		spawn_async_ao_list_in_task(ao_list, shell, &async_params)
 	};
 
+	shell.set_last_background_pid(job.last_pid());
 	Ok(shell.jobs_mut().add_as_current(job))
 }
 
@@ -617,6 +618,30 @@ async fn classify_background_process_pipeline<SE: extensions::ShellExtensions>(
 ) -> Result<BackgroundProcessPipeline, error::Error> {
 	if pipeline.bang {
 		return Ok(BackgroundProcessPipeline::Internal);
+	}
+
+	if pipeline.seq.len() > 1 {
+		// Inspect literal command names only: probing expanded command words
+		// here could run substitutions twice or mutate the parent shell before
+		// each stage executes in its own pipeline subshell.
+		for command in &pipeline.seq {
+			let ast::Command::Simple(simple_cmd) = command else {
+				return Ok(BackgroundProcessPipeline::Internal);
+			};
+			let Some(word) = simple_cmd.word_or_name.as_ref() else {
+				return Ok(BackgroundProcessPipeline::Internal);
+			};
+			let name = word.value.as_str();
+			if name.is_empty()
+				|| !name.chars().all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+'))
+				|| shell.aliases().contains_key(name)
+				|| shell.builtins().get(name).is_some_and(|registration| !registration.disabled)
+				|| shell.funcs().get(name).is_some()
+			{
+				return Ok(BackgroundProcessPipeline::Internal);
+			}
+		}
+		return Ok(BackgroundProcessPipeline::Direct);
 	}
 
 	let [ast::Command::Simple(simple_cmd)] = pipeline.seq.as_slice() else {

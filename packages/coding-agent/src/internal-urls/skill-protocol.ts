@@ -104,6 +104,7 @@ async function skillTargetPath(
 	{ skill, urlPath }: UrlSkill,
 	directory: boolean,
 	create = false,
+	contain = false,
 ): Promise<SkillTarget> {
 	let resolvedPath: string;
 	if (!urlPath || urlPath === "/") {
@@ -120,14 +121,20 @@ async function skillTargetPath(
 	// Agent Plugin skills (§4.1): every target, including the bare instruction
 	// file and base directory, must canonically resolve within the plugin root.
 	// Symlinks may target other files inside the same package.
-	if (!skill.containRoot) return { skill, path: resolvedPath };
-	const escape = `skill:// path resolves outside the plugin root: ${url.href}`;
-	const contained = await resolveContainedPath(skill.containRoot, resolvedPath);
+	if (!skill.containRoot && !contain) return { skill, path: resolvedPath };
+	const containRoot = skill.containRoot ?? (await fs.realpath(skill.baseDir));
+	// Local skill roots may themselves be links. Rebase their lexical children
+	// onto the real root before the shared helper checks descendant links.
+	const containmentPath = skill.containRoot
+		? resolvedPath
+		: path.resolve(containRoot, path.relative(path.resolve(skill.baseDir), resolvedPath));
+	const escape = `skill:// path resolves outside the ${skill.containRoot ? "plugin" : "skill"} root: ${url.href}`;
+	const contained = await resolveContainedPath(containRoot, containmentPath);
 	if (contained.status === "outside") throw new UrlContainmentError(escape);
 	if (contained.status === "ok") return { skill, path: contained.realPath };
 	if (create) {
 		try {
-			await ensureCreatableWithinRoot(resolvedPath, skill.containRoot, "skill", url.href);
+			await ensureCreatableWithinRoot(containmentPath, containRoot, "skill", url.href);
 		} catch (error) {
 			// Same wording as the read path: the plugin root, not a per-skill root, bounds the package.
 			throw error instanceof UrlContainmentError ? new UrlContainmentError(escape) : error;
@@ -202,16 +209,23 @@ async function locateSkillTarget(
 	context: ResolveContext | undefined,
 	directory: boolean,
 	create = false,
+	contain = false,
 ): Promise<LocatedSkillTarget> {
 	const skills = context?.skills ?? getActiveSkills();
 	const named = findUrlSkill(url, skills);
-	let target = await skillTargetPath(url, named, directory, create);
+	let target = await skillTargetPath(url, named, directory, create, contain);
 	let stats = await statIfExists(target.path);
 	const host = contextRediscoveryHost(skills, context);
 	if (await isStaleTarget(target, stats, host)) {
 		const held = host.skills !== skills ? findStaleSkillStandIn(named.skill, host.skills) : undefined;
 		if (held) {
-			const heldTarget = await skillTargetPath(url, { skill: held, urlPath: named.urlPath }, directory, create);
+			const heldTarget = await skillTargetPath(
+				url,
+				{ skill: held, urlPath: named.urlPath },
+				directory,
+				create,
+				contain,
+			);
 			const heldStats = await statIfExists(heldTarget.path);
 			if (!(await isStaleTarget(heldTarget, heldStats, host))) return { path: heldTarget.path, stats: heldStats };
 		}
@@ -220,7 +234,7 @@ async function locateSkillTarget(
 		// can own its name now, and neither an MCP server nor a second lookup (`resolve` after `locate`
 		// defers) may answer for the dropped one with it.
 		if (!rediscovered) throw new Error(`Unknown skill: ${named.skill.name}`);
-		target = await skillTargetPath(url, { skill: rediscovered, urlPath: named.urlPath }, directory, create);
+		target = await skillTargetPath(url, { skill: rediscovered, urlPath: named.urlPath }, directory, create, contain);
 		stats = await statIfExists(target.path);
 	}
 	return { path: target.path, stats };
@@ -324,7 +338,13 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
 		let target: LocatedSkillTarget;
 		try {
-			target = await locateSkillTarget(url, context, options?.directory === true, options?.create === true);
+			target = await locateSkillTarget(
+				url,
+				context,
+				options?.directory === true,
+				options?.create === true,
+				context?.containSkillPaths === true,
+			);
 		} catch (error) {
 			if (error instanceof UnknownSkillError && !options?.localOnly && MCPManager.available()) return null;
 			throw error;

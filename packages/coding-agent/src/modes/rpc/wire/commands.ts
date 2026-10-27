@@ -199,6 +199,19 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { muted: "boolean" },
 		unwrap: "muted",
 	},
+	{
+		name: "dictation_start",
+		doc: "Start draft-only speech-to-text; resolves once the microphone is recording.",
+		params: { captureId: "string" },
+		timeoutMs: 600_000,
+	},
+	{
+		name: "dictation_stop",
+		doc: "Stop and flush draft-only dictation, returning the accumulated text.",
+		result: { text: "string" },
+		unwrap: "text",
+		timeoutMs: 600_000,
+	},
 
 	{
 		name: "set_model",
