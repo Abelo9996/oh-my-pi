@@ -3882,11 +3882,14 @@ describe("AgentSession retry fallback", () => {
 			// the status alone says the model is throttled.
 			name: "a 429 concurrency cap",
 			failure: () =>
-				AIError.finalize(Object.assign(new Error("concurrent connections limit (retry-after-ms=1)"), { status: 429 }), {
-					api: "anthropic-messages",
-					provider: "anthropic",
-					model: "claude-sonnet-4-5",
-				}),
+				AIError.finalize(
+					Object.assign(new Error("concurrent connections limit (retry-after-ms=1)"), { status: 429 }),
+					{
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "claude-sonnet-4-5",
+					},
+				),
 		},
 	])(
 		"walks the Anthropic chain at once when the signing model fails with $name instead of retrying the throttled model",
