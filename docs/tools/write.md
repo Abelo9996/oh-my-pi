@@ -152,11 +152,12 @@ content: ""
 
 ### Merge-conflict resolution
 - Read `<file>:conflicts` (or a read window surfacing markers) to register session-stable ids. `conflict://<N>` replaces only that recorded marker block and revalidates it against the file. Copied adjacent context is trimmed when it would duplicate lines outside the block, with a receipt note.
+- Registered ids are reconciled against live marker blocks before conflict reads/writes and bulk summaries. Aborts, resets, external resolutions and deleted files retire stale ids; a different block at the same line gets a fresh id. Unchanged blocks keep their ids when source lines shift. Complete discovery scans replace that file's registered set, while capped scans preserve unscanned regions.
 - A line exactly equal to `@ours`, `@theirs`, `@base`, or `@both` expands to the recorded side (`@both` is ours then theirs). `@base` requires a diff3 base. Other content is literal.
 - `conflict://*` with ordinary content applies the same replacement/token expansion to every registered conflict. Per-id directive content such as `1: @ours\n2: @theirs` resolves only the listed ids; every non-empty directive line must use one side token and ids may not repeat.
 - Bulk processing is all-or-nothing per file, applied bottom-up. Other files can still succeed; partial cross-file success returns `isError: true`, while an all-failed pass throws. Successful ids are invalidated and failed-file ids remain registered for retry.
-- Conflict writes bypass LSP formatting/diagnostics while markers remain. Stale duplicate registrations of a region resolved in the same bulk pass are treated as already resolved; distinct identical blocks remain addressable.
-- `/ours`, `/theirs`, `/base`, and `/both` URI scopes are read-only.
+- Conflict writes bypass LSP formatting/diagnostics while markers remain; distinct identical blocks remain separately addressable.
+- `/ours`, `/theirs`, and `/base` URI scopes are read-only. Read line selectors do not change the write directive grammar.
 
 
 ## Side Effects

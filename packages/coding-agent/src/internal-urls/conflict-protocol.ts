@@ -36,7 +36,7 @@ export class ConflictProtocolHandler implements ProtocolHandler {
 	};
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		const region = readConflictUri(callerSession(context), url.rawHref ?? url.href);
+		const region = await readConflictUri(callerSession(context), url.rawHref ?? url.href);
 		return {
 			url: url.href,
 			content: region.text,

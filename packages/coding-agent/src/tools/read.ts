@@ -39,13 +39,7 @@ import {
 } from "../ida";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
-import {
-	extractUriScheme,
-
-	InternalUrlRouter,
-	type SchemeSpec,
-	sessionResolveContext,
-} from "../internal-urls";
+import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -77,6 +71,7 @@ import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { isSampleProfilePath, renderSampleProfile } from "../utils/sample-profile";
 import { buildDirectoryTree, type DirectoryTree } from "../workspace-tree";
 import {
+	type ConflictFileScan,
 	formatConflictSummary,
 	formatConflictWarning,
 	formatScanCapNote,
@@ -2761,6 +2756,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						details.displayContent = capturedDisplayContent;
 					}
 
+					// Refresh known ids even when this read shows clean text after an external
+					// edit/reset. Discovery's cap never prunes unscanned registered regions.
+					let conflictScan: ConflictFileScan | undefined;
+					if (!immutable && this.session.conflictHistory?.hasPath(absolutePath)) {
+						conflictScan = await scanFileForConflicts(absolutePath);
+						this.session.conflictHistory.reconcilePath(absolutePath, conflictScan);
+					}
 					// Immutable sources have no edit path, so their markers are content, not conflicts.
 					if (!immutable && !firstLineExceedsLimit && collectedLines.length > 0) {
 						const blocks = scanConflictLines(collectedLines, startLineDisplay);
@@ -2780,7 +2782,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							let totalInFile = entries.length;
 							let truncatedAtLine: number | undefined;
 							try {
-								const fileScan = await scanFileForConflicts(absolutePath);
+								const fileScan = conflictScan ?? (await scanFileForConflicts(absolutePath));
 								totalInFile = Math.max(entries.length, fileScan.blocks.length);
 								truncatedAtLine = fileScan.truncatedAtLine;
 							} catch {
@@ -2863,6 +2865,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const scan = await scanFileForConflicts(absolutePath);
 		const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 		const history = getConflictHistory(this.session);
+		history.reconcilePath(absolutePath, scan);
 		const entries = scan.blocks.map(block =>
 			history.register({
 				absolutePath,

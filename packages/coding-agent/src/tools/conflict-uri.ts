@@ -11,12 +11,12 @@ import { getEditStore } from "../edit/store";
 import type { InternalWriteResult } from "../internal-urls/types";
 import { writethroughNoop } from "../lsp/writethrough";
 import {
-	conflictRegionPresent,
-	conflictRegionsEqual,
 	expandContentTokens,
 	getConflictHistory,
 	parseConflictUri,
 	type ParsedConflictUri,
+	reconcileRegisteredConflicts,
+	scanConflictLines,
 	spliceConflict,
 } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
@@ -46,8 +46,9 @@ function parseTarget(raw: string): ParsedConflictUri {
 	return parsed;
 }
 
-function requireEntry(session: ToolSession, id: number): ConflictEntry {
+async function requireEntry(session: ToolSession, id: number): Promise<ConflictEntry> {
 	const history = getConflictHistory(session);
+	await reconcileRegisteredConflicts(history);
 	const entry = history.get(id);
 	if (!entry) {
 		const byPath = new Map<string, number[]>();
@@ -71,7 +72,7 @@ function requireEntry(session: ToolSession, id: number): ConflictEntry {
 				? `Registered: ${files.join("; ")}${more(byPath.size - limit, " files")}.`
 				: "No conflicts are registered.";
 		throw new ToolError(
-			`Conflict #${id} not found: it was resolved, or no \`read\` has shown its block yet (a ranged read registers only the blocks it shows, so unseen blocks' ids can't be guessed). Read \`<path>:conflicts\` on the file to list and register its blocks. ${known}`,
+			`Conflict #${id} not found: it was resolved, became stale, or no \`read\` has shown its block yet (a ranged read registers only the blocks it shows, so unseen blocks' ids can't be guessed). Read \`<path>:conflicts\` on the file to list and register its blocks. ${known}`,
 		);
 	}
 	return entry;
@@ -81,14 +82,14 @@ function requireEntry(session: ToolSession, id: number): ConflictEntry {
  * Select a `conflict://<N>` (or `conflict://<N>/<scope>`) body. The shared
  * read pipeline slices its raw text and renders once using source coordinates.
  */
-export function readConflictUri(session: ToolSession, raw: string): ConflictRegionRead {
+export async function readConflictUri(session: ToolSession, raw: string): Promise<ConflictRegionRead> {
 	const target = parseTarget(raw);
 	if (target.id === "*") {
 		throw new ToolError(
 			"Reading `conflict://*` is not supported — wildcards are write-only. Use the `<path>:conflicts` read selector for the full list of conflicts in a file, or read `conflict://<N>` to inspect a single block.",
 		);
 	}
-	const entry = requireEntry(session, target.id);
+	const entry = await requireEntry(session, target.id);
 	const region = renderConflictRegion(entry, target.scope);
 	return {
 		text: region.lines.join("\n"),
@@ -117,7 +118,7 @@ export async function writeConflictUri(
 	}
 	const { text: cleanContent, stripped } = stripWriteContent(session, content);
 	if (target.id === "*") return resolveAllConflicts(session, cleanContent, stripped, signal, content);
-	return resolveConflict(session, requireEntry(session, target.id), cleanContent, stripped, signal);
+	return resolveConflict(session, await requireEntry(session, target.id), cleanContent, stripped, signal);
 }
 
 /**
@@ -155,22 +156,7 @@ async function resolveConflict(
 	getEditStore(session).invalidate(absolutePath);
 	const history = session.conflictHistory;
 	history?.invalidate(entry.id);
-	if (history) {
-		// Drop stale duplicate registrations of the same region: a re-read
-		// after an out-of-band shift registers a fresh id at the new
-		// startLine while the stale twin persists at the old one. A DISTINCT
-		// conflict block that is merely byte-identical still occurs in the
-		// post-splice content and must stay addressable.
-		for (const other of history.entries()) {
-			if (
-				other.absolutePath === absolutePath &&
-				conflictRegionsEqual(other, entry) &&
-				!conflictRegionPresent(newContent, other)
-			) {
-				history.invalidate(other.id);
-			}
-		}
-	}
+	history?.reconcilePath(absolutePath, { blocks: scanConflictLines(newContent.split("\n"), 1) });
 
 	const header = maybeWriteSnapshotHeader(session, absolutePath, newContent);
 	const range =
@@ -331,6 +317,7 @@ async function resolveAllConflicts(
 	rawContent: string,
 ): Promise<InternalWriteResult> {
 	const history = getConflictHistory(session);
+	await reconcileRegisteredConflicts(history);
 	const allEntries = history.entries();
 	if (allEntries.length === 0) {
 		throw new ToolError(
@@ -384,7 +371,6 @@ async function resolveAllConflicts(
 
 		let text: string;
 		const resolvedEntries: ConflictEntry[] = [];
-		const staleEntries: ConflictEntry[] = [];
 		let failure: string | undefined;
 		try {
 			text = await Bun.file(absolutePath).text();
@@ -404,13 +390,6 @@ async function resolveAllConflicts(
 				totalEchoTrimmed += splice.trimmedLeading + splice.trimmedTrailing;
 				resolvedEntries.push(entry);
 			} catch (error) {
-				// A locate-miss for a region an earlier entry already spliced
-				// in this pass is a stale duplicate registration (re-read after
-				// an out-of-band shift) — treat it as already resolved.
-				if (resolvedEntries.some(done => conflictRegionsEqual(done, entry))) {
-					staleEntries.push(entry);
-					continue;
-				}
 				failure = error instanceof Error ? error.message : String(error);
 				break;
 			}
@@ -429,7 +408,6 @@ async function resolveAllConflicts(
 		session.bumpFileMutationVersion?.(absolutePath);
 		getEditStore(session).invalidate(absolutePath);
 		for (const entry of resolvedEntries) history.invalidate(entry.id);
-		for (const entry of staleEntries) history.invalidate(entry.id);
 		const header = maybeWriteSnapshotHeader(session, absolutePath, text);
 		succeededFiles.push({ displayPath: sample.displayPath, count: resolvedEntries.length, header });
 		totalResolvedIds += resolvedEntries.length;
@@ -446,11 +424,17 @@ async function resolveAllConflicts(
 			summaryLines.push(`  ${file.displayPath}: ${file.count} ${conflictWord(file.count)}`);
 		}
 	}
-	if (directives && selectedEntries.length < allEntries.length) {
-		const remaining = allEntries.filter(entry => !directives.has(entry.id)).map(entry => `#${entry.id}`);
-		summaryLines.push(
-			`Directive mode: ${remaining.length} unlisted ${conflictWord(remaining.length)} still registered (${remaining.join(", ")}).`,
-		);
+	await reconcileRegisteredConflicts(history);
+	if (directives) {
+		const remaining = history
+			.entries()
+			.filter(entry => !directives.has(entry.id))
+			.map(entry => `#${entry.id}`);
+		if (remaining.length > 0) {
+			summaryLines.push(
+				`Directive mode: ${remaining.length} unlisted ${conflictWord(remaining.length)} still registered (${remaining.join(", ")}).`,
+			);
+		}
 	}
 	if (totalEchoTrimmed > 0) {
 		summaryLines.push(

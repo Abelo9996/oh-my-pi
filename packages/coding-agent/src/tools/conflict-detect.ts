@@ -20,6 +20,7 @@ import type { ConflictBlock, ConflictEntry, ConflictScope } from "@oh-my-pi/pi-t
  */
 
 import type { ToolSession } from "./index";
+import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const OURS_PREFIX = "<<<<<<<";
@@ -181,15 +182,16 @@ export class ConflictHistory {
 	#entries = new Map<number, ConflictEntry>();
 
 	/**
-	 * Register a conflict block. Returns the (possibly pre-existing) entry
-	 * — if the same `absolutePath`+`startLine` was registered before, the
-	 * earlier id is reused so a re-read does not inflate the counter or
-	 * orphan the prior id. The recorded region is overwritten on re-read
-	 * so the splice always reflects the current marker positions on disk.
+	 * Reuse an id only for the same block at the same position. Reconciliation
+	 * relocates unchanged blocks first; a changed block never inherits an old id.
 	 */
 	register(input: Omit<ConflictEntry, "id">): ConflictEntry {
 		for (const existing of this.#entries.values()) {
 			if (existing.absolutePath === input.absolutePath && existing.startLine === input.startLine) {
+				if (!conflictRegionsEqual(existing, input)) {
+					this.#entries.delete(existing.id);
+					continue;
+				}
 				const merged: ConflictEntry = { ...input, id: existing.id };
 				this.#entries.set(existing.id, merged);
 				return merged;
@@ -199,6 +201,57 @@ export class ConflictHistory {
 		const entry: ConflictEntry = { ...input, id };
 		this.#entries.set(id, entry);
 		return entry;
+	}
+
+	hasPath(absolutePath: string): boolean {
+		for (const entry of this.#entries.values()) {
+			if (entry.absolutePath === absolutePath) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Refresh only already-registered blocks, without registering unseen ones.
+	 * Match unchanged positions before relocations so identical distinct blocks
+	 * keep separate ids. A capped scan cannot disprove a block crossing or beyond
+	 * its unscanned boundary.
+	 */
+	reconcilePath(absolutePath: string, scan: ConflictFileScan): void {
+		const entries = this.entries().filter(entry => entry.absolutePath === absolutePath);
+		const available = new Set(scan.blocks);
+		const matched = new Map<ConflictEntry, ConflictBlock>();
+		for (const entry of entries) {
+			for (const block of available) {
+				if (block.startLine === entry.startLine && conflictRegionsEqual(entry, block)) {
+					matched.set(entry, block);
+					available.delete(block);
+					break;
+				}
+			}
+		}
+		for (const entry of entries) {
+			if (matched.has(entry)) continue;
+			let nearest: ConflictBlock | undefined;
+			let distance = Number.POSITIVE_INFINITY;
+			for (const block of available) {
+				const delta = Math.abs(block.startLine - entry.startLine);
+				if (delta < distance && conflictRegionsEqual(entry, block)) {
+					nearest = block;
+					distance = delta;
+				}
+			}
+			if (nearest) {
+				matched.set(entry, nearest);
+				available.delete(nearest);
+			}
+		}
+		for (const entry of entries) {
+			const block = matched.get(entry);
+			if (block) this.#entries.set(entry.id, { ...entry, ...block });
+			else if (scan.truncatedAtLine === undefined || entry.endLine < scan.truncatedAtLine) {
+				this.#entries.delete(entry.id);
+			}
+		}
 	}
 
 	get(id: number): ConflictEntry | undefined {
@@ -221,6 +274,22 @@ export class ConflictHistory {
 			if (entry.absolutePath === absolutePath) {
 				this.#entries.delete(id);
 			}
+		}
+	}
+}
+
+/**
+ * Conflict URI reads/writes and bulk summaries must validate every cached id,
+ * including blocks beyond the discovery scan cap. Never register unseen blocks.
+ */
+export async function reconcileRegisteredConflicts(history: ConflictHistory): Promise<void> {
+	const paths = new Set(history.entries().map(entry => entry.absolutePath));
+	for (const absolutePath of paths) {
+		try {
+			history.reconcilePath(absolutePath, await scanFileForConflicts(absolutePath, { maxBytes: Infinity }));
+		} catch (error) {
+			if (!isEnoent(error) && !hasFsCode(error, "ENOTDIR")) throw error;
+			history.invalidatePath(absolutePath);
 		}
 	}
 }
@@ -455,11 +524,8 @@ function buildRecordedRegion(entry: ConflictBlock): string[] {
 }
 
 /**
- * True when two registered blocks record the same marker-block content
- * (labels and all sides). Out-of-band edits can shift a block's line
- * numbers between reads, registering a fresh id while the stale one
- * persists; callers use content identity to treat a locate-miss for the
- * stale twin as "already resolved" instead of a hard failure.
+ * True when two blocks record the same marker-block content (labels and all
+ * sides), independent of source coordinates.
  */
 export function conflictRegionsEqual(a: ConflictBlock, b: ConflictBlock): boolean {
 	const ra = buildRecordedRegion(a);
@@ -469,19 +535,6 @@ export function conflictRegionsEqual(a: ConflictBlock, b: ConflictBlock): boolea
 		if (ra[i] !== rb[i]) return false;
 	}
 	return true;
-}
-
-/**
- * True when the entry's recorded marker block still occurs in `content`
- * (LF-normalized — recorded sections are stored LF). Distinguishes a stale
- * re-registration of a just-resolved region (no longer present) from a
- * DISTINCT conflict block that happens to be byte-identical (still present
- * elsewhere in the file and must stay addressable).
- */
-export function conflictRegionPresent(content: string, entry: ConflictBlock): boolean {
-	const region = buildRecordedRegion(entry).join("\n");
-	const normalized = content.includes("\r") ? content.replace(/\r\n/g, "\n") : content;
-	return normalized.includes(region);
 }
 
 /**
