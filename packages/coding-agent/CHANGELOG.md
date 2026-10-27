@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `pr://` metadata and diffs staying stale after successful `git push` calls through `bash` ([#17183](https://github.com/can1357/oh-my-pi/pull/17183) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.13.1] - 2026-10-27
 
 ### Added
