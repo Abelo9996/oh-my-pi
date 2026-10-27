@@ -288,6 +288,13 @@ impl Pattern {
 		let raw_relative = virtual_spelling && prefix_to_remove.is_some();
 		let match_encoded = virtual_spelling && prefix_to_remove.is_none();
 
+		// Literal components after the last glob are appended to every match
+		// without being listed, so nothing has proven they exist yet: `*/x`
+		// would keep `file/x`, and `*/` would keep `file/`. Bash keeps only
+		// paths that exist, and a trailing `/` keeps only directories.
+		let mut globbed = false;
+		let mut unverified_suffix = false;
+		let mut trailing_slash = false;
 		for component in components {
 			if !component.iter().any(|piece| {
 				matches!(piece, PatternPiece::Pattern(_))
@@ -304,8 +311,12 @@ impl Pattern {
 						sys::fs::push_path_for_pattern(p, &flattened);
 					}
 				}
+				unverified_suffix = globbed;
+				trailing_slash = flattened.is_empty();
 				continue;
 			}
+			globbed = true;
+			unverified_suffix = false;
 
 			let current_paths = std::mem::take(&mut paths_so_far);
 			for current_path in current_paths {
@@ -358,6 +369,28 @@ impl Pattern {
 
 				paths_so_far.append(&mut matching_paths_in_dir);
 			}
+		}
+
+		if unverified_suffix {
+			let mut existing = Vec::with_capacity(paths_so_far.len());
+			for path in paths_so_far {
+				let probe = if fs.is_native_local(&path) {
+					std::borrow::Cow::Borrowed(path.as_path())
+				} else {
+					std::borrow::Cow::Owned(pi_vfs::normalize_lexically(&path))
+				};
+				// `*/` follows symlinks like bash (a link to a directory
+				// matches); a named suffix only has to exist, dangling or not.
+				let exists = if trailing_slash {
+					fs.is_dir(&probe).await
+				} else {
+					fs.symlink_metadata(&probe).await.is_ok()
+				};
+				if exists {
+					existing.push(path);
+				}
+			}
+			paths_so_far = existing;
 		}
 
 		let results: Vec<_> = paths_so_far
@@ -993,6 +1026,56 @@ mod tests {
 		Ok(())
 	}
 
+	/// Literal components after the last glob are appended to each match, never
+	/// listed, so they must be checked against the filesystem as bash does: a
+	/// trailing `/` keeps only directories, and `*/name` keeps only matches that
+	/// contain `name`. Before the fix `ls -d DIR/*/` handed every regular file in
+	/// DIR to `ls` as `file/`, one "Not a directory" error each.
+	#[tokio::test]
+	async fn test_literal_suffix_after_glob_must_exist() -> Result<()> {
+		let scratch = tempfile::tempdir()?;
+		std::fs::create_dir_all(scratch.path().join("d1"))?;
+		std::fs::create_dir_all(scratch.path().join("d2"))?;
+		std::fs::write(scratch.path().join("d1").join("x"), "")?;
+		std::fs::write(scratch.path().join("f.md"), "")?;
+
+		let fs = pi_vfs::Fs::native();
+		let options = FilenameExpansionOptions::default();
+		let expand = async |pattern: &str| {
+			let result = Pattern::from(pattern)
+				.set_extended_globbing(false)
+				.expand(&fs, scratch.path(), &options)
+				.await?;
+			expect_expanded(result)
+		};
+
+		assert_eq!(expand("*/").await?, vec!["d1/".to_string(), "d2/".to_string()]);
+		assert_eq!(expand("*/x").await?, vec!["d1/x".to_string()]);
+		assert_eq!(expand("*/missing").await?, Vec::<String>::new());
+
+		let absolute = format!("{}/*/", scratch.path().to_string_lossy().replace('\\', "/"));
+		let result = Pattern::from(absolute.as_str())
+			.set_extended_globbing(false)
+			.expand(&fs, Path::new("/"), &options)
+			.await?;
+		let paths = expect_expanded(result)?;
+		assert_eq!(paths.len(), 2, "only the two directories should match: {paths:?}");
+		assert!(paths.iter().all(|p| !p.contains("f.md")), "a regular file matched `*/`: {paths:?}");
+
+		// Bash tests a named tail with lstat (a dangling link still matches) and a
+		// trailing `/` with stat (a link to a directory matches).
+		#[cfg(unix)]
+		{
+			std::os::unix::fs::symlink("nowhere", scratch.path().join("d2").join("dangling"))?;
+			std::os::unix::fs::symlink("d1", scratch.path().join("ld"))?;
+			assert_eq!(expand("*/dangling").await?, vec!["d2/dangling".to_string()]);
+			let dirs = expand("*/").await?;
+			assert!(dirs.contains(&"ld/".to_string()), "a link to a directory must match `*/`: {dirs:?}");
+		}
+
+		Ok(())
+	}
+
 	/// Serves a fixed `mem://` tree: `a.md`, `b.txt`, `.hidden.md`, and
 	/// `dir/c.md`.
 	#[derive(Debug)]
@@ -1008,8 +1091,19 @@ mod tests {
 			Err(pi_vfs::unsupported("open"))
 		}
 
-		async fn metadata(&self, _path: &Path) -> std::io::Result<pi_vfs::Metadata> {
-			Err(std::io::ErrorKind::NotFound.into())
+		async fn metadata(&self, path: &Path) -> std::io::Result<pi_vfs::Metadata> {
+			let kind = match path.to_str() {
+				Some("mem://" | "mem://dir") => pi_vfs::FileKind::Dir,
+				Some("mem://a.md" | "mem://b.txt" | "mem://.hidden.md" | "mem://dir/c.md") => {
+					pi_vfs::FileKind::File
+				},
+				_ => return Err(std::io::ErrorKind::NotFound.into()),
+			};
+			Ok(pi_vfs::Metadata::new(
+				pi_vfs::FileType::from_kind(kind),
+				0,
+				pi_vfs::Permissions::from_mode(0o644),
+			))
 		}
 
 		async fn read_dir(&self, path: &Path) -> std::io::Result<pi_vfs::ReadDir> {
@@ -1051,6 +1145,15 @@ mod tests {
 		assert_eq!(expand("mem://d*/*.md", "/").await?, vec!["mem://dir/c.md".to_string()]);
 		assert_eq!(expand("*.md", "mem://dir").await?, vec!["c.md".to_string()]);
 		assert_eq!(expand("mem://*.none", "/").await?, Vec::<String>::new());
+
+		// A literal tail is checked through the provider at the lexically
+		// normalized path (`mem://./dir/` is asked about as `mem://dir`), and only
+		// existing paths are kept; `*/` keeps only directories.
+		assert_eq!(expand("mem://*/", "/").await?, vec!["mem://dir/".to_string()]);
+		assert_eq!(expand("mem://*/c.md", "/").await?, vec!["mem://dir/c.md".to_string()]);
+		assert_eq!(expand("mem://*/missing", "/").await?, Vec::<String>::new());
+		assert_eq!(expand("*/", "mem://").await?, vec!["dir/".to_string()]);
+		assert_eq!(expand("./*/", "mem://").await?, vec!["./dir/".to_string()]);
 
 		Ok(())
 	}

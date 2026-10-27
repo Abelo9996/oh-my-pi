@@ -23,7 +23,13 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import { type KindApiKind, type ModelSpec, type OpenAICompat, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
+import {
+	type KindApiKind,
+	type ModelKind,
+	type ModelSpec,
+	type OpenAICompat,
+	runnerApiKind,
+} from "@oh-my-pi/pi-catalog/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
@@ -1091,8 +1097,12 @@ export async function discoverOpenAIModelsList(
 		// A row that advertises a dedicated task answers through that task's
 		// runner, not the provider's chat API: leaving it on chat both hides it
 		// from its own role and offers the picker a model the chat endpoint
-		// cannot serve (issue #13021).
-		const task = extractOpenAIModelsListOutputTask(item);
+		// cannot serve (issue #13021). LM Studio lists decision models beside chat
+		// models on `/v1/models`; only its native listing says they answer on
+		// `/v1/decisions`, OpenAI's Decisions API.
+		const task: { kind: ModelKind; api: Api } | undefined = nativeMetadataForModel?.decision
+			? { kind: "judge", api: "openai-decisions" }
+			: extractOpenAIModelsListOutputTask(item);
 		if (task) {
 			specs.push({
 				id,
@@ -1105,9 +1115,9 @@ export async function discoverOpenAIModelsList(
 				input,
 				supportsTools: false,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				// Embeddings cap their input by context; image jobs carry no
-				// token window. Neither produces output tokens.
-				contextWindow: task.kind === "embedding" ? reportedContextWindow : null,
+				// Embeddings and judges cap their input by context; image jobs
+				// carry no token window. None produces output tokens.
+				contextWindow: task.kind === "image" ? null : reportedContextWindow,
 				maxTokens: null,
 				headers: baseHeaders,
 			} as ModelSpec<Api>);

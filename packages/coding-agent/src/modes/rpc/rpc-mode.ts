@@ -34,10 +34,11 @@ import {
 } from "../../extensibility/extensions";
 import {
 	type BuiltSkillPromptMessage,
-	loadSkillPromptBody,
+	loadSkillPrompt,
 	parseSkillInvocation,
 	type Skill,
 	type SkillPromptInput,
+	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
@@ -48,12 +49,12 @@ import {
 	wordCompletionQuery,
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
-import { type AgentSession, SessionBusyError } from "../../session/agent-session";
+import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
 import type { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
-import { findMostRecentNonEmptySession } from "../../session/session-listing";
+import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "../../session/session-listing";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
@@ -250,7 +251,8 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 export type RpcSkillCommandSession = Pick<
 	AgentSession,
 	"buildUserSkillPrompt" | "renderUserSkillPrompt" | "promptCustomMessage" | "skills" | "skillsSettings"
->;
+> &
+	SkillRediscoverySource;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation extends SkillPromptInput {
@@ -326,11 +328,12 @@ export async function dispatchRpcSkillPrompt(input: {
 	const invocation = resolveRpcSkillInvocation(input.session, input.message);
 	if (!invocation) return null;
 	// Read the skill before acknowledging the command so a missing SKILL.md
-	// still fails immediately. Rendering (and authorizing model tags) happens
+	// still fails immediately (a stale one is read from its rediscovered
+	// replacement first). Rendering (and authorizing model tags) happens
 	// only after the in-flight submission survives the currentness check.
-	const body = await loadSkillPromptBody(invocation.skill);
+	const loaded = await loadSkillPrompt(invocation.skill, input.session);
 	if (input.isCurrent && !input.isCurrent()) return "cancelled";
-	const built = input.session.renderUserSkillPrompt(invocation.skill, invocation, body);
+	const built = input.session.renderUserSkillPrompt(loaded.skill, invocation, loaded.body);
 	// A failure before admission still resolves this wait (without rejecting this
 	// call) — reportPromptResult already routed it to onError and a failed prompt_result.
 	await watchAndReportPromptResult({
@@ -419,7 +422,8 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
  * Commands that skip the serial queue entirely; see {@link dispatchRpcInputFrame}.
  * (`prompt` and `steer_subagent` are also backgrounded there, but start through
  * the serial tail.) `btw_cancel` is synchronous and must overtake a `btw` still
- * starting or a long serial command.
+ * starting or a long serial command; `abort_branch_summary` likewise overtakes
+ * the `navigate_tree` whose summary it stops.
  * A Set, not a Record: `type` is untrusted input and must not hit prototype keys.
  */
 const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
@@ -427,6 +431,7 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
 	"predict_word",
 	"live_start",
 	"btw_cancel",
+	"abort_branch_summary",
 ]);
 
 /**
@@ -909,7 +914,9 @@ export type RpcOpenSessionSession = Pick<
 /**
  * Continue the newest non-empty session in `sessionDir`, or start a fresh one
  * there — the runtime equivalent of `--session-dir <dir> --continue`, so a host
- * can bind a pre-spawned process to a conversation it keys by directory.
+ * can bind a pre-spawned process to a conversation it keys by directory. Like
+ * `--continue`, it opens the copy the conversation went on in when that session
+ * moved off its file (see {@link findRecentSessionContinuation}).
  * Reopening the session that is already active is a no-op and does not abort a run.
  *
  * With `model`, the session uses that model instead of its saved one, like an
@@ -926,7 +933,8 @@ export async function openRpcSession(
 ): Promise<RpcOpenSessionResult> {
 	if (!session.sessionFile) throw new Error("open_session requires session persistence (omit --no-session)");
 	const dir = path.resolve(sessionDir);
-	const latest = await findMostRecentNonEmptySession(dir);
+	const recent = await findMostRecentNonEmptySession(dir);
+	const latest = recent ? ((await findRecentSessionContinuation(recent))?.session.path ?? recent) : null;
 	const current = path.resolve(session.sessionFile);
 	const alreadyOpen = latest
 		? current === path.resolve(latest)
@@ -1060,6 +1068,30 @@ export function requestRpcSelect(
 			options: labels,
 			...(optionDetails ? { optionDetails } : {}),
 			timeout: dialogOptions?.timeout,
+		},
+		response => parseValueDialogResponse(response, dialogOptions),
+	);
+}
+
+/** Sends an RPC input request, passing optional secret masking and timeout metadata. */
+export function requestRpcInput(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	title: string,
+	placeholder?: string,
+	dialogOptions?: ExtensionUIDialogOptions,
+): Promise<string | undefined> {
+	return requestRpcDialog(
+		pendingRequests,
+		output,
+		dialogOptions,
+		undefined,
+		{
+			method: "input",
+			title,
+			placeholder,
+			timeout: dialogOptions?.timeout,
+			...(dialogOptions?.secret !== undefined ? { secret: dialogOptions.secret } : {}),
 		},
 		response => parseValueDialogResponse(response, dialogOptions),
 	);
@@ -1474,14 +1506,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			placeholder?: string,
 			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> {
-			return requestRpcDialog(
-				this.pendingRequests,
-				this.output,
-				dialogOptions,
-				undefined,
-				{ method: "input", title, placeholder, timeout: dialogOptions?.timeout },
-				response => parseValueDialogResponse(response, dialogOptions),
-			);
+			return requestRpcInput(this.pendingRequests, this.output, title, placeholder, dialogOptions);
 		}
 
 		onTerminalInput(): () => void {
@@ -1628,8 +1653,35 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// correct waiting promise regardless of which code path created the request.
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
+	const setAskDialog = (command: RpcCommand & { type: "set_ask_dialog" }): RpcResponse => {
+		rpcUiContext.askDialogEnabled = command.enabled === true;
+		return success(command.id, "set_ask_dialog", { enabled: rpcUiContext.askDialogEnabled });
+	};
 	const onPromptError = (id: string | undefined, command: string) => (promptError: Error) =>
 		output(error(id, command, promptError.message));
+
+	// Read stdin from now on: `session_start` may be waiting on a dialog only the client can answer. Until the
+	// command loop below exists, a dialog answer and the ask-dialog opt-in are handled at once and every other
+	// frame is held, in arrival order, for that loop.
+	let heldFrames: unknown[] | undefined = [];
+	const receiveFrame = (parsed: unknown): void => {
+		if (!heldFrames) {
+			inputDispatcher.dispatch(parsed);
+		} else if (isRpcExtensionUIResponse(parsed)) {
+			pendingExtensionRequests.get(parsed.id)?.resolve(parsed);
+		} else if (isRecord(parsed) && parsed.type === "set_ask_dialog") {
+			output(setAskDialog(parsed as RpcCommand & { type: "set_ask_dialog" }));
+		} else {
+			heldFrames.push(parsed);
+		}
+	};
+	// A transport error during startup must not be an unhandled rejection; the final await below still throws it.
+	// Input ending while startup still runs means no client is left to answer a dialog it awaits: reject them.
+	const inputRead = readRpcInputFrames(input, receiveFrame, message => output(error(undefined, "parse", message)));
+	const rejectStartupDialogs = (): void => {
+		if (heldFrames) pendingExtensionRequests.rejectAll("RPC client disconnected during startup");
+	};
+	inputRead.then(rejectStartupDialogs, rejectStartupDialogs);
 
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
@@ -2036,6 +2088,68 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return success(id, result.type, result.data);
 			}
 
+			case "navigate_tree": {
+				if (typeof command.entryId !== "string") return error(id, "navigate_tree", "entryId must be a string");
+				// Validation first: a refused navigation must not cancel the running side question or touch the goal.
+				if (!session.sessionManager.getEntry(command.entryId)) {
+					return error(id, "navigate_tree", `Entry ${command.entryId} not found`, "entry_not_found");
+				}
+				// As `fork`: a run would keep writing into the branch the leaf just left.
+				if (session.isBusyForSnapshot) {
+					const busy = new SessionBusyError("navigate the session tree");
+					return error(id, "navigate_tree", busy.message, "session_busy");
+				}
+				await btw.close();
+				// A goal continuation waiting to start is held until the navigation ends, then resumes (same session).
+				await goalController.beginSessionChange();
+				let result: NavigateTreeResult;
+				try {
+					result = await session.navigateTree(command.entryId, {
+						summarize: command.summarize === true,
+						customInstructions:
+							typeof command.customInstructions === "string" ? command.customInstructions : undefined,
+						// Only to detect a re-answer, which moves nothing yet: refused below, since it needs a picker here.
+						allowAskReopen: true,
+						// Rechecked after the summary: work may have started while it ran.
+						requireIdle: true,
+					});
+				} catch (err) {
+					if (err instanceof SessionBusyError) return error(id, "navigate_tree", err.message, "session_busy");
+					throw err;
+				} finally {
+					await goalController.endSessionChange();
+					// Respond only once a resumed continuation is scheduled.
+					await goalController.settled();
+				}
+				if (result.reopenAsk) {
+					return error(
+						id,
+						"navigate_tree",
+						"Re-answering an ask is not available over RPC; select another entry",
+						"ask_reanswer_unsupported",
+					);
+				}
+				return success(id, "navigate_tree", {
+					cancelled: result.cancelled,
+					aborted: result.aborted,
+					editorText: result.editorText,
+				});
+			}
+
+			case "abort_branch_summary": {
+				session.abortBranchSummary();
+				return success(id, "abort_branch_summary");
+			}
+
+			case "set_label": {
+				if (typeof command.entryId !== "string") return error(id, "set_label", "entryId must be a string");
+				if (command.label !== undefined && typeof command.label !== "string") {
+					return error(id, "set_label", "label must be a string");
+				}
+				session.sessionManager.appendLabelChange(command.entryId, command.label);
+				return success(id, "set_label");
+			}
+
 			case "open_session": {
 				const requestedModel = await resolveRequestedRpcModel(session, command);
 				const fileBeforeOpen = session.sessionFile;
@@ -2144,10 +2258,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				}
 			}
 
-			case "set_ask_dialog": {
-				rpcUiContext.askDialogEnabled = command.enabled === true;
-				return success(id, "set_ask_dialog", { enabled: rpcUiContext.askDialogEnabled });
-			}
+			case "set_ask_dialog":
+				return setAskDialog(command);
 
 			case "get_available_commands": {
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
@@ -2717,17 +2829,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		acceptInput: command => inputGate.accept(command),
 	});
 
-	// Keep the stdin reader moving: side-channel frames dispatch immediately,
-	// ordinary commands serialize through inputDispatcher, and bash remains
-	// background-dispatched so abort_bash can overtake it. Frames are read
-	// line-by-line by readRpcInputFrames so a single malformed line is reported
-	// as an error frame and the loop keeps running instead of throwing out of
+	// Startup is over: run the frames held back meanwhile, then every later frame, through the dispatcher.
+	// Side-channel frames dispatch immediately, ordinary commands serialize through inputDispatcher, and bash
+	// remains background-dispatched so abort_bash can overtake it. readRpcInputFrames reads line-by-line so a
+	// single malformed line is reported as an error frame and the loop keeps running instead of throwing out of
 	// the reader and killing the whole process (issue #5194).
-	await readRpcInputFrames(
-		input ?? Bun.stdin.stream(),
-		parsed => inputDispatcher.dispatch(parsed),
-		message => output(error(undefined, "parse", message)),
-	);
+	const held = heldFrames;
+	heldFrames = undefined;
+	for (const parsed of held) inputDispatcher.dispatch(parsed);
+	await inputRead;
 
 	// stdin closed — RPC client is gone. Fail pending side-channel requests
 	// first so active/queued commands can settle, then drain accepted work.

@@ -6149,6 +6149,273 @@ mod tests {
 		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
 	}
 
+	/// Every run reads through a cancellable filesystem, and its redirects must
+	/// still open a FIFO as a blocking open does. A non-blocking open let a
+	/// reader that reads the descriptor itself (an external `cat`, `$(< f)`)
+	/// see EOF before a late writer connected; the writer then blocked forever.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn fifo_redirect_waits_for_a_late_writer() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(
+				"/bin/sh -c 'sleep 0.15; echo one > f' & /bin/cat < f; /bin/sh -c 'sleep 0.15; echo \
+				 two > f' & x=$(< f); echo \"x=$x\"; wait",
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("a FIFO redirect waits for its writer and returns");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\nx=two\n"));
+	}
+
+	/// A FIFO redirect's open waits for the other end, which is often a
+	/// background job queued on the same runtime worker: `echo hi > f & cat <
+	/// f` deadlocked when the open held the worker. On a one-worker runtime,
+	/// both orders must finish.
+	#[cfg(unix)]
+	#[test]
+	fn fifo_redirects_do_not_hold_the_worker_their_other_end_needs() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		for name in ["f", "g"] {
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join(name), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+		}
+		let cwd = root.path().to_path_buf();
+		let (tx, rx) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(1)
+				.enable_all()
+				.build()
+				.expect("single-worker runtime");
+			let _ = tx.send(runtime.block_on(run_command_capture(
+				"echo one > f & cat < f; cat < g & echo two > g; wait",
+				Some(&cwd),
+				None,
+				CancelToken::default(),
+			)));
+		});
+		let (result, output) = rx
+			.recv_timeout(Duration::from_secs(5))
+			.expect("a FIFO redirect must not hold the worker its other end needs");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\ntwo\n"));
+	}
+
+	/// A background external command's FIFO redirect is opened by its child,
+	/// as in bash: the parent shell spawned it and then waited for the FIFO's
+	/// other end, which was the next command, so `/bin/cat < f & echo one > f`
+	/// never returned. Job control must still see the command's real pid:
+	/// `$!` is the pid the command itself reports, and `wait`, `jobs`, `kill
+	/// %N` and `kill $!` reach a command still waiting for its FIFO.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_external_command_opens_its_fifo_redirect_itself() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				concat!(
+					// First, so the job is `%1`.
+					"/bin/sleep 30 < f & jobs; kill %1; wait $!; echo \"kill-job=$?\"\n",
+					"/bin/sleep 30 < f & kill $!; wait $!; echo \"kill-pid=$?\"\n",
+					"/bin/cat < f & pid=$!; echo one > f; wait $pid; echo \"wait=$?\"\n",
+					"/bin/sh -c 'echo $$' > f & bg=$!; read -r self < f; wait $bg\n",
+					"[ \"$self\" = \"$bg\" ] && echo same-pid",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert!(output.contains("Running"), "`jobs` lists the waiting command: {output}");
+		assert!(output.ends_with("kill-job=143\nkill-pid=143\none\nwait=0\nsame-pid\n"), "{output}");
+	}
+
+	/// `kill %1` aborts a background job without polling it again, so a FIFO
+	/// open it was waiting in is dropped, not cancelled. Its helper thread then
+	/// stayed in `open` and took the next writer's connection, whose data was
+	/// lost. A dropped open must leave no reader behind.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn killed_job_leaves_no_reader_on_its_fifo() {
+		use std::os::unix::fs::OpenOptionsExt;
+		let root = tempfile::tempdir().expect("scratch directory");
+		let fifo = root.path().join("f");
+		pi_vfs::BlockingFs::native()
+			.make_node(&fifo, pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				"cat < f & sleep 0.2; kill %1; wait; echo done",
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the killed job ends");
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "done\n"));
+
+		// The release runs on its own thread; give it time, then a writer that
+		// does not wait must find no reader.
+		time::sleep(Duration::from_millis(500)).await;
+		let writer = std::fs::OpenOptions::new()
+			.write(true)
+			.custom_flags(libc::O_NONBLOCK)
+			.open(&fifo);
+		assert_eq!(
+			writer.err().and_then(|err| err.raw_os_error()),
+			Some(libc::ENXIO),
+			"a reader was left on the FIFO"
+		);
+	}
+
+	/// The release of a killed job's FIFO open must be done when `kill`
+	/// returns: a release that came later woke the next command's open of the
+	/// same FIFO too, so that reader read EOF, its writer's data was lost, and
+	/// the writer then blocked with no reader.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn killed_job_releases_its_fifo_before_the_next_command() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(30),
+			run_command_capture(
+				concat!(
+					"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n",
+					"  cat < f & sleep 0.05; kill %%\n",
+					"  /bin/cat < f > got & sleep 0.1; echo \"hi$i\" > f; wait\n",
+					"  read -r x < got; [ \"$x\" = \"hi$i\" ] || echo \"lost $i\"\n",
+					"done; echo done",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("no writer is left without a reader");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "done\n"));
+	}
+
+	/// A background external command's descriptor path (`/dev/stdout`) reaches
+	/// the shell's own output pipe and looked like a FIFO, so it was left to
+	/// the child, which then wrote to its `/dev/null` placeholder. And the
+	/// `/bin/sh` that makes deferred redirects stored the FIFO path in `f1`,
+	/// replacing an exported `f1` in the command's environment.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn deferred_redirects_keep_descriptor_paths_and_the_environment() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				concat!(
+					"/bin/echo out > /dev/stdout & wait\n",
+					"export f1=orig; /usr/bin/env > f & grep '^f1=' < f; wait",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the commands finish");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "out\nf1=orig\n"));
+	}
+
+	/// A later redirection of a descriptor that a deferred FIFO redirection
+	/// sets (`>f >/dev/null`), or a duplication, move or close of it, made
+	/// every deferred redirection in the parent after all: the parent opened
+	/// the FIFO and waited for its reader, the next command, so the shell
+	/// never returned. The child now makes them all, in the order written.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn later_redirects_of_a_deferred_descriptor_stay_in_the_child() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				concat!(
+					"/bin/echo replaced >f >/dev/null & cat <f; wait; echo \"replace=$?\"\n",
+					"/bin/echo closed 3>f >&3 3>&- & cat <f; wait\n",
+					"/bin/echo moved 3>f 1>&3- & cat <f; wait\n",
+					"/bin/echo both >f &>/dev/null & cat <f; wait; echo \"both=$?\"\n",
+					"/bin/echo descriptor >f >/dev/stdout & cat <f; wait",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!(
+			(result.exit_code, output.as_str()),
+			(Some(0), "replace=0\nclosed\nmoved\nboth=0\ndescriptor\n")
+		);
+	}
+
+	/// A deferred duplication reads the descriptor this process holds, so the
+	/// null device that stands in for a deferred descriptor must not take its
+	/// place: `>f 1>&3 3>/dev/null` sent the output to the null device, the
+	/// move `>f 1>&4-` lost it, and so did the swap idiom.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn deferred_duplications_read_the_descriptors_the_parent_holds() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				concat!(
+					"{ /bin/echo dup3 >f 1>&3 3>/dev/null & cat <f; wait; } 3>out3; cat out3\n",
+					"{ /bin/echo moved4 >f 1>&4- & cat <f; wait; } 4>out4; cat out4\n",
+					"/bin/echo sw 2>f 3>&1 1>&2 2>&3 3>&- & cat <f; wait",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "dup3\nmoved4\nsw\n"));
+	}
+
 	/// Runs `command` on a dedicated single-worker runtime and fails after five
 	/// seconds. The deadline lives on the calling thread, so it still fires when
 	/// a builtin blocks the runtime's only worker.

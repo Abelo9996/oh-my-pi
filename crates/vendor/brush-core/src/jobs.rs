@@ -20,6 +20,9 @@ pub(crate) type JobResult = (Job, Result<ExecutionResult, error::Error>);
 
 const WAIT_NEXT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// How long `kill %N` waits for an aborted in-shell task to unwind.
+const INTERNAL_TASK_UNWIND_LIMIT: Duration = Duration::from_millis(500);
+
 /// Selects a managed job by shell job ID or child process ID.
 #[derive(Clone, Copy)]
 pub enum JobSelector {
@@ -607,23 +610,40 @@ impl Job {
 	/// internal tasks are still responsible for signalling any process trees
 	/// those tasks may have spawned.
 	pub fn abort_internal_tasks(&mut self) {
+		drop(self.take_internal_tasks());
+	}
+
+	/// Aborts shell-internal background tasks and returns a future that
+	/// resolves once they have unwound and dropped what they held, or after
+	/// [`INTERNAL_TASK_UNWIND_LIMIT`]. `kill %N` awaits it, as a killed
+	/// process is gone once it is reaped: a FIFO open the job was waiting in is
+	/// then released before the next command opens that FIFO.
+	pub fn take_internal_tasks(&mut self) -> impl Future<Output = ()> + Send + 'static {
 		// Flag the execution first: aborting the handle below only lands where the
 		// task yields, and a loop of synchronous builtins may run for a long time
 		// before that.
 		if let Some(token) = &self.cancellation {
 			token.cancel();
 		}
-		let mut aborted = false;
-		self.tasks.retain_mut(|task| {
-			if let JobTask::Internal(handle) = task {
-				handle.abort();
-				aborted = true;
-				return false;
+		let mut aborted = Vec::new();
+		let mut index = 0;
+		while index < self.tasks.len() {
+			if matches!(self.tasks.get(index), Some(JobTask::Internal(_))) {
+				if let Some(JobTask::Internal(handle)) = self.tasks.remove(index) {
+					handle.abort();
+					aborted.push(handle);
+				}
+			} else {
+				index += 1;
 			}
-			true
-		});
-		if aborted && self.tasks.is_empty() {
+		}
+		if !aborted.is_empty() && self.tasks.is_empty() {
 			self.state = JobState::Done;
+		}
+		async move {
+			for handle in aborted {
+				let _ = tokio::time::timeout(INTERNAL_TASK_UNWIND_LIMIT, handle).await;
+			}
 		}
 	}
 

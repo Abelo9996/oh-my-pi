@@ -114,11 +114,14 @@ behavior {
 			"aster-07-15" "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" "gemini-3-pro-image-preview"
 	}
 	// Subscription eligibility for model-aware Codex credential routing.
+	// GPT-6.1 Terra launched for Plus, Pro, Enterprise, and Edu, not Free/Go
+	// (https://openai.com/index/introducing-gpt-6-1-terra/, 2026-10-26).
 	plan-requirement provider="openai-codex" {
 		tier "pro" substring="-spark"
 		tier "paid" exact="gpt-5.6" exact="gpt-5.6-sol" exact="gpt-5.6-sol-pro" \
 			exact="gpt-5.6-luna" exact="gpt-5.6-luna-pro" glob="*/gpt-5.6" glob="*/gpt-5.6-sol" \
-			glob="*/gpt-5.6-sol-pro" glob="*/gpt-5.6-luna" glob="*/gpt-5.6-luna-pro"
+			glob="*/gpt-5.6-sol-pro" glob="*/gpt-5.6-luna" glob="*/gpt-5.6-luna-pro" \
+			glob="gpt-6.1-terra*" glob="*/gpt-6.1-terra*"
 	}
 
 	// Z.AI and Zhipu emit timezone-naive account-reset wall clocks in Beijing
@@ -335,11 +338,14 @@ behavior {
 	}
 	// Kimi Code's /coding/v1/models envelope carries no output-limit field;
 	// these are the documented per-family caps (models.dev `kimi-for-coding`
-	// and `moonshotai` kimi-k3 entries, #6711). Legacy K2 rows keep their
+	// and `moonshotai` kimi-k3 entries, #6711; K3.1 Pro's documented
+	// `max_completion_tokens` default). Legacy K2 rows keep their
 	// discovery-reported values.
 	model-limits provider="kimi-code" {
 		limits "k3" max-tokens=131072
 		limits "k3-256k" max-tokens=131072
+		limits "k3.1-pro" max-tokens=131072
+		limits "k3.1-pro-highspeed" max-tokens=131072
 		limits "kimi-for-coding" max-tokens=32768
 		limits "kimi-for-coding-highspeed" max-tokens=32768
 	}

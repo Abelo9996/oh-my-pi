@@ -167,6 +167,7 @@ export const frameDefs = {
 		title: "string",
 		"placeholder?": "string",
 		"timeout?": "number.integer",
+		"secret?": "boolean",
 	},
 	EditorUiRequest: {
 		type: UI,
