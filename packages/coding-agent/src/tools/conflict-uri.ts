@@ -10,7 +10,6 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getEditStore } from "../edit/store";
 import type { InternalWriteResult } from "../internal-urls/types";
 import { writethroughNoop } from "../lsp/writethrough";
-import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import {
 	conflictRegionPresent,
 	conflictRegionsEqual,
@@ -23,15 +22,12 @@ import {
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import type { ToolSession } from "./index";
 import { formatPathRelativeToCwd } from "./path-utils";
-import { formatTextWithMode, hashlineHeaderContext, prependHashlineHeader } from "./read-format";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
 
-/** A rendered `conflict://<N>[/<scope>]` region. */
+/** Raw `conflict://<N>[/<scope>]` content for the shared read selector pipeline. */
 export interface ConflictRegionRead {
-	/** Model-facing text: hashline header + anchored lines, or numbered/plain lines per display mode. */
+	/** Prefix-free region text, sliced before any read formatting. */
 	text: string;
-	/** Prefix-free region lines for transcript display. */
-	rawText: string;
 	/** 1-based file line number of the first rendered line. */
 	startLine: number;
 	/** File the conflict block lives in. */
@@ -82,10 +78,8 @@ function requireEntry(session: ToolSession, id: number): ConflictEntry {
 }
 
 /**
- * Render a `conflict://<N>` (or `conflict://<N>/<scope>`) region as regular
- * file content. Lines keep their original file line numbers and, in hashline
- * mode, a snapshot tag is recorded against the underlying file so anchors
- * line up with the source for `edit`.
+ * Select a `conflict://<N>` (or `conflict://<N>/<scope>`) body. The shared
+ * read pipeline slices its raw text and renders once using source coordinates.
  */
 export function readConflictUri(session: ToolSession, raw: string): ConflictRegionRead {
 	const target = parseTarget(raw);
@@ -96,19 +90,8 @@ export function readConflictUri(session: ToolSession, raw: string): ConflictRegi
 	}
 	const entry = requireEntry(session, target.id);
 	const region = renderConflictRegion(entry, target.scope);
-	const displayMode = resolveFileDisplayMode(session);
-	const shouldAddHashLines = displayMode.hashLines;
-	const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
-
-	const rawText = region.lines.join("\n");
-	const tag = shouldAddHashLines ? getEditStore(session).recordSnapshotFile(entry.absolutePath) : undefined;
-	const hashContext = tag
-		? hashlineHeaderContext(formatPathRelativeToCwd(entry.absolutePath, session.cwd), tag)
-		: undefined;
-	const formattedBody = formatTextWithMode(rawText, region.startLine, shouldAddHashLines, shouldAddLineNumbers);
 	return {
-		text: prependHashlineHeader(formattedBody, hashContext),
-		rawText,
+		text: region.lines.join("\n"),
 		startLine: region.startLine,
 		absolutePath: entry.absolutePath,
 	};
