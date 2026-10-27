@@ -6,6 +6,7 @@ import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-response
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Agent } from "../src/agent";
 import type { SessionMessageEntry } from "../src/compaction/entries";
@@ -282,7 +283,8 @@ describe("chat-completions history estimate", () => {
 
 	function completionsModel(
 		id: string,
-		compat: { replayReasoningContent: boolean; whenThinking?: { replayReasoningContent: boolean } },
+		compat: Partial<OpenAICompat> & { replayReasoningContent: boolean },
+		reasoning = true,
 	): Model<"openai-completions"> {
 		return buildModel({
 			id,
@@ -290,7 +292,7 @@ describe("chat-completions history estimate", () => {
 			api: "openai-completions",
 			provider: "my-host",
 			baseUrl: "http://my-server.example:8000/v1",
-			reasoning: true,
+			reasoning,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 262_144,
@@ -334,6 +336,34 @@ describe("chat-completions history estimate", () => {
 				whenThinking: { replayReasoningContent: true },
 			}),
 			carried: true,
+		},
+		{
+			name: "Mistral content parts",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, mistralReasoningContentParts: true }),
+			carried: true,
+		},
+		{
+			name: "thinking as text",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, requiresThinkingAsText: true }),
+			carried: true,
+		},
+		{
+			name: "reasoning content required for tool calls",
+			model: completionsModel("Qwen3.8-27B", {
+				replayReasoningContent: false,
+				requiresReasoningContentForToolCalls: true,
+			}),
+			carried: true,
+		},
+		{
+			name: "Z.AI on a reasoning model",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, thinkingFormat: "zai" }),
+			carried: true,
+		},
+		{
+			name: "Z.AI on a non-reasoning model",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, thinkingFormat: "zai" }, false),
+			carried: false,
 		},
 		// Another model's thinking reaches the request demoted to text.
 		{

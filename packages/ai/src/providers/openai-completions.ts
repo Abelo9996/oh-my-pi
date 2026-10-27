@@ -121,7 +121,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { transformMessages } from "./transform-messages";
+import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -2366,17 +2366,6 @@ function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: C
 	}
 }
 
-/** Whether {@link convertMessages} drops the model's own prior thinking text under `compat`. */
-function compatDropsOwnThinking(model: { reasoning?: boolean }, compat: ResolvedOpenAICompat): boolean {
-	return !(
-		compat.mistralReasoningContentParts ||
-		compat.requiresThinkingAsText ||
-		compat.requiresReasoningContentForToolCalls ||
-		(compat.thinkingFormat === "zai" && model.reasoning === true) ||
-		compat.replayReasoningContent
-	);
-}
-
 /**
  * Whether every chat-completions request to `model` drops the thinking text of
  * its own prior turns: neither the base compat nor its `whenThinking` view
@@ -2391,8 +2380,8 @@ export function completionsDropsOwnThinking(
 	// A row without a resolved replay flag can't tell; counting the thinking never undercounts.
 	if (!("replayReasoningContent" in compat)) return false;
 	return (
-		compatDropsOwnThinking(model, compat) &&
-		(compat.whenThinking === undefined || compatDropsOwnThinking(model, compat.whenThinking))
+		!completionsSendsOwnThinking(model, compat) &&
+		(compat.whenThinking === undefined || !completionsSendsOwnThinking(model, compat.whenThinking))
 	);
 }
 
