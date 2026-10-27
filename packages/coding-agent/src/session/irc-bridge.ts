@@ -247,7 +247,12 @@ export class IrcBridge {
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent, mid-turn asides, relays and broadcast legs have no such relay.
 		const relayOnStop =
-			!streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID && msg.wakeRelay !== true && msg.broadcast !== true;
+			!streaming &&
+			!planModeIdle &&
+			msg.to !== MAIN_AGENT_ID &&
+			!msg.replyTo &&
+			msg.wakeRelay !== true &&
+			msg.broadcast !== true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -257,6 +262,7 @@ export class IrcBridge {
 			role: "custom",
 			customType: "irc:incoming",
 			content: prompt.render(ircIncomingTemplate, {
+				id: msg.id,
 				from: msg.from,
 				message: envelopeBody,
 				replyTo: msg.replyTo ?? "",
@@ -282,7 +288,12 @@ export class IrcBridge {
 			if (fromParent && !peerMessage) {
 				const steer: AgentMessage = {
 					role: "user",
-					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
+					content: prompt.render(parentIrcSteerTemplate, {
+						id: msg.id,
+						from: msg.from,
+						message: envelopeBody,
+						replyTo: msg.replyTo,
+					}),
 					attribution: "agent",
 					timestamp: msg.ts,
 					steering: true,

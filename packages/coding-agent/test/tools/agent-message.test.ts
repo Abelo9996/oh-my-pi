@@ -102,6 +102,36 @@ describe("write agent:// messaging", () => {
 		await expect(new AgentProtocolHandler().resolve(new URL("agent://all") as never)).rejects.toThrow("write-only");
 	});
 
+	it("correlates a final reply through the message URL without closing another request", async () => {
+		registerPeer("Scout");
+		registerPeer("Sender");
+		const sender = new WriteTool(makeSession({ senderId: "Sender" }));
+		await sender.execute("first", { path: "agent://Scout", content: "release the first slot" });
+		await sender.execute("second", { path: "agent://Scout", content: "release the next slot" });
+		const [first, second] = received.get("Scout")!;
+		const scout = new WriteTool(makeSession({ senderId: "Scout" }));
+		await scout.execute("ack", { path: "agent://Sender", content: "on it" });
+		expect(IrcBus.global().unansweredSends("Sender", 0)).toHaveLength(2);
+		await scout.execute("answer", {
+			path: `agent://Sender?replyTo=${first!.id}`,
+			content: "first slot released",
+		});
+		expect(received.get("Sender")?.at(-1)).toMatchObject({ replyTo: first!.id, body: "first slot released" });
+		expect(IrcBus.global().unansweredSends("Sender", 0)).toMatchObject([{ id: second!.id, to: "Scout" }]);
+	});
+
+	it("rejects empty reply correlation and correlated broadcasts", async () => {
+		registerPeer("Scout");
+		const tool = new WriteTool(makeSession());
+		await expect(tool.execute("empty-reply", { path: "agent://Scout?replyTo=", content: "answer" })).rejects.toThrow(
+			"non-empty",
+		);
+		await expect(
+			tool.execute("broadcast-reply", { path: "agent://all?replyTo=request", content: "answer" }),
+		).rejects.toThrow("broadcast");
+		expect(received.get("Scout")).toEqual([]);
+	});
+
 	it("does not duplicate a child broadcast in the main session's relay view", async () => {
 		registerPeer("Sender");
 		registerPeer("Sibling");

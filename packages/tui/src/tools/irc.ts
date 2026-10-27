@@ -12,7 +12,7 @@ export interface IrcMessage {
 	to: string;
 	body: string;
 	ts: number;
-	/** Message id being answered. */
+	/** Message id fulfilled by this final reply; progress/acknowledgements omit it. */
 	replyTo?: string;
 	/**
 	 * Automated wake-turn relay of a woken subagent's stop output (task executor

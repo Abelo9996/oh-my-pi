@@ -187,10 +187,15 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
+		const replyTo = url.searchParams.get("replyTo") ?? undefined;
+		if (replyTo !== undefined) {
+			if (!replyTo.trim()) throw new Error("agent:// replyTo requires a non-empty message id.");
+			if (to === "all") throw new Error("agent:// broadcast cannot reply to a single message.");
+		}
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
 		const result = await executeSend(
 			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content },
+			{ to, message: content, replyTo },
 		);
 		return {
 			content: [

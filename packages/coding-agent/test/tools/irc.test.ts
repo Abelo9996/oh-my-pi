@@ -522,6 +522,65 @@ describe("IRC", () => {
 			// Failed revival never enqueues: the message is lost, not buffered.
 			expect(bus.take("0-Parked")).toBeUndefined();
 		});
+
+		it("only a reply from the requested peer to that message closes its request", async () => {
+			const a = makeFakeSession();
+			const b = makeFakeSession();
+			const c = makeFakeSession();
+			registry.register({ id: "A", displayName: "A", kind: "sub", session: a.session });
+			registry.register({ id: "B", displayName: "B", kind: "sub", session: b.session });
+			registry.register({ id: "C", displayName: "C", kind: "sub", session: c.session });
+			await bus.send({ from: "A", to: "B", body: "release the slot" });
+			const request = b.delivered[0]!;
+			await bus.send({ from: "C", to: "A", body: "not B's answer", replyTo: request.id });
+			await bus.send({ from: "B", to: "A", body: "an older answer", replyTo: "older-request" });
+			expect(bus.unansweredSends("A", 0)).toMatchObject([{ id: request.id, to: "B" }]);
+			await bus.send({ from: "B", to: "C", body: "wrong recipient", replyTo: request.id });
+			expect(bus.unansweredSends("A", 0)).toHaveLength(1);
+			await bus.send({ from: "B", to: "A", body: "slot released", replyTo: request.id });
+			expect(bus.unansweredSends("A", 0)).toEqual([]);
+			// A final reply is not itself another request that needs a reply.
+			expect(bus.unansweredSends("B", 0)).toEqual([]);
+		});
+
+		it("does not close a request when delivery of its correlated reply fails", async () => {
+			const a = makeFakeSession();
+			const b = makeFakeSession();
+			registry.register({ id: "A", displayName: "A", kind: "sub", session: a.session });
+			registry.register({ id: "B", displayName: "B", kind: "sub", session: b.session });
+			await bus.send({ from: "A", to: "B", body: "release the slot" });
+			a.setError(new Error("delivery failed"));
+			const reply = await bus.send({
+				from: "B",
+				to: "A",
+				body: "slot released",
+				replyTo: b.delivered[0]!.id,
+			});
+			expect(reply.outcome).toBe("failed");
+			expect(bus.unansweredSends("A", 0)).toHaveLength(1);
+			expect(bus.take("A")?.body).toBe("slot released");
+			expect(bus.unansweredSends("A", 0)).toEqual([]);
+		});
+
+		it("a reply delivered during the request's handoff leaves no stale request", async () => {
+			const a = makeFakeSession();
+			registry.register({ id: "A", displayName: "A", kind: "sub", session: a.session });
+			registry.register({
+				id: "B",
+				displayName: "B",
+				kind: "sub",
+				session: {
+					deliverIrcMessage: async (request: IrcMessage) => {
+						await bus.send({ from: "B", to: "A", body: "slot released", replyTo: request.id });
+						return "injected";
+					},
+				} as unknown as AgentSession,
+			});
+			await bus.send({ from: "A", to: "B", body: "release the slot" });
+			expect(a.delivered[0]?.body).toBe("slot released");
+			expect(bus.unansweredSends("A", 0)).toEqual([]);
+			expect(bus.unansweredSends("B", 0)).toEqual([]);
+		});
 	});
 
 	describe("wake-turn replies to broadcasts", () => {
@@ -533,7 +592,12 @@ describe("IRC", () => {
 		 */
 		function registerIdleSubagent(
 			id: string,
-			opts: { parentId?: string; yields?: boolean; jobManager?: AsyncJobManager } = {},
+			opts: {
+				parentId?: string;
+				yields?: boolean;
+				jobManager?: AsyncJobManager;
+				beforeFinish?: (records: AgentMessage[]) => Promise<void>;
+			} = {},
 		) {
 			let observer: IrcWakeObserver | undefined;
 			const listeners: ((event: AgentSessionEvent) => void)[] = [];
@@ -554,7 +618,12 @@ describe("IRC", () => {
 					} as AgentSessionEvent;
 					for (const listener of listeners) listener(event);
 				}
-				turns.push(Promise.resolve(finish?.()));
+				turns.push(
+					(async () => {
+						await opts.beforeFinish?.(records);
+						await finish?.();
+					})(),
+				);
 			};
 			const bridge = new IrcBridge({
 				isDisposed: () => false,
@@ -692,6 +761,39 @@ describe("IRC", () => {
 				["0-A", "d-1"],
 				["0-B", "d-2"],
 			]);
+		});
+
+		it("still relays the correlated final output after an interim acknowledgement", async () => {
+			const sender = makeFakeSession();
+			registry.register({ id: "0-C", displayName: "task", kind: "sub", session: sender.session });
+			const peer = registerIdleSubagent("0-A", {
+				beforeFinish: async () => {
+					await bus.send({ from: "0-A", to: "0-C", body: "on it" });
+				},
+			});
+			await executeSend({ registry, senderId: "0-C" }, { to: "0-A", message: "release the slot" });
+			await peer.settled();
+			expect(sender.delivered.map(msg => msg.body)).toEqual(["on it", "Not for me."]);
+			expect(sender.delivered[1]?.replyTo).toBeDefined();
+			expect(bus.unansweredSends("0-C", 0)).toEqual([]);
+		});
+
+		it("correlates each request when two messages from one peer share a wake turn", async () => {
+			const sender = makeFakeSession();
+			registry.register({ id: "0-C", displayName: "task", kind: "sub", session: sender.session });
+			const peer = registerIdleSubagent("0-A");
+			peer.wake([incoming("first-request", "0-C"), incoming("second-request", "0-C")]);
+			await peer.settled();
+			expect(sender.delivered.map(msg => msg.replyTo)).toEqual(["first-request", "second-request"]);
+		});
+
+		it("does not answer a correlated final reply with another wake relay", async () => {
+			const sender = makeFakeSession();
+			registry.register({ id: "0-C", displayName: "task", kind: "sub", session: sender.session });
+			const peer = registerIdleSubagent("0-A");
+			peer.wake([incoming("final-reply", "0-C", { replyTo: "original-request" })]);
+			await peer.settled();
+			expect(sender.delivered).toEqual([]);
 		});
 	});
 

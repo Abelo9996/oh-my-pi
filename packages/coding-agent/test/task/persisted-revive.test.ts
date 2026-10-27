@@ -1064,7 +1064,7 @@ describe("persisted subagent revival", () => {
 			const finish = observer?.([wakeRecord("Main")]);
 			const bus = IrcBus.global();
 			const answered = bus.wait("Main", { from: ref.id }, 5000);
-			await bus.send({ from: ref.id, to: "Main", body: "here you go" });
+			await bus.send({ from: ref.id, to: "Main", body: "here you go", replyTo: "irc-42" });
 			expect((await answered)?.body).toBe("here you go");
 			handle.setLastAssistantText("Sent the table via hub.");
 			const duplicate = bus.wait("Main", { from: ref.id }, 200);

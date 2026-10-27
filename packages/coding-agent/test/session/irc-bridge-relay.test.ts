@@ -47,6 +47,29 @@ describe("IrcBridge wake-relay marking", () => {
 		expect(record.details).not.toHaveProperty("wakeRelay");
 		expect(record.content).toContain("is delivered to");
 	});
+
+	it("exposes the request id in the final-reply URL and keeps progress uncorrelated", async () => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({ id: "request-42", from: "B", to: "A", body: "release the slot", ts: 1 });
+		const record = woken[0][0] as CustomMessage;
+		expect(record.content).toContain('path: "agent://B?replyTo=request-42"');
+		expect(record.content).toContain("progress use `agent://B` without `replyTo`");
+	});
+
+	it("does not offer to answer a final reply with another automatic relay", async () => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({
+			id: "reply-42",
+			from: "B",
+			to: "A",
+			body: "slot released",
+			ts: 2,
+			replyTo: "request-42",
+		});
+		const record = woken[0][0] as CustomMessage;
+		expect(record.details).toMatchObject({ replyTo: "request-42" });
+		expect(record.content).not.toContain("is delivered to");
+	});
 });
 
 describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
@@ -84,6 +107,9 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		expect(bridge.drainPending().map(record => (record as CustomMessage).details)).toMatchObject([
 			{ id: "b1", broadcast: true },
 		]);
+		const steer = steered[0]!;
+		if (steer.role !== "user") throw new Error("Expected parent steering");
+		expect(steer.content).toContain("agent://Main?replyTo=d1");
 	});
 
 	it("leaves non-parent messages queued at a stop boundary and drains them after work", async () => {

@@ -44,7 +44,7 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 /** Send a direct message or broadcast; delivery never waits for a reply. */
 export async function executeSend(
 	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
-	params: { to: string; message: string },
+	params: { to: string; message: string; replyTo?: string },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, sessionFileHint } = deps;
 	const to = params.to.trim();
@@ -67,7 +67,13 @@ export async function executeSend(
 	const receipts = await Promise.all(
 		targets.map(target =>
 			bus.send(
-				{ from: senderId, to: target, body: message, ...(isBroadcast ? { broadcast: true } : {}) },
+				{
+					from: senderId,
+					to: target,
+					body: message,
+					...(params.replyTo ? { replyTo: params.replyTo } : {}),
+					...(isBroadcast ? { broadcast: true } : {}),
+				},
 				{ suppressRelay },
 			),
 		),

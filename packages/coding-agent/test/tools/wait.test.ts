@@ -10,6 +10,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 
 function session(manager?: AsyncJobManager, agentId = "Main", launch = false): ToolSession {
@@ -266,6 +267,7 @@ describe("wait", () => {
 		function liveSession() {
 			const listeners = new Set<(event: { type: string }) => void>();
 			const state = { isStreaming: true, runStartedAt: 0, holdsQuestion: false };
+			const received: IrcMessage[] = [];
 			const session = {
 				get isStreaming() {
 					return state.isStreaming;
@@ -273,7 +275,10 @@ describe("wait", () => {
 				get runStartedAt() {
 					return state.runStartedAt;
 				},
-				deliverIrcMessage: async () => "injected",
+				deliverIrcMessage: async (message: IrcMessage) => {
+					received.push(message);
+					return "injected";
+				},
 				waitForIrcReplies: async () => {},
 				hasQueuedIrcFrom: () => state.holdsQuestion,
 				subscribe: (listener: (event: { type: string }) => void) => {
@@ -284,6 +289,7 @@ describe("wait", () => {
 			return {
 				session: session as unknown as AgentSession,
 				state,
+				received,
 				endTurn: () => {
 					state.isStreaming = false;
 					for (const listener of listeners) listener({ type: "agent_end" });
@@ -314,8 +320,15 @@ describe("wait", () => {
 		}
 
 		const ask = () => IrcBus.global().send({ from: "Child", to: "Main", body: "which codeword?" });
+		const answer = (replyTo: string, body: string) =>
+			IrcBus.global().send({ from: "Main", to: "Child", body, replyTo });
 		const childWait = (manager = new AsyncJobManager({})) =>
 			new WaitTool(session(manager, "Child")).execute("child-wait", {});
+		const nextTurn = () => {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			return promise;
+		};
 		/** Text of a wait that returned at once instead of blocking; never an error. */
 		const idleText = async (
 			waiting: Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }> }>,
@@ -327,10 +340,10 @@ describe("wait", () => {
 		};
 
 		test("blocks for the answer to a question the caller asked", async () => {
-			registerParentAndChild();
+			const { main } = registerParentAndChild();
 			await ask();
 			const waiting = childWait();
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			await answer(main.received[0]!.id, "heliotrope");
 			const result = await waiting;
 			expect(result.isError).toBeUndefined();
 			expect(result.details?.waited).toMatchObject({ from: "Main", body: "heliotrope" });
@@ -339,13 +352,13 @@ describe("wait", () => {
 		});
 
 		test("blocks for a second question asked in the same millisecond its first was answered", async () => {
-			registerParentAndChild();
+			const { main } = registerParentAndChild();
 			vi.spyOn(Date, "now").mockReturnValue(1_000_000);
 			await ask();
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			await answer(main.received[0]!.id, "heliotrope");
 			await IrcBus.global().send({ from: "Child", to: "Main", body: "and the second word?" });
 			const waiting = childWait();
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "vermilion" });
+			await answer(main.received[1]!.id, "vermilion");
 			const result = await waiting;
 			expect(result.isError).toBeUndefined();
 			expect(result.details?.waited).toMatchObject({ from: "Main", body: "vermilion" });
@@ -368,7 +381,7 @@ describe("wait", () => {
 		});
 
 		test("keeps waiting while the agent asked waits on the caller or other work, whichever ends first", async () => {
-			registerParentAndChild();
+			const { main } = registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
 			const childRun = registerChildJob(manager);
 			const build = Promise.withResolvers<string>();
@@ -378,20 +391,22 @@ describe("wait", () => {
 			const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
 			build.resolve("built");
 			await parentWait;
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			await answer(main.received[0]!.id, "heliotrope");
 			expect((await waiting).details?.waited).toMatchObject({ from: "Main", body: "heliotrope" });
 			childRun.resolve("done");
 		});
 
 		test("ends once the agent asked finishes its turn without replying", async () => {
-			const { main } = registerParentAndChild();
+			const { registry, main } = registerParentAndChild();
 			await ask();
 			const waiting = childWait();
 			main.endTurn();
+			// A disposed/removed peer cannot answer; a mere idle boundary can.
+			registry.unregister("Main");
 			const result = await waiting;
 			expect(result.isError).toBeUndefined();
 			expect(result.content[0]).toMatchObject({
-				text: expect.stringContaining("`Main` finished its turn without replying"),
+				text: expect.stringContaining("no agent you messaged this run owes a reply"),
 			});
 		});
 
@@ -410,7 +425,7 @@ describe("wait", () => {
 			setImmediate(checked.resolve);
 			await checked.promise;
 			expect(settled).toBe(false);
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			await answer(main.received[0]!.id, "heliotrope");
 			expect((await waiting).details?.waited).toMatchObject({ from: "Main", body: "heliotrope" });
 		});
 
@@ -435,7 +450,7 @@ describe("wait", () => {
 		});
 
 		test("keeps waiting while the agent asked runs a timed eval handle wait on the caller", async () => {
-			registerParentAndChild();
+			const { main } = registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
 			const childRun = registerChildJob(manager);
 			const parentSession = { asyncJobManager: manager, getAgentId: () => "Main" } as unknown as ToolSession;
@@ -445,10 +460,173 @@ describe("wait", () => {
 			);
 			await ask();
 			const waiting = childWait(manager);
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			await answer(main.received[0]!.id, "heliotrope");
 			expect((await waiting).details?.waited).toMatchObject({ from: "Main", body: "heliotrope" });
 			childRun.resolve("done");
 			await handleWait;
+		});
+
+		test.each(["on it; the release notice will follow", "unrelated: the other file is ready"])(
+			"returns %s without discharging the requested reply",
+			async body => {
+				const { main } = registerParentAndChild();
+				await ask();
+				const first = childWait();
+				await IrcBus.global().send({ from: "Main", to: "Child", body });
+				expect((await first).details?.waited?.body).toBe(body);
+
+				const waiting = childWait();
+				let settled = false;
+				void waiting.then(() => {
+					settled = true;
+				});
+				await nextTurn();
+				expect(settled).toBe(false);
+				await answer(main.received[0]!.id, "ports released");
+				expect((await waiting).details?.waited?.body).toBe("ports released");
+				expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
+			},
+		);
+
+		test("a reply to the older of two same-millisecond requests leaves the newer one owed", async () => {
+			const { main } = registerParentAndChild();
+			vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+			await ask();
+			await IrcBus.global().send({ from: "Child", to: "Main", body: "and the second word?" });
+			const older = childWait();
+			await answer(main.received[0]!.id, "heliotrope");
+			expect((await older).details?.waited?.body).toBe("heliotrope");
+
+			const newer = childWait();
+			let settled = false;
+			void newer.then(() => {
+				settled = true;
+			});
+			await nextTurn();
+			expect(settled).toBe(false);
+			await answer(main.received[1]!.id, "vermilion");
+			expect((await newer).details?.waited?.body).toBe("vermilion");
+		});
+
+		test("keeps a request owed across an idle boundary and a later wake", async () => {
+			const { registry, main } = registerParentAndChild();
+			await ask();
+			const waiting = childWait();
+			let settled = false;
+			void waiting.then(() => {
+				settled = true;
+			});
+			main.endTurn();
+			registry.setStatus("Main", "idle");
+			await nextTurn();
+			expect(settled).toBe(false);
+			main.state.isStreaming = true;
+			registry.setStatus("Main", "running");
+			await answer(main.received[0]!.id, "ports released after wake");
+			expect((await waiting).details?.waited?.body).toBe("ports released after wake");
+		});
+
+		test("returns a queued acknowledgement before continuing to wait for its final reply", async () => {
+			const { registry, main } = registerParentAndChild();
+			const queued: IrcMessage[] = [];
+			registry.register({
+				id: "Child",
+				displayName: "Child",
+				kind: "sub",
+				parentId: "Main",
+				session: {
+					drainPendingIrcInboxMessages: () => queued.splice(0, 1),
+					deliverIrcMessage: async (message: IrcMessage) => {
+						queued.push(message);
+						return "injected";
+					},
+				} as unknown as AgentSession,
+			});
+			await ask();
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "on it" });
+			expect((await childWait()).details?.waited?.body).toBe("on it");
+			const waiting = childWait();
+			await answer(main.received[0]!.id, "ports released");
+			expect((await waiting).details?.waited?.body).toBe("ports released");
+			expect(queued).toEqual([]);
+		});
+
+		test("a settled owned job answers existing requests but not a later one", async () => {
+			const { child } = registerParentAndChild();
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const run = registerChildJob(manager);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "release ports" });
+			run.resolve("ports released");
+			await manager.waitForAll();
+			const tool = new WaitTool(session(manager));
+			expect((await tool.execute("result", {})).details?.jobs?.[0]?.resultText).toBe("ports released");
+			expect(await idleText(tool.execute("after-result", {}))).toContain(
+				"no agent you messaged this run owes a reply",
+			);
+
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "release next slot" });
+			const waiting = tool.execute("next-request", {});
+			await IrcBus.global().send({
+				from: "Child",
+				to: "Main",
+				body: "next slot released",
+				replyTo: child.received[1]!.id,
+			});
+			expect((await waiting).details?.waited?.body).toBe("next slot released");
+		});
+
+		test("an explicit peer cancellation ends the wait and does not revive its old requests", async () => {
+			const { registry, main } = registerParentAndChild();
+			await ask();
+			const waiting = childWait();
+			registry.setStatus("Main", "aborted");
+			expect(await idleText(waiting)).toContain("no agent you messaged this run owes a reply");
+			registry.unregister("Main");
+			registry.register({ id: "Main", displayName: "Main", kind: "main", session: main.session });
+			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
+		});
+
+		test("escapes a cycle between two peer reply waits", async () => {
+			const { main, child } = registerParentAndChild();
+			await ask();
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "which slot?" });
+			const waiting = childWait();
+			const parentWait = new WaitTool(session()).execute("parent-reply-wait", {});
+			expect(await idleText(parentWait)).toContain("`Child` cannot reply before you finish");
+			await answer(main.received[0]!.id, "heliotrope");
+			expect((await waiting).details?.waited?.body).toBe("heliotrope");
+			await IrcBus.global().send({
+				from: "Child",
+				to: "Main",
+				body: "slot two",
+				replyTo: child.received[0]!.id,
+			});
+		});
+
+		test("a plain write answer leaves the next wait capped at 30 minutes and the request still owed", async () => {
+			const { main } = registerParentAndChild();
+			await ask();
+			const first = childWait();
+			await new WriteTool(session()).execute("uncorrelated-final", {
+				path: "agent://Child",
+				content: "ports released",
+			});
+			expect((await first).details?.waited?.body).toBe("ports released");
+			vi.useFakeTimers();
+			const result = childWait();
+			let settled = false;
+			void result.then(() => {
+				settled = true;
+			});
+			vi.advanceTimersByTime(30 * 60_000 - 1);
+			await Promise.resolve();
+			expect(settled).toBe(false);
+			vi.advanceTimersByTime(1);
+			expect((await result).useless).toBe(true);
+			vi.useRealTimers();
+			const waiting = childWait();
+			await answer(main.received[0]!.id, "ports released");
+			expect((await waiting).details?.waited?.body).toBe("ports released");
 		});
 
 		test("a broadcast owes the caller no reply", async () => {
