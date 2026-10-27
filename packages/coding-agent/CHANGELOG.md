@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A 429 rate limit after a turn with signed Claude thinking now moves to the next model in `retry.fallbackChains` at once, instead of retrying the throttled model until `retry.maxRetries` is spent
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
