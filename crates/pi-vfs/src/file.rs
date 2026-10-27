@@ -102,6 +102,7 @@ struct HostCancel {
 }
 
 impl HostCancel {
+	#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn, reason = "const only off Unix"))]
 	fn for_file(token: CancellationToken, file: &std::fs::File) -> Self {
 		#[cfg(not(unix))]
 		let _ = file;
