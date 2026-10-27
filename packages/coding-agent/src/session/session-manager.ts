@@ -3808,15 +3808,14 @@ export class SessionManager {
 
 	/**
 	 * The newest model change on the current branch when it selected a model for
-	 * this session only (`temporary`, or a prewalk handoff), passing over retry
-	 * fallback hops; undefined when the newest other change assigned a role or
-	 * none was recorded.
+	 * this session only (`temporary`, or a prewalk handoff); undefined when the
+	 * newest change assigned a role, was a retry fallback hop, or none was recorded.
 	 */
 	getSessionLocalModelChange(): ModelChangeEntry | undefined {
 		const branch = this.getBranch();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
-			if (entry.type !== "model_change" || entry.role === EPHEMERAL_MODEL_CHANGE_ROLE) continue;
+			if (entry.type !== "model_change") continue;
 			return entry.role === "temporary" || entry.role === PREWALK_MODEL_CHANGE_ROLE ? entry : undefined;
 		}
 		return undefined;
