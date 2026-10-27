@@ -2252,7 +2252,7 @@ export class TurnRecovery {
 		// a wait past the delay cap, a spent budget) — has no source model to go
 		// back to, so deferring left the whole chain untried and ended the turn.
 		// A rate limit on the signer counts as no attempt too: the retry re-hits
-		// the same throttled model, while a sibling has its own limit.
+		// the same cap, while a chain entry may sit under a different one.
 		const sourceModel = this.#host.model();
 		const signerRetryRemains =
 			options?.sameModelRetryAvailable === true &&
@@ -2632,10 +2632,10 @@ export class TurnRecovery {
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
 		const rateLimitReason = parseRateLimitReason(errorMessage);
-		// A rate limit throttles the failed model itself (Anthropic's per-minute caps
-		// are per model), so another attempt on it is the one request least likely to
-		// succeed. The signed-thinking deferral in #tryRetryModelFallback must not
-		// hold the chain for it.
+		// A rate limit is a cap the next attempt on this model re-hits, so the
+		// signed-thinking deferral in #tryRetryModelFallback must not hold the chain
+		// for it. A chain entry may sit under a different cap; when it shares this
+		// one, its own failure walks the chain on.
 		const sourceRateLimited = message.errorStatus === 429 || rateLimitReason === "RATE_LIMIT_EXCEEDED";
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
