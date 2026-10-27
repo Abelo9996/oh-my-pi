@@ -93,7 +93,7 @@ describe("conflict URI read selectors", () => {
 			["1-3:raw", THEIRS.slice(0, 3).join("\n")],
 			["raw:-20", THEIRS.slice(-20).join("\n")],
 			["-2:raw", THEIRS.slice(-2).join("\n")],
-			["raw:2-3,28-29", `${THEIRS.slice(1, 3).join("\n")}\n\n…\n\n${THEIRS.slice(27, 29).join("\n")}`],
+			["raw:2-3,28-29", [...THEIRS.slice(1, 3), ...THEIRS.slice(27, 29)].join("\n")],
 		]) {
 			expect(text(await read.execute("raw-range", { path: `conflict://1/theirs:${selector}` }))).toBe(expected!);
 		}
