@@ -15,6 +15,7 @@ import {
 	Loader,
 	Markdown,
 	padding,
+	parseSgrMouse,
 	Spacer,
 	Text,
 	visibleWidth,
@@ -1883,7 +1884,9 @@ export class CommandController {
 		isDeferred: boolean,
 		shouldPersistCwd: boolean,
 	): Promise<boolean> {
-		this.ctx.bashComponent = new BashExecutionComponent(command, this.ctx.ui, excludeFromContext);
+		const component = new BashExecutionComponent(command, this.ctx.ui, excludeFromContext);
+		this.ctx.bashComponent = component;
+		let detachInput: (() => void) | undefined;
 
 		if (isDeferred) {
 			this.ctx.pendingMessagesContainer.addChild(this.ctx.bashComponent);
@@ -1909,6 +1912,9 @@ export class CommandController {
 					pty: {
 						...bashPtyViewport(this.ctx.ui),
 						onChunk: chunk => this.ctx.bashComponent?.appendPtyChunk(chunk),
+						onStdin: write => {
+							detachInput = this.#forwardKeysToPty(component, write);
+						},
 					},
 				},
 			);
@@ -1937,10 +1943,27 @@ export class CommandController {
 			}
 			this.ctx.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		} finally {
+			detachInput?.();
 			this.ctx.bashComponent = undefined;
 			this.ctx.ui.requestRender();
 		}
 		return false;
+	}
+
+	/**
+	 * Routes composer keystrokes to a running `!` command's PTY so it can answer
+	 * its own prompts (`read`, shell-startup questions), like a foreground job.
+	 * The interrupt key still cancels; focused dialogs and mouse reports keep
+	 * their input. Returns the detach function.
+	 */
+	#forwardKeysToPty(component: BashExecutionComponent, write: (data: string) => void): () => void {
+		return this.ctx.ui.addInputListener(data => {
+			if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+			if (this.ctx.keybindings.matches(data, "app.interrupt") || parseSgrMouse(data)) return undefined;
+			const bytes = component.encodePtyInput(data);
+			if (bytes) write(bytes);
+			return { consume: true };
+		});
 	}
 
 	async #applyBashResultCwd(result: BashResult): Promise<boolean> {
