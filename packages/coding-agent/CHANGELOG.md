@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Custom LiteLLM providers now refresh cached model rosters after paginated `/v2/model/info` discovery was fixed; cached first-page-only lists no longer hide later-page models.
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
