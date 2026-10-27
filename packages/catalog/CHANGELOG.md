@@ -6,6 +6,10 @@
 
 - Added LM Studio decision models to discovery: models LM Studio reports as `type: "decision"` are listed as `judge` models served over its `/v1/decisions` endpoint, alongside its chat models ([#17169](https://github.com/can1357/oh-my-pi/pull/17169) by [@richiestanaway](https://github.com/richiestanaway))
 
+### Fixed
+
+- Fixed hosted web search on OpenAI Responses and Codex Responses selecting GPT-5.6 Luna instead of GPT-6 Luna (by [@mateo-bolanos](https://github.com/mateo-bolanos)).
+
 ## [18.13.1] - 2026-10-27
 
 ### Added

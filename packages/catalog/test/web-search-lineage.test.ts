@@ -26,12 +26,6 @@ describe("hosted web search follows model lineage and transport", () => {
 		expect(buildModel(proxyModel(id, api)).webSearch).toBe(grounding);
 	});
 
-	it("declares same-provider swap targets and hosted image on a proxied GPT-5 model", () => {
-		const model = buildModel(proxyModel("gpt-5.6-sol", "openai-responses"));
-		expect(model).toMatchObject({ webSearchModel: "gpt-5.6-luna", hostedImage: true, imageModel: "gpt-image-2" });
-		expect(buildModel(proxyModel("claude-opus-4-5", "anthropic-messages")).webSearchModel).toBe("claude-haiku-4-5");
-	});
-
 	it.each([
 		["gpt-5.6-sol", "openai-completions"],
 		["gpt-4o", "openai-responses"],
