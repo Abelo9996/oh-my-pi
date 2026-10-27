@@ -366,7 +366,7 @@ Notes: ...
    - `Cannot combine query extraction with line selectors` for `agent://.../path:50`
    - multi-ranges on directory/archive-directory listings
 - `conflict://*` reads are rejected; unknown/stale conflict ids require re-reading `<path>:conflicts`.
-- Missing local/archive/sqlite paths first attempt unique suffix resolution; if no unique match or guarded recovery exists they error.
+- Missing local/archive/sqlite paths first attempt unique suffix resolution; if no unique match or guarded recovery exists they error. Explicit semicolon lists fan out after literal/archive/SQLite precedence, including when the combined filename is too long; each member keeps its selectors and errors. Permission and I/O errors do not trigger missing-path recovery.
 - Targets that are neither regular files nor directories (character or block device, FIFO, socket) throw a `ToolError` naming the file kind; SQLite detection skips them rather than sniffing their header.
 - Out-of-bounds line reads do not throw. They return explanatory text with a suggestion such as `Use :1 ...` or `Use :<last line> ...`.
 - Probable binary local files return a notice unless `:raw` was requested or an available IDA-backed executable/database view handles them.
