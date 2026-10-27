@@ -5678,7 +5678,7 @@ type LiteLLMRichEndpointModel<TApi extends Api> = {
 };
 type LiteLLMRichEndpointFailure = {
 	endpoint: string;
-	reason: "http-status" | "invalid-json" | "network-error";
+	reason: "http-status" | "invalid-json" | "invalid-pagination" | "network-error";
 	status?: number;
 	error?: unknown;
 };
@@ -6213,7 +6213,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 	) {
 		const { current_page: currentPage, total_pages: totalPages, total_count: totalCount } = firstPage.payload;
 		const invalidPage = (status: number): LiteLLMRichEndpointResult<TApi> => ({
-			failure: { endpoint, reason: "invalid-json", status },
+			failure: { endpoint, reason: "invalid-pagination", status },
 		});
 		if (
 			currentPage !== 1 ||
@@ -6226,15 +6226,17 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 		) {
 			return invalidPage(firstPage.status);
 		}
-		for (let page = 2; page <= totalPages; page++) {
-			const nextPage = await fetchPage(page);
+		const remainingPages = await Promise.all(
+			Array.from({ length: totalPages - 1 }, (_, index) => fetchPage(index + 2)),
+		);
+		for (const [index, nextPage] of remainingPages.entries()) {
 			if (!nextPage || "failure" in nextPage) {
 				return nextPage ?? invalidPage(firstPage.status);
 			}
 			const nextEntries = extractLiteLLMRichEntries(nextPage.payload);
 			if (
 				!isRecord(nextPage.payload) ||
-				nextPage.payload.current_page !== page ||
+				nextPage.payload.current_page !== index + 2 ||
 				nextPage.payload.total_pages !== totalPages ||
 				(totalCount !== undefined && nextPage.payload.total_count !== totalCount) ||
 				!nextEntries?.length
