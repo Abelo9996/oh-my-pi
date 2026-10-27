@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import { ShellFsFileType } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as capability from "../../src/capability";
 import type { CapabilityResult } from "../../src/capability/types";
@@ -121,7 +122,7 @@ describe("JSON selectors over SSH resources", () => {
 
 	it("rejects JSON selectors on remote directories instead of parsing their listings", async () => {
 		vi.spyOn(fileTransfer, "statRemotePath").mockResolvedValue("directory");
-		vi.spyOn(fileTransfer, "listRemoteDir").mockResolvedValue([{ name: "a.json", isDirectory: false }]);
+		vi.spyOn(fileTransfer, "listRemoteDir").mockResolvedValue([{ name: "a.json", fileType: ShellFsFileType.File }]);
 		const read = vi.spyOn(fileTransfer, "readRemoteFile");
 		await expect(tool.execute("ssh-directory", { path: "ssh://HOST/tmp/?q=." })).rejects.toThrow(
 			/regular SSH file, not a directory/,

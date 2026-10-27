@@ -1147,6 +1147,28 @@ export interface LiveEndEvent {
 	error?: string;
 }
 
+/** State of one draft-only microphone capture. */
+export interface DictationStateEvent {
+	type: "dictation_state";
+	captureId: string;
+	state: "starting" | "recording" | "transcribing";
+}
+
+/** Full accumulated draft preview; replaces the previous preview for this capture. */
+export interface DictationTranscriptEvent {
+	type: "dictation_transcript";
+	captureId: string;
+	text: string;
+}
+
+/** Exactly one terminal frame per capture; text is the accumulated result. */
+export interface DictationEndEvent {
+	type: "dictation_end";
+	captureId: string;
+	text: string;
+	error?: string;
+}
+
 /** Text appended to the running side question's latest answer. */
 export interface BtwDeltaEvent {
 	type: "btw_delta";
@@ -1466,7 +1488,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1637,6 +1659,14 @@ export interface LiveMuteParams {
 
 export interface LiveMuteResult {
 	muted: boolean;
+}
+
+export interface DictationStartParams {
+	captureId: string;
+}
+
+export interface DictationStopResult {
+	text: string;
 }
 
 export interface SetModelParams {
@@ -1851,6 +1881,8 @@ export interface RpcWireCommands {
 	live_start: { params: LiveStartParams; result: LiveStartResult };
 	live_stop: { params: undefined; result: undefined };
 	live_mute: { params: LiveMuteParams; result: LiveMuteResult };
+	dictation_start: { params: DictationStartParams; result: undefined };
+	dictation_stop: { params: undefined; result: DictationStopResult };
 	set_model: { params: SetModelParams; result: ModelInfo };
 	cycle_model: { params: undefined; result: ModelCycleResult | null };
 	get_available_models: { params: undefined; result: GetAvailableModelsResult };

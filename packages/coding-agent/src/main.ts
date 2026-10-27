@@ -195,6 +195,7 @@ import {
 	cfgPrewalkEnabled,
 	cfgSessionMaxCost,
 	cfgSessionWarnCost,
+	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
@@ -462,7 +463,7 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			await session.promptCustomMessage(message, { streamingBehavior });
+			input.dispatched = await session.promptCustomMessage(message, { streamingBehavior });
 		} else if (input.synthetic) {
 			// Synthetic continue shortcuts are hidden developer prompts. The streaming
 			// queue (#queueUserMessage) only carries user-attributed messages, so we do
@@ -2221,6 +2222,8 @@ export async function runRootCommand(
 				SessionManager.listForPicker,
 				cwd,
 				parsedArgs.sessionDir,
+				undefined,
+				cfgSessionWorktreeScope.get(settingsInstance),
 			);
 			let preloadedAllSessions: SessionInfo[] | undefined;
 			if (folderSessions.length === 0) {

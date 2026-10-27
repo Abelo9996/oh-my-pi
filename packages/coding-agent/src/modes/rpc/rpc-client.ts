@@ -32,6 +32,7 @@ import type {
 	RpcBtwRecordFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
+	RpcDictationFrame,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHandoffResult,
@@ -117,6 +118,7 @@ export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCom
 export type RpcPromptResultListener = (result: RpcPromptResultFrame) => void;
 export type RpcSessionSettledListener = () => void;
 export type RpcLiveListener = (frame: RpcLiveFrame) => void;
+export type RpcDictationListener = (frame: RpcDictationFrame) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -250,6 +252,16 @@ function isRpcLiveFrame(value: unknown): value is RpcLiveFrame {
 	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(LIVE_FRAME_TYPES, value.type);
 }
 
+const DICTATION_FRAME_TYPES: Record<string, true> = {
+	dictation_state: true,
+	dictation_transcript: true,
+	dictation_end: true,
+};
+
+function isRpcDictationFrame(value: unknown): value is RpcDictationFrame {
+	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(DICTATION_FRAME_TYPES, value.type);
+}
+
 function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailableCommandsUpdateFrame {
 	if (!isRecord(value)) return false;
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
@@ -336,6 +348,7 @@ export class RpcClient {
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
 	#liveListeners = new Set<RpcLiveListener>();
+	#dictationListeners = new Set<RpcDictationListener>();
 	/** `promptAndWait` completions keyed by request id; registered before the prompt is sent. */
 	#promptResultWaiters = new Map<string, (result: RpcPromptResultFrame) => void>();
 	/** Same-id failures that arrive after the success ack removed the pending request. */
@@ -686,6 +699,14 @@ export class RpcClient {
 		};
 	}
 
+	/** Subscribe to draft-only dictation state, full preview, and terminal frames. */
+	onDictation(listener: RpcDictationListener): () => void {
+		this.#dictationListeners.add(listener);
+		return () => {
+			this.#dictationListeners.delete(listener);
+		};
+	}
+
 	/**
 	 * Get collected stderr output (useful for debugging).
 	 */
@@ -876,6 +897,26 @@ export class RpcClient {
 	/** Set microphone mute, or toggle it when `muted` is omitted. Fails without an active session. */
 	async liveMute(muted?: boolean): Promise<{ muted: boolean }> {
 		const response = await this.#send({ type: "live_mute", muted });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Start draft-only dictation; resolves once recording, with frames delivered to onDictation.
+	 * The deadline defaults to 10 minutes for cold model initialization. A timeout does not
+	 * cancel the server operation; call dictationStop() to stop a pending or active capture.
+	 */
+	async dictationStart(captureId: string, timeoutMs = 600_000): Promise<void> {
+		const response = await this.#send({ type: "dictation_start", captureId }, timeoutMs);
+		this.#getData(response);
+	}
+
+	/**
+	 * Stop and flush dictation, returning the accumulated draft. The deadline defaults to
+	 * 10 minutes for transcription; a timeout does not cancel the server operation, and
+	 * its terminal transcript can still be received via onDictation().
+	 */
+	async dictationStop(timeoutMs = 600_000): Promise<{ text: string }> {
+		const response = await this.#send({ type: "dictation_stop" }, timeoutMs);
 		return this.#getData(response);
 	}
 
@@ -1536,6 +1577,13 @@ export class RpcClient {
 
 		if (isRpcLiveFrame(data)) {
 			for (const listener of this.#liveListeners) {
+				listener(data);
+			}
+			return;
+		}
+
+		if (isRpcDictationFrame(data)) {
+			for (const listener of this.#dictationListeners) {
 				listener(data);
 			}
 			return;
