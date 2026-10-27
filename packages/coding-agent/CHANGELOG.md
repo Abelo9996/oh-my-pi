@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `wait` forgetting peer requests after interim acknowledgements or idle/wake transitions; final peer replies use `agent://<id>?replyTo=<message-id>` ([#17176](https://github.com/can1357/oh-my-pi/pull/17176) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.13.1] - 2026-10-27
 
 ### Added
