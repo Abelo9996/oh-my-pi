@@ -15,6 +15,7 @@ import { Database } from "bun:sqlite";
 import {
 	getCached,
 	getOrFetchView,
+	invalidateAllForRepo,
 	openDb,
 	putCached,
 	resetForTests as resetCacheForTests,
@@ -478,6 +479,71 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(updated?.rendered).toBe("refreshed-diff");
 		expect(updated?.payload.refreshed).toBe(true);
 	});
+
+	it("does not let an older background diff refresh overwrite a post-invalidation fetch", async () => {
+		const oldRefresh = Promise.withResolvers<{
+			rendered: string;
+			sourceUrl: undefined;
+			payload: { head: string };
+		}>();
+		const started = Promise.withResolvers<void>();
+		putCached({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 54,
+			includeComments: false,
+			rendered: "head A",
+			payload: { head: "A" },
+			fetchedAt: Date.now() - 300_000,
+		});
+		const options = {
+			repo: TEST_REPO,
+			kind: "pr-diff" as const,
+			number: 54,
+			includeComments: false,
+			settings: Settings.isolated({ "github.cache.softTtlSec": 60 }),
+			fetchFresh: () => {
+				started.resolve();
+				return oldRefresh.promise;
+			},
+		};
+		expect((await getOrFetchView(options)).status).toBe("stale");
+		await started.promise;
+		invalidateAllForRepo(TEST_REPO);
+		const next = await getOrFetchView({
+			...options,
+			fetchFresh: async () => ({ rendered: "head B", sourceUrl: undefined, payload: { head: "B" } }),
+		});
+		expect(next.rendered).toBe("head B");
+		oldRefresh.resolve({ rendered: "head A", sourceUrl: undefined, payload: { head: "A" } });
+		// Drain the queued refresh's store and finally callbacks, not an OS clock.
+		await oldRefresh.promise;
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(getCached(TEST_REPO, "pr-diff", 54, false)?.rendered).toBe("head B");
+	});
+
+	it.each(["pr", "pr-diff"] as const)(
+		"does not resurrect invalidated %s rows from an older foreground cache miss",
+		async kind => {
+			const oldFetch = Promise.withResolvers<{
+				rendered: string;
+				sourceUrl: undefined;
+				payload: { head: string };
+			}>();
+			const pending = getOrFetchView({
+				repo: TEST_REPO,
+				kind,
+				number: 55,
+				includeComments: false,
+				fetchFresh: () => oldFetch.promise,
+			});
+			invalidateAllForRepo(TEST_REPO);
+			oldFetch.resolve({ rendered: "head A", sourceUrl: undefined, payload: { head: "A" } });
+			await pending;
+			expect(getCached(TEST_REPO, kind, 55, false)).toBeNull();
+		},
+	);
 
 	it("treats past-hard-TTL rows as cache misses (fetcher runs)", async () => {
 		const settings = Settings.isolated({
