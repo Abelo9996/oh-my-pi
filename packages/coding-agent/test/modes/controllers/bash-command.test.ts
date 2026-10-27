@@ -309,7 +309,13 @@ describe("bash shortcut command", () => {
 	it("forwards composer keystrokes to a running PTY command until it exits (#17210)", async () => {
 		const { ctx, executeBash } = createCwdContext("/tmp");
 		type Listener = (data: string) => { consume?: boolean } | undefined;
-		const listeners = new Set<Listener>();
+		let listeners = new Set<Listener>();
+		let globalExpansions = 0;
+		listeners.add(data => {
+			if (data !== "\x0f") return undefined;
+			globalExpansions++;
+			return { consume: true };
+		});
 		const editor = {};
 		let focused: unknown = editor;
 		Object.assign(ctx, {
@@ -319,8 +325,9 @@ describe("bash shortcut command", () => {
 				requestRender: vi.fn(),
 				requestComponentRender: vi.fn(),
 				getFocused: () => focused,
-				addInputListener: (listener: Listener) => {
-					listeners.add(listener);
+				addInputListener: (listener: Listener, options?: { prepend?: boolean }) => {
+					if (options?.prepend) listeners = new Set([listener, ...listeners]);
+					else listeners.add(listener);
 					return () => listeners.delete(listener);
 				},
 			},
@@ -332,6 +339,7 @@ describe("bash shortcut command", () => {
 			options?.pty?.onStdin?.(data => written.push(data));
 			// The command is blocked on `read` while the user types in the composer.
 			pressed.answer = press("y");
+			pressed.nanoWrite = press("\x0f");
 			pressed.enter = press("\r");
 			pressed.escape = press("\x1b");
 			pressed.mouse = press("\x1b[<0;10;5M");
@@ -353,12 +361,21 @@ describe("bash shortcut command", () => {
 
 		await controller.handleBashCommand("read -k 1 answer");
 
-		expect(written).toEqual(["y", "\r"]);
+		expect(written).toEqual(["y", "\x0f", "\r"]);
+		expect(globalExpansions).toBe(0);
 		// Esc stays the cancel key; mouse reports and focused dialogs keep their input.
-		expect(pressed).toEqual({ answer: true, enter: true, escape: false, mouse: false, dialog: false });
-		// After exit the composer owns the keyboard again.
-		expect(press("z")).toBe(false);
-		expect(listeners.size).toBe(0);
+		expect(pressed).toEqual({
+			answer: true,
+			nanoWrite: true,
+			enter: true,
+			escape: false,
+			mouse: false,
+			dialog: false,
+		});
+		// After exit the global Ctrl+O shortcut works again.
+		expect(press("\x0f")).toBe(true);
+		expect(globalExpansions).toBe(1);
+		expect(listeners.size).toBe(1);
 	});
 
 	it("finalizes successful output before reporting a standalone cd refresh failure", async () => {

@@ -1957,13 +1957,16 @@ export class CommandController {
 	 * their input. Returns the detach function.
 	 */
 	#forwardKeysToPty(component: BashExecutionComponent, write: (data: string) => void): () => void {
-		return this.ctx.ui.addInputListener(data => {
-			if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
-			if (this.ctx.keybindings.matches(data, "app.interrupt") || parseSgrMouse(data)) return undefined;
-			const bytes = component.encodePtyInput(data);
-			if (bytes) write(bytes);
-			return { consume: true };
-		});
+		return this.ctx.ui.addInputListener(
+			data => {
+				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				if (this.ctx.keybindings.matches(data, "app.interrupt") || parseSgrMouse(data)) return undefined;
+				const bytes = component.encodePtyInput(data);
+				if (bytes) write(bytes);
+				return { consume: true };
+			},
+			{ prepend: true },
+		);
 	}
 
 	async #applyBashResultCwd(result: BashResult): Promise<boolean> {
