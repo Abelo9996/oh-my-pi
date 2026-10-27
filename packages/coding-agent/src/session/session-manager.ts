@@ -57,6 +57,7 @@ import {
 	type CustomEntry,
 	type CustomMessageEntry,
 	EPHEMERAL_MODEL_CHANGE_ROLE,
+	PREWALK_MODEL_CHANGE_ROLE,
 	type FileEntry,
 	type LabelEntry,
 	type ModeChangeEntry,
@@ -3797,8 +3798,26 @@ export class SessionManager {
 			const entry = branch[index];
 			if (entry.type !== "model_change") continue;
 			const role = entry.role ?? "default";
-			if (options?.skipEphemeral && role === EPHEMERAL_MODEL_CHANGE_ROLE) continue;
+			if (options?.skipEphemeral && (role === EPHEMERAL_MODEL_CHANGE_ROLE || role === PREWALK_MODEL_CHANGE_ROLE)) {
+				continue;
+			}
 			return role;
+		}
+		return undefined;
+	}
+
+	/**
+	 * The newest model change on the current branch when it selected a model for
+	 * this session only (`temporary`, or a prewalk handoff), passing over retry
+	 * fallback hops; undefined when the newest other change assigned a role or
+	 * none was recorded.
+	 */
+	getSessionLocalModelChange(): ModelChangeEntry | undefined {
+		const branch = this.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type !== "model_change" || entry.role === EPHEMERAL_MODEL_CHANGE_ROLE) continue;
+			return entry.role === "temporary" || entry.role === PREWALK_MODEL_CHANGE_ROLE ? entry : undefined;
 		}
 		return undefined;
 	}
