@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed local embeddings using one spinning CPU thread per core, so a single recall query cost several CPU-seconds on a many-core machine ([#17109](https://github.com/can1357/oh-my-pi/pull/17109) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.13.0] - 2026-10-26
 
 ### Fixed
