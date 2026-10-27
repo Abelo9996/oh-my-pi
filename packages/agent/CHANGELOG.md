@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed chat-completions context estimates counting past thinking that the request drops (no reasoning replay), which triggered compaction far below the threshold ([#15797](https://github.com/can1357/oh-my-pi/issues/15797))
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
