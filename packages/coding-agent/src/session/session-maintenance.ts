@@ -545,8 +545,8 @@ export class SessionMaintenance {
 	 * persisted turn, but a new agent loop still gets its own live-array guard.
 	 */
 	#midTurnDeadEndPendingPrePrompt: string | null | undefined = undefined;
-	/** Avoid repeating the fixed-context dead-end notice until the recovery band becomes viable. */
-	#fixedContextDeadEndNotified = false;
+	/** Suppress repeated fixed-context notices only within the transcript that received one. */
+	#fixedContextDeadEndNotifiedSessionId: string | undefined;
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
 	/**
@@ -1751,17 +1751,18 @@ export class SessionMaintenance {
 		if (reason === "threshold" && !options.explicitNewContextRequest) {
 			const fixedContextExceedsBand = this.#fixedContextExceedsRecoveryBand();
 			if (fixedContextExceedsBand) {
-				if (!this.#fixedContextDeadEndNotified) {
+				const sessionId = this.#host.sessionManager.getSessionId();
+				if (this.#fixedContextDeadEndNotifiedSessionId !== sessionId) {
 					this.#host.emitNotice(
 						"warning",
 						this.#compactionDeadEndWarning("clear large tool output"),
 						"compaction",
 					);
-					this.#fixedContextDeadEndNotified = true;
+					this.#fixedContextDeadEndNotifiedSessionId = sessionId;
 				}
 				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 			}
-			this.#fixedContextDeadEndNotified = false;
+			this.#fixedContextDeadEndNotifiedSessionId = undefined;
 		}
 		const branch = this.#host.sessionManager.getBranch();
 		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);

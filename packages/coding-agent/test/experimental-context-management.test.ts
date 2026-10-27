@@ -286,9 +286,12 @@ describe("experimental context management", () => {
 				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
 				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
 				{ content: ["done"] },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: ["done again"] },
 			],
 		});
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([mock.model]);
+		const fixedPrompt = "fixed context ".repeat(100_000);
 		const manager = SessionManager.inMemory();
 		const settings = Settings.isolated({
 			"compaction.experimentalContextManagement": true,
@@ -302,7 +305,7 @@ describe("experimental context management", () => {
 			getApiKey: () => "test-key",
 			initialState: {
 				model: mock.model,
-				systemPrompt: ["fixed context ".repeat(100_000)],
+				systemPrompt: [fixedPrompt],
 				tools,
 				messages: [],
 			},
@@ -325,6 +328,15 @@ describe("experimental context management", () => {
 		expect(mock.calls).toHaveLength(4);
 		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 		expect(notices.filter(message => message.includes("cannot create headroom"))).toHaveLength(1);
+
+		const previousSessionId = manager.getSessionId();
+		expect(await session.newSession()).toBe(true);
+		expect(manager.getSessionId()).not.toBe(previousSessionId);
+		agent.setSystemPrompt([fixedPrompt]);
+		await session.prompt("Continue the next assignment.");
+		expect(mock.calls).toHaveLength(6);
+		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		expect(notices.filter(message => message.includes("cannot create headroom"))).toHaveLength(2);
 	});
 
 	it("keeps exact earlier requirements and the latest notebook through three real rollover boundaries", async () => {
