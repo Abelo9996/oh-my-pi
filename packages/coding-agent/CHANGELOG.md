@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- RPC sessions now report settled (`isSettled: true`, `session_settled`) after a turn whose failed `todo` call queued a reminder for the next prompt, instead of appearing busy until another prompt arrives ([#17238](https://github.com/can1357/oh-my-pi/pull/17238) by [@kmccleary3301](https://github.com/kmccleary3301))
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
