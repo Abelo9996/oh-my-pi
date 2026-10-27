@@ -451,7 +451,12 @@ describe("task.batch validation", () => {
 
 			const toolResult = agent.state.messages.find(message => message.role === "toolResult");
 			const text = toolResult?.role === "toolResult" ? getFirstText(toolResult) : "";
-			expect(text).toContain(`\`${field}\` is only accepted for the \`seance\` agent.`);
+			// `model` doubles as the per-call selector, whose disabled gate is reported first.
+			expect(text).toContain(
+				field === "model"
+					? "Per-call model is disabled for task calls (task.perCallModel: off)."
+					: `\`${field}\` is only accepted for the \`seance\` agent.`,
+			);
 			expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(true);
 			expect(run).not.toHaveBeenCalled();
 		},
