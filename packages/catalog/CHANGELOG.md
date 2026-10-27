@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed hosted web search on OpenAI Responses and Codex Responses selecting GPT-5.6 Luna instead of GPT-6 Luna (by [@mateo-bolanos](https://github.com/mateo-bolanos)).
+- Fixed hosted web search on OpenAI Responses and Codex Responses selecting GPT-5.6 Luna instead of GPT-6 Luna ([#17202](https://github.com/can1357/oh-my-pi/pull/17202) by [@mateo-bolanos](https://github.com/mateo-bolanos)).
 
 ## [18.13.1] - 2026-10-27
 
