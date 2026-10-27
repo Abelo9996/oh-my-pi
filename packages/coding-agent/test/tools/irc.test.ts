@@ -13,6 +13,8 @@ import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { attachIrcWakeTurnMonitor } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 type IrcWakeObserver = (records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
@@ -597,6 +599,7 @@ describe("IRC", () => {
 				yields?: boolean;
 				jobManager?: AsyncJobManager;
 				beforeFinish?: (records: AgentMessage[]) => Promise<void>;
+				turnText?: string;
 			} = {},
 		) {
 			let observer: IrcWakeObserver | undefined;
@@ -646,7 +649,7 @@ describe("IRC", () => {
 				},
 				getLastAssistantMessage: () => ({
 					role: "assistant",
-					content: [{ type: "text", text: "Not for me." }],
+					content: [{ type: "text", text: opts.turnText ?? "Not for me." }],
 					stopReason: "stop",
 				}),
 				deliverIrcMessage: (msg: IrcMessage) => bridge.deliver(msg),
@@ -763,20 +766,45 @@ describe("IRC", () => {
 			]);
 		});
 
-		it("still relays the correlated final output after an interim acknowledgement", async () => {
-			const sender = makeFakeSession();
-			registry.register({ id: "0-C", displayName: "task", kind: "sub", session: sender.session });
-			const peer = registerIdleSubagent("0-A", {
-				beforeFinish: async () => {
-					await bus.send({ from: "0-A", to: "0-C", body: "on it" });
-				},
-			});
-			await executeSend({ registry, senderId: "0-C" }, { to: "0-A", message: "release the slot" });
-			await peer.settled();
-			expect(sender.delivered.map(msg => msg.body)).toEqual(["on it", "Not for me."]);
-			expect(sender.delivered[1]?.replyTo).toBeDefined();
-			expect(bus.unansweredSends("0-C", 0)).toEqual([]);
-		});
+		it.each(["Not for me.", ""])(
+			"keeps an acknowledged wake request owed after a stopped turn with %j output",
+			async turnText => {
+				const sender = makeFakeSession();
+				registry.register({ id: "0-C", displayName: "task", kind: "sub", session: sender.session });
+				let requestId: string | undefined;
+				const peer = registerIdleSubagent("0-A", {
+					turnText,
+					beforeFinish: async () => {
+						requestId = bus.unansweredSends("0-C", 0)[0]!.id;
+						await executeSend({ registry, senderId: "0-A" }, { to: "0-C", message: "on it" });
+					},
+				});
+				await executeSend({ registry, senderId: "0-C" }, { to: "0-A", message: "release the slot" });
+				await peer.settled();
+				expect(sender.delivered).toHaveLength(2);
+				expect(sender.delivered[0]?.body).toBe("on it");
+				expect(sender.delivered[1]).toMatchObject({ wakeRelay: true });
+				expect(sender.delivered[1]?.replyTo).toBeUndefined();
+				expect(bus.unansweredSends("0-C", 0)).toMatchObject([{ id: requestId, to: "0-A" }]);
+				expect(bus.unansweredSends("0-A", 0)).toEqual([]);
+
+				const waiting = new WaitTool({
+					cwd: "/tmp",
+					settings: Settings.isolated({ "launch.enabled": false }),
+					agentRegistry: registry,
+					getAgentId: () => "0-C",
+				} as unknown as ToolSession).execute("promised-release", {});
+				await executeSend(
+					{ registry, senderId: "0-A" },
+					{ to: "0-C", message: "ports released", replyTo: requestId },
+				);
+				expect((await waiting).details?.waited).toMatchObject({
+					body: "ports released",
+					replyTo: requestId,
+				});
+				expect(bus.unansweredSends("0-C", 0)).toEqual([]);
+			},
+		);
 
 		it("correlates each request when two messages from one peer share a wake turn", async () => {
 			const sender = makeFakeSession();

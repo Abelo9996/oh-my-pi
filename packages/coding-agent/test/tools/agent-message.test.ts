@@ -6,6 +6,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 
@@ -118,6 +119,31 @@ describe("write agent:// messaging", () => {
 		});
 		expect(received.get("Sender")?.at(-1)).toMatchObject({ replyTo: first!.id, body: "first slot released" });
 		expect(IrcBus.global().unansweredSends("Sender", 0)).toMatchObject([{ id: second!.id, to: "Scout" }]);
+	});
+
+	it("does not owe a reply to its acknowledgement but tracks a new question after fulfilling the request", async () => {
+		registerPeer("Scout");
+		registerPeer("Sender");
+		const sender = new WriteTool(makeSession({ senderId: "Sender" }));
+		const scoutSession = makeSession({ senderId: "Scout" });
+		scoutSession.settings = Settings.isolated({ "launch.enabled": false });
+		const scout = new WriteTool(scoutSession);
+		await sender.execute("request", { path: "agent://Scout", content: "notify me when the slot is released" });
+		const request = received.get("Scout")![0]!;
+		await scout.execute("ack", { path: "agent://Sender", content: "on it; release notice will follow" });
+
+		expect(IrcBus.global().unansweredSends("Scout", 0)).toEqual([]);
+		const afterAck = await new WaitTool(scoutSession).execute("after-ack", {});
+		expect(afterAck.content[0]).toMatchObject({ text: expect.stringContaining("Nothing to wait for") });
+		expect(IrcBus.global().unansweredSends("Sender", 0)).toMatchObject([{ id: request.id, to: "Scout" }]);
+
+		await scout.execute("final", { path: `agent://Sender?replyTo=${request.id}`, content: "slot released" });
+		await scout.execute("new-question", { path: "agent://Sender", content: "which slot is next?" });
+		const question = received.get("Sender")!.at(-1)!;
+		expect(IrcBus.global().unansweredSends("Scout", 0)).toMatchObject([{ id: question.id, to: "Sender" }]);
+		const waiting = new WaitTool(scoutSession).execute("await-new-answer", {});
+		await sender.execute("new-answer", { path: `agent://Scout?replyTo=${question.id}`, content: "slot two" });
+		expect((await waiting).details?.waited?.body).toBe("slot two");
 	});
 
 	it("rejects empty reply correlation and correlated broadcasts", async () => {

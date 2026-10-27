@@ -75,7 +75,7 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
-	/** The latest successful send per `from` → `to`; see {@link sentSince}. */
+	/** The latest successful explicit send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, SendMark>>();
 	/** Outstanding direct requests by sender and message identity. */
 	readonly #requests = new Map<string, Map<string, IrcRequest>>();
@@ -126,7 +126,19 @@ export class IrcBus {
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
 		// Register before handing off: a wake can answer, or settle its owned
 		// job, before delivery itself returns. Never reinsert that request.
-		const isRequest = !message.broadcast && !message.wakeRelay && !message.replyTo;
+		let isRequest = !message.broadcast && !message.wakeRelay && !message.replyTo;
+		const requestsFromRecipient = this.#requests.get(message.to);
+		if (isRequest && requestsFromRecipient) {
+			// A message back while the sender owes this recipient an answer is
+			// progress on that request, not a new reverse reply obligation.
+			const since = this.#registry.get(message.to)?.session?.runStartedAt ?? 0;
+			for (const request of requestsFromRecipient.values()) {
+				if (request.to === message.from && request.sentAt >= since) {
+					isRequest = false;
+					break;
+				}
+			}
+		}
 		if (isRequest) {
 			let requests = this.#requests.get(message.from);
 			if (!requests) {
@@ -137,7 +149,7 @@ export class IrcBus {
 		}
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
-			this.#record(this.#lastSent, message.from, message.to, mark);
+			if (!message.wakeRelay) this.#record(this.#lastSent, message.from, message.to, mark);
 			if (message.replyTo && !message.broadcast) this.#recordReply(message.from, message.to, message.replyTo);
 		} else if (isRequest) {
 			const requests = this.#requests.get(message.from);
@@ -186,9 +198,10 @@ export class IrcBus {
 	}
 
 	/**
-	 * Whether `from` successfully sent `to` anything at or after `sinceTs`.
+	 * Whether `from` successfully sent `to` an explicit message at or after
+	 * `sinceTs`. Automatic wake relays do not count as explicit messages.
 	 * Wake-turn summaries use it to distinguish message-only output from no
-	 * output, never to decide whether a request was answered.
+	 * output and to avoid treating a post-progress relay as a final answer.
 	 */
 	sentSince(from: string, to: string, sinceTs: number): boolean {
 		const sent = this.#lastSent.get(from)?.get(to);

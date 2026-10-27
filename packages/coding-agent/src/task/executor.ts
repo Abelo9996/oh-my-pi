@@ -3128,7 +3128,9 @@ async function relayWakeTurnOutput(args: {
 			from: args.id,
 			to: source.from,
 			body,
-			replyTo: source.messageId,
+			// Once the agent explicitly messages its requester, its stop output
+			// is only a notice: it must not finalize a promised later reply.
+			replyTo: alreadyMessaged ? undefined : source.messageId,
 			wakeRelay: true,
 		});
 		if (receipt.outcome === "failed") {

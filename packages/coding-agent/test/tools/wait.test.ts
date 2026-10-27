@@ -587,20 +587,25 @@ describe("wait", () => {
 		});
 
 		test("escapes a cycle between two peer reply waits", async () => {
-			const { main, child } = registerParentAndChild();
+			const { registry, main } = registerParentAndChild();
+			const peer = liveSession();
+			registry.register({ id: "Peer", displayName: "Peer", kind: "sub", session: peer.session });
 			await ask();
-			await IrcBus.global().send({ from: "Main", to: "Child", body: "which slot?" });
+			await IrcBus.global().send({ from: "Main", to: "Peer", body: "which slot?" });
+			await IrcBus.global().send({ from: "Peer", to: "Child", body: "which queue?" });
 			const waiting = childWait();
 			const parentWait = new WaitTool(session()).execute("parent-reply-wait", {});
-			expect(await idleText(parentWait)).toContain("`Child` cannot reply before you finish");
-			await answer(main.received[0]!.id, "heliotrope");
-			expect((await waiting).details?.waited?.body).toBe("heliotrope");
+			const peerWait = new WaitTool(session(undefined, "Peer")).execute("peer-reply-wait", {});
+			expect(await idleText(peerWait)).toContain("`Child` cannot reply before you finish");
 			await IrcBus.global().send({
-				from: "Child",
+				from: "Peer",
 				to: "Main",
 				body: "slot two",
-				replyTo: child.received[0]!.id,
+				replyTo: peer.received[0]!.id,
 			});
+			expect((await parentWait).details?.waited?.body).toBe("slot two");
+			await answer(main.received[0]!.id, "heliotrope");
+			expect((await waiting).details?.waited?.body).toBe("heliotrope");
 		});
 
 		test("a plain write answer leaves the next wait capped at 30 minutes and the request still owed", async () => {
