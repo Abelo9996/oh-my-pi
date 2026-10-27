@@ -93,6 +93,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
    - otherwise `resolveRoleChain("web", …)` (`packages/coding-agent/src/config/model-resolver.ts`) yields the `web` role chain described under [Provider selection](#modes--variants).
 3. `web/hosted` expands to the active model's same-provider `webSearchModel` swap when available, then the active model itself, retaining only models with grounding. A failed swap falls through to the active model. An unexpandable placeholder is skipped automatically or fails explicitly. Each remaining candidate lazily loads its search engine or grounding backend (`gemini`, `anthropic`, `codex`, `openai`, `xai`, `openrouter`). Explicit candidates use `isExplicitlyAvailable()`, automatic ones use `isAvailable()`; unavailable explicit candidates record a failure while automatic ones are skipped.
    GPT-5+ models on OpenAI Responses and Codex Responses use `gpt-6-luna` as the same-provider hosted-search swap target.
+   If the swap has the active model's provider and id, only the active model is attempted, preserving session-specific configuration even when it is a separate object from the catalog entry.
 4. If no candidate was available and none failed, `executeSearch()` returns `Error: No web search model configured.` (or `No web search model matches selector "<model>".` when `params.model` was given) with `details.response.provider = "none"`.
 5. For each provider in order, `executeSearch()` calls `provider.search()` with:
    - `query`,
