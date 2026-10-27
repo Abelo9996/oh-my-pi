@@ -105,10 +105,10 @@ function unionCodexModels(
 	const catalogs: ModelSpec<"openai-codex-responses">[][] = [];
 	for (const { accountId, result } of results) {
 		if (!result) return null;
-		if (result.accountDenialStatus !== undefined) {
+		if (result.rejectedStatus !== undefined) {
 			logger.warn("Codex model discovery skipped an account denied by the backend", {
 				accountId,
-				status: result.accountDenialStatus,
+				status: result.rejectedStatus,
 			});
 			continue;
 		}

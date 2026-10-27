@@ -117,7 +117,7 @@ export interface CodexModelDiscoveryResult {
 	 * empty; unlike transport/parse failures, sibling accounts can still supply
 	 * an authoritative catalog.
 	 */
-	accountDenialStatus?: 401 | 402 | 403;
+	rejectedStatus?: 401 | 402 | 403;
 }
 
 /**
@@ -148,7 +148,7 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 		}
 
 		if (response.status === 401 || response.status === 402 || response.status === 403) {
-			return { models: [], accountDenialStatus: response.status };
+			return { models: [], rejectedStatus: response.status };
 		}
 		if (!response.ok) {
 			continue;
