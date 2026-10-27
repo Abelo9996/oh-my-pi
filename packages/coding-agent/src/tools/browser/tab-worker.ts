@@ -1536,6 +1536,8 @@ export class WorkerCore {
 	/** Session holding `ignore_https_errors`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
 	readonly #recording = new RecordingController();
+	/** Set once the core stops for good: by {@link terminate}, or by a close. */
+	#stopped = false;
 	/**
 	 * The page asked to navigate its main frame (a link, a submit button, a script setting `location`) and the new
 	 * document has neither committed nor been abandoned. Chromium reports the request before the click that caused it
@@ -1725,6 +1727,11 @@ export class WorkerCore {
 				defaultViewport: null,
 				protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 			});
+			// Terminated while it connected: nothing will drop this connection later.
+			if (this.#stopped) {
+				void this.#browser.disconnect();
+				return;
+			}
 
 			// Realm setup is done: puppeteer loaded and browser connected. Sent before
 			// page acquisition so the supervisor's cold-start budget bounds only the
@@ -3544,9 +3551,29 @@ export class WorkerCore {
 		}
 	}
 
-	async #close(): Promise<void> {
+	/**
+	 * What `Worker.terminate()` does to an isolated worker, for an inline one that shares the host's thread: stop
+	 * taking messages, abort the run in flight, and drop the browser connection. A core left connected keeps its
+	 * relay session on the tab, which keeps Chrome's debugger (and its "started debugging" bar) attached. It also
+	 * drops the connection under a close still in progress, which a wedged CDP socket can hold up indefinitely.
+	 */
+	terminate(): void {
+		this.#stop();
+		this.#active?.ac.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Tab worker terminated")));
+		if (this.#browser?.connected) void this.#browser.disconnect();
+	}
+
+	/** Stop taking messages; false when the core had already stopped. */
+	#stop(): boolean {
+		if (this.#stopped) return false;
+		this.#stopped = true;
 		this.#unsub();
 		this.#uninstallRejectionGuard();
+		return true;
+	}
+
+	async #close(): Promise<void> {
+		if (!this.#stop()) return;
 		this.#clearElementCache();
 		const page = this.#page;
 		await this.#recording.close().catch(error => {
