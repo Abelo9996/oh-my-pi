@@ -3867,20 +3867,28 @@ describe("AgentSession retry fallback", () => {
 		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
 	});
 
-	it.each<{ name: string; failure: MockResponse | (() => Promise<AIError.FinalizeResult>) }>([
+	it.each<{
+		name: string;
+		failure: MockResponse | (() => Promise<AIError.FinalizeResult>);
+		extraSettings?: Record<string, unknown>;
+		primaryAttempts: number;
+	}>([
 		{
 			// The org-wide input-tokens-per-minute cap, as Anthropic (and a LiteLLM
 			// gateway in front of it) reports it: transient, so the same model is
-			// retryable, but the model itself is the one being throttled.
-			name: "a per-minute rate limit",
+			// retryable, but the model itself is the one being throttled. With
+			// retry.rateLimitWalksChain on, the chain is walked at once.
+			name: "a per-minute rate limit with retry.rateLimitWalksChain on",
 			failure: {
 				throw: '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your organization\'s rate limit of 10,000,000 input tokens per minute (org: test-org, model: claude-sonnet-4-5). Reduce the prompt length or the maximum tokens requested, or try again later."}} retry-after-ms=1',
 			},
+			extraSettings: { "retry.rateLimitWalksChain": true },
+			primaryAttempts: 1,
 		},
 		{
 			// A retryable 429 whose text names another cap (here a concurrency cap):
 			// the status alone says the model is throttled.
-			name: "a 429 concurrency cap",
+			name: "a 429 concurrency cap with retry.rateLimitWalksChain on",
 			failure: () =>
 				AIError.finalize(
 					Object.assign(new Error("concurrent connections limit (retry-after-ms=1)"), { status: 429 }),
@@ -3890,10 +3898,21 @@ describe("AgentSession retry fallback", () => {
 						model: "claude-sonnet-4-5",
 					},
 				),
+			extraSettings: { "retry.rateLimitWalksChain": true },
+			primaryAttempts: 1,
+		},
+		{
+			// The default keeps the signed-thinking deferral for rate limits: the
+			// throttled model keeps its whole retry budget before the chain.
+			name: "a per-minute rate limit under the default settings",
+			failure: {
+				throw: '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your organization\'s rate limit of 10,000,000 input tokens per minute (org: test-org, model: claude-sonnet-4-5). Reduce the prompt length or the maximum tokens requested, or try again later."}} retry-after-ms=1',
+			},
+			primaryAttempts: 4,
 		},
 	])(
-		"walks the Anthropic chain at once when the signing model fails with $name instead of retrying the throttled model",
-		async ({ failure }) => {
+		"reaches the Anthropic fallback after $primaryAttempts attempt(s) on the signing model when it fails with $name",
+		async ({ failure, extraSettings, primaryAttempts }) => {
 			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 			const fallbackModel = getBundledModel("anthropic", "claude-opus-4-5");
 			if (!primaryModel || !fallbackModel) {
@@ -3943,6 +3962,7 @@ describe("AgentSession retry fallback", () => {
 					"retry.fallbackChains": {
 						"anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`],
 					},
+					...extraSettings,
 				}),
 				modelRegistry,
 			});
@@ -3964,7 +3984,7 @@ describe("AgentSession retry fallback", () => {
 
 			expect(requestedModels).toEqual([
 				`${primaryModel.provider}/${primaryModel.id}`,
-				`${primaryModel.provider}/${primaryModel.id}`,
+				...Array.from({ length: primaryAttempts }, () => `${primaryModel.provider}/${primaryModel.id}`),
 				`${fallbackModel.provider}/${fallbackModel.id}`,
 			]);
 			expect(fallbackAppliedEvents).toEqual([
