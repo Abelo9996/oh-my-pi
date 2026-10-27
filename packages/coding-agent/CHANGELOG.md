@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A running job's glance keeps the whole a meter counts instead of the bare numerator: a widget whose headline restated `140` beside a `140/190` bar now draws `140/190` in the job card, the HUD pill and the status line ([#17226](https://github.com/can1357/oh-my-pi/pull/17226) by [@iacore](https://github.com/iacore))
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
