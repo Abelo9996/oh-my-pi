@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `StatusLineHost.resetExpiryNotice` now receives the session first and owns deduplication; `StatusLineComponent` no longer limits the saved-reset expiry warning to once per conversation
+
 ### Added
 
 - Added file-backed task previews and optional `taskFile` and `taskFileSha256` provenance on `AgentProgress` and `SingleResult` ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal)).
