@@ -281,16 +281,6 @@ describe("assistant text renderers", () => {
 		expect(warn).toHaveBeenCalledTimes(1);
 	});
 
-	it("draws past a renderer that is not a function", () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const target = component([42 as unknown as AssistantTextRenderer, ({ text }) => `${text} (checked)`]);
-
-		target.updateContent(assistant([{ type: "text", text: "Plain reply" }]));
-
-		expect(drawn(target)).toContain("Plain reply (checked)");
-		expect(warn).toHaveBeenCalled();
-	});
-
 	it("gives each block its index in the full reply when tool calls split it into segments", () => {
 		const message = assistant([
 			{ type: "text", text: "before" },

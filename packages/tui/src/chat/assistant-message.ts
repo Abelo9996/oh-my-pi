@@ -565,11 +565,8 @@ export class AssistantMessageComponent extends Container {
 						});
 						if (typeof rendered === "string") text = rendered;
 					} catch (error) {
-						// Only functions reach here from the extension API; anything else cannot be tracked weakly.
-						if (typeof renderer === "function") {
-							if (failedTextRenderers.has(renderer)) continue;
-							failedTextRenderers.add(renderer);
-						}
+						if (failedTextRenderers.has(renderer)) continue;
+						failedTextRenderers.add(renderer);
 						logger.warn("Assistant text renderer failed; drawing its input", { error: String(error) });
 					}
 				}
