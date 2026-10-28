@@ -839,11 +839,9 @@ async function fetchAndStore<T>(
 	try {
 		const fresh = await fetchFresh();
 		const fetchedAt = Date.now();
-		// A generation-aware store can return a distinct retained snapshot id.
-		const storedAt: number | void = pending.invalidated
-			? undefined
-			: storeResult(authKey, repo, kind, number, includeComments, fresh, fetchedAt);
-		return { ...fresh, status, fetchedAt: typeof storedAt === "number" ? storedAt : fetchedAt };
+		// Invalidated mid-flight: the result predates the change, so do not cache it.
+		if (!pending.invalidated) storeResult(authKey, repo, kind, number, includeComments, fresh, fetchedAt);
+		return { ...fresh, status, fetchedAt };
 	} finally {
 		pendingFetches.delete(pending);
 	}
