@@ -37,10 +37,11 @@ import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specializa
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
+import { approvalDirectoryKey } from "../tools/approval-cache";
+import { approvalTargetKey } from "../tools/approval-targets";
 import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { approvedTaskFile, taskFileApprovalTargets, taskFileMatchesApproval } from "./file-approval";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, type ResolvedSpawnPolicy, resolveSpawnPolicy } from "./spawn-policy";
 import { isBundledSeance, seanceTaskGuidance, seanceTaskSchemaFields, validateSeanceParams } from "./seance";
@@ -55,6 +56,8 @@ import {
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobError, type AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
+import { sessionResolveContext } from "../internal-urls/context";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
@@ -82,6 +85,7 @@ import {
 	cfgTaskDisabledAgents,
 	cfgTaskEnableEffort,
 	cfgTaskEnableLsp,
+	cfgTaskFile,
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
 	cfgTaskMaxConcurrency,
@@ -156,6 +160,7 @@ interface TaskDescriptionOptions {
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
 	structured: boolean;
+	file: boolean;
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
 	planMode: boolean;
@@ -206,6 +211,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		effortEnabled: options.effortEnabled,
 		evalToolsEnabled: options.evalToolsEnabled,
 		structured: options.structured,
+		file: options.file,
 		asyncEnabled: options.asyncEnabled,
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasStructuredAgents: renderedAgents.some(agent => agent.structured),
@@ -261,23 +267,41 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 
-function validateTaskInput(item: TaskItem | undefined, label: string): string | undefined {
+function validateTaskInput(item: TaskItem | undefined, label: string, fileEnabled: boolean): string | undefined {
 	const hasTask = item?.task !== undefined;
 	const hasTaskFile = item?.taskFile !== undefined;
+	if (!fileEnabled) {
+		if (hasTaskFile) return "task.file is disabled, so the task tool does not accept `taskFile`.";
+		if (typeof item?.task !== "string" || item.task.trim() === "") {
+			return label === "The call"
+				? "Missing `task`. Provide complete, self-contained instructions for the agent."
+				: `${label} is missing \`task\`. Every task needs complete, self-contained instructions.`;
+		}
+		return undefined;
+	}
 	if (hasTask === hasTaskFile) {
 		return `${label} must provide exactly one of \`task\` or \`taskFile\`.`;
 	}
 	if (hasTask && (typeof item?.task !== "string" || item.task.trim() === "")) {
 		return `${label} needs non-empty, self-contained \`task\` instructions.`;
 	}
-	if (hasTaskFile && (typeof item?.taskFile !== "string" || !path.isAbsolute(item.taskFile))) {
-		return `${label} \`taskFile\` must be an absolute path to a UTF-8 file.`;
+	if (
+		hasTaskFile &&
+		(typeof item?.taskFile !== "string" || (!path.isAbsolute(item.taskFile) && !item.taskFile.startsWith("local://")))
+	) {
+		return `${label} \`taskFile\` must be an absolute path or local:// URL to a UTF-8 file.`;
 	}
 	return undefined;
 }
 
-function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
+function validateSpawnParams(params: TaskParams, batchEnabled: boolean, fileEnabled: boolean): string | undefined {
 	const tasks = params.tasks;
+	if (
+		!fileEnabled &&
+		(params.taskFile !== undefined || (Array.isArray(tasks) && tasks.some(item => item?.taskFile !== undefined)))
+	) {
+		return "task.file is disabled, so the task tool does not accept `taskFile`.";
+	}
 	if (batchEnabled && tasks !== undefined) {
 		if (!Array.isArray(tasks) || tasks.length === 0) {
 			return "Missing `tasks`. Provide at least one task item with `task` or `taskFile`.";
@@ -287,7 +311,11 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
-			const inputError = validateTaskInput(item, `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`);
+			const inputError = validateTaskInput(
+				item,
+				`Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`,
+				fileEnabled,
+			);
 			if (inputError) return inputError;
 			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 			if (effortError) return effortError;
@@ -311,7 +339,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 	if (batchEnabled && params.task === undefined && params.taskFile === undefined) {
 		return "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.";
 	}
-	return validateTaskInput(params, "The call") ?? validateEffort(params.effort, "The call");
+	return validateTaskInput(params, "The call", fileEnabled) ?? validateEffort(params.effort, "The call");
 }
 
 /**
@@ -344,21 +372,21 @@ interface SpawnParams extends TaskParams {
 	taskFileSha256?: string;
 }
 
-async function resolveTaskFile(owner: object, item: TaskItem): Promise<ResolvedTaskItem> {
+async function resolveTaskFile(session: ToolSession, item: TaskItem, signal?: AbortSignal): Promise<ResolvedTaskItem> {
 	if (item.taskFile === undefined) return item;
 	try {
-		const approved = approvedTaskFile(owner, item.taskFile);
+		const filePath = item.taskFile.startsWith("local://")
+			? await InternalUrlRouter.instance().requireLocal(
+					item.taskFile,
+					"read task file",
+					sessionResolveContext(session, { signal }),
+				)
+			: item.taskFile;
 		// Non-blocking open lets fstat reject FIFOs without waiting for a writer.
-		const file = await fs.open(
-			approved?.path ?? item.taskFile,
-			fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (approved ? fs.constants.O_NOFOLLOW : 0),
-		);
+		const file = await fs.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
 		try {
 			const stat = await file.stat({ bigint: true });
 			if (!stat.isFile()) throw new Error("must resolve to a regular file");
-			if (approved && !taskFileMatchesApproval(stat, approved)) {
-				throw new Error("changed after approval; retry the call");
-			}
 			if (stat.size > MAX_TASK_FILE_BYTES) throw new Error("exceeds the 4 MiB limit");
 			const bytes = await Bun.file(file.fd)
 				.slice(0, MAX_TASK_FILE_BYTES + 1)
@@ -428,13 +456,14 @@ interface SpawnPlan {
 function planSpawns(
 	rawParams: unknown,
 	batchEnabled: boolean,
+	fileEnabled: boolean,
 	defaultAgent: string,
 	seanceAdvertised: boolean,
 ): SpawnPlan | string {
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
-		validateSpawnParams(params, batchEnabled) ??
+		validateSpawnParams(params, batchEnabled, fileEnabled) ??
 		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
 	const items = resolveSpawnItems(params);
@@ -651,13 +680,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		if (!isRecord(args)) return undefined;
 		const items = Array.isArray(args.tasks) ? args.tasks : [args];
-		const taskFiles: string[] = [];
+		const targets: string[] = [];
 		for (const item of items) {
-			if (isRecord(item) && typeof item.taskFile === "string" && path.isAbsolute(item.taskFile)) {
-				taskFiles.push(item.taskFile);
-			}
+			if (!isRecord(item) || typeof item.taskFile !== "string") continue;
+			const target = item.taskFile.startsWith("local://")
+				? (InternalUrlRouter.instance().locateSync(item.taskFile, sessionResolveContext(this.session)) ??
+					item.taskFile)
+				: item.taskFile;
+			const key = approvalTargetKey(this.session.cwd, target);
+			if (key !== undefined) targets.push(key);
 		}
-		return taskFileApprovalTargets(this, this.session.cwd, taskFiles);
+		// The child executes in cwd even when its instructions come from another directory.
+		return targets.length > 0 ? [approvalDirectoryKey(this.session.cwd), ...new Set(targets)] : undefined;
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<TaskParams>;
@@ -756,6 +790,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const plan = planSpawns(
 				args,
 				this.#isBatchEnabled(),
+				cfgTaskFile.get(this.session.settings),
 				this.#defaultAgent(),
 				this.#seanceSchemaFields() !== undefined,
 			);
@@ -797,6 +832,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
+			file: cfgTaskFile.get(this.session.settings),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
 		});
@@ -834,6 +870,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
+			file: cfgTaskFile.get(this.session.settings),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			planMode,
@@ -1048,14 +1085,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// item's agent type against the session's actual default agent.
 		const defaultAgent = this.#defaultAgent();
 		const batchEnabled = this.#isBatchEnabled();
-		const plan = planSpawns(rawParams, batchEnabled, defaultAgent, this.#seanceSchemaFields() !== undefined);
+		const plan = planSpawns(
+			rawParams,
+			batchEnabled,
+			cfgTaskFile.get(this.session.settings),
+			defaultAgent,
+			this.#seanceSchemaFields() !== undefined,
+		);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
 		}
 		const { params } = plan;
 		const spawnItems: ResolvedTaskItem[] = [];
 		try {
-			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this, item));
+			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this.session, item, signal));
 		} catch (error) {
 			return createTaskModeError(error instanceof Error ? error.message : String(error));
 		}
@@ -1230,7 +1273,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agentSource,
 					modelRole: policy.modelRole,
 					status: "pending",
-					task: renderSubagentUserPrompt(assignment, item.taskFile !== undefined),
+					task: renderSubagentUserPrompt(assignment),
 					assignment,
 					...(item.taskFile !== undefined ? { taskFile: item.taskFile, taskFileSha256: item.taskFileSha256 } : {}),
 					recentTools: [],
@@ -1737,7 +1780,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				totalDurationMs: Date.now() - startTime,
 				usage: merged.usage,
 				outputPaths: merged.outputPaths,
-				progress: payloads.flatMap(payload => payload?.details?.progress ?? []),
 			},
 		};
 	}
@@ -1836,7 +1878,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				session: this.session,
 				invocationKind: "task",
 				assignment,
-				verbatimAssignment: params.taskFile !== undefined,
 				context,
 				agent: params.agent,
 				sourceSession: params.sourceSession,
@@ -1892,7 +1933,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				execution.policy.discovery.projectAgentsDir,
 				Date.now() - startTime,
 				execution.mergeSummary,
-				latestProgress,
 			);
 		} catch (error) {
 			const message = error instanceof StructuredSubagentError ? error.message : String(error);
@@ -1929,7 +1969,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		projectAgentsDir: string | null,
 		totalDurationMs: number,
 		mergeSummary: string,
-		progress?: AgentProgress,
 	): AgentToolResult<TaskToolDetails> {
 		const summary = formatTaskResultSummary(result, { totalDurationMs, mergeSummary });
 		return {
@@ -1940,7 +1979,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				totalDurationMs,
 				usage: result.usage,
 				outputPaths: result.outputPath ? [result.outputPath] : undefined,
-				...(progress ? { progress: [progress] } : {}),
 			},
 		};
 	}

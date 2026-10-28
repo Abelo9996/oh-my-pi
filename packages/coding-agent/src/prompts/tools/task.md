@@ -15,7 +15,8 @@ Use most specific agent.{{#if scoutAvailable}} Read-only research MUST use `scou
 Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate via `write agent://<id>`{{/if}}. Set interfaces in {{#if batchEnabled}}`context`{{else}}the task{{/if}}. Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
 
 # Inputs
-Provide exactly one of `task` or `taskFile` per spawn. `taskFile`: absolute path to a regular UTF-8 file, at most 4 MiB; symlinks to regular files are accepted. The file is read at dispatch and becomes the task text, with outer whitespace trimmed. Prefer `taskFile` for any generated prompt file larger than a few KB that must be passed verbatim.
+{{#if file}}`taskFile`: absolute path or `local://` file; contents become the task, read once at dispatch. Exactly one of `task`/`taskFile`.
+{{/if}}
 `name`: CamelCase ≤32, auto-generated if omitted; address agent by name.{{#if structured}} `outputSchema` overrides agent/session schemas.{{/if}}
 `solutionSpace`: describe how open-ended the child's problem is: whether the fix or design is given, or which causes or designs remain open. Volume of work does not widen it; NEVER mention sibling agents or coordination. (`one fix: rename, names given`; `one fix: slice end in paginate`; `single-flight cache load; races easy to miss`; `several retry API shapes; error classes to choose`; `deadlock cause open, no repro`)
 {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}
@@ -24,11 +25,11 @@ Provide exactly one of `task` or `taskFile` per spawn. `taskFile`: absolute path
 {{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
 {{/if}}{{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
 {{else}}`isolated`: worktree; changes retained, not applied.
-{{/if}}{{/if}}Children start blank;{{#if ircEnabled}} parent IRC steers immediately;{{/if}} supporting files via `local://<path>`; verbatim prompt files via `taskFile`.
+{{/if}}{{/if}}Children start blank;{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via `local://<path>`, NEVER inline.
 
 # Format
 {{#if batchEnabled}}`context`: shared (`# Goal`, `# Contract` interfaces); NEVER repeat per task.
-{{/if}}`task` or the contents of `taskFile`: self-contained (`# Target` files/non-goals, `# Change` steps/APIs, `# Acceptance` observable result).
+{{/if}}`task`{{#if file}} or the contents of `taskFile`{{/if}}: self-contained (`# Target` files/non-goals, `# Change` steps/APIs, `# Acceptance` observable result).
 
 # Available Agents
 {{#if spawningDisabled}}Agent spawning is currently disabled.

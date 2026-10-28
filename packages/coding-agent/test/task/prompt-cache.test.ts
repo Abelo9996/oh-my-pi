@@ -300,6 +300,7 @@ describe("task sibling prompt-cache routing", () => {
 					settings: Settings.isolated({
 						"async.enabled": false,
 						"task.structured": true,
+						"task.file": true,
 						"marketplace.autoUpdate": "off",
 						"compaction.enabled": false,
 					}),

@@ -95,12 +95,34 @@ describe("taskFile dispatch", () => {
 		return TaskTool.create({
 			cwd,
 			hasUI: false,
-			settings: Settings.isolated({ "async.enabled": manager !== undefined, "task.batch": batch, ...settings }),
+			settings: Settings.isolated({
+				"async.enabled": manager !== undefined,
+				"task.batch": batch,
+				"task.file": true,
+				...settings,
+			}),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
+			localProtocolOptions: { getArtifactsDir: () => path.join(directory, "artifacts") },
 			asyncJobManager: manager,
 		} as unknown as ToolSession);
 	}
+
+	it.each([false, true])("rejects file-backed dispatch when task.file is off (batch=%s)", async batch => {
+		const taskFile = path.join(directory, "disabled.md");
+		await Bun.write(taskFile, "File task that must not run.");
+		const tool = await createTool(batch, undefined, { "task.file": false });
+		const item = { name: "Disabled", taskFile };
+
+		const result = await tool.execute("disabled-file", batch ? { context: "Context.", tasks: [item] } : item);
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("task.file");
+		expect(executions).toHaveLength(0);
+		const inline = await tool.execute("inline", { name: "Inline", task: "Inline remains available." });
+		expect(inline.isError).not.toBe(true);
+		expect(executions.map(execution => execution.assignment)).toEqual(["Inline remains available."]);
+	});
 
 	it.each([false, true])("requires approval for restricted task files (batch=%s)", async batch => {
 		const restricted = path.join(directory, "restricted");
@@ -136,7 +158,7 @@ describe("taskFile dispatch", () => {
 	});
 
 	it.each([false, true])(
-		"preserves a large file verbatim in assignments and recorded model calls (batch=%s)",
+		"retains the file assignment and provenance without expanding recorded model calls (batch=%s)",
 		async batch => {
 			const taskFile = path.join(directory, "assignment.md");
 			const source = ` \r\n${"Inspect <widget> & {{literal}}: café 🦀\tdata  \r\n\r\n\r\n|cell| value |\r\n".repeat(3_000)}  \n`;
@@ -184,19 +206,57 @@ describe("taskFile dispatch", () => {
 			const assignment = source.trim();
 			const dispatched = executions.find(item => item.id === "FileTask");
 			expect(dispatched?.assignment).toBe(assignment);
-			expect(dispatched?.task).toContain(assignment);
-			expect(toolResult.details.results.find(item => item.id === "FileTask")?.assignment).toBe(assignment);
-			expect(toolResult.details.progress?.find(item => item.id === "FileTask")).toMatchObject({
+			expect(toolResult.details.results.find(item => item.id === "FileTask")).toMatchObject({
 				assignment,
 				taskFile,
 				taskFileSha256: await sha256(bytes),
 			});
+			expect(toolResult.details.progress).toBeUndefined();
 			if (batch) {
 				expect(executions.find(item => item.id === "InlineTask")?.assignment).toBe("Inline work.");
 				expect(dispatched?.context).toBe("Shared investigation context.");
 			}
 		},
 	);
+
+	it("formats file and inline instructions through the same rendering path", async () => {
+		const taskFile = path.join(directory, "formatted.md");
+		const source = "  First instruction.  \r\n\r\n\r\nSecond instruction.\r\n  ";
+		await Bun.write(taskFile, source);
+		const tool = await createTool();
+
+		const fileResult = await tool.execute("formatted-file", { name: "File", taskFile });
+		const inlineResult = await tool.execute("formatted-inline", { name: "Inline", task: source });
+
+		expect(fileResult.isError).not.toBe(true);
+		expect(inlineResult.isError).not.toBe(true);
+		expect(executions).toHaveLength(2);
+		expect(executions[0].task).toBe(executions[1].task);
+		expect(fileResult.details?.results[0]?.assignment).toBe(source.trim());
+	});
+
+	it("resolves local URLs to their backing file for approval and dispatch", async () => {
+		const localRoot = path.join(directory, "artifacts", "local");
+		const taskFile = "local://nested/assignment.md";
+		const source = `${"x".repeat(1024 * 1024)}\nLocal task instructions.\n`;
+		const bytes = new TextEncoder().encode(source);
+		await Bun.write(path.join(localRoot, "nested", "assignment.md"), bytes);
+		const tool = await createTool();
+		const progress: AgentProgress[] = [];
+
+		expect(
+			resolveApproval(tool, { taskFile }, "yolo", {}, undefined, { restrictedFolders: [localRoot], cwd: directory }),
+		).toMatchObject({ policy: "prompt", source: "restriction", override: true });
+		const result = await tool.execute("local-file", { name: "Local", taskFile }, undefined, update => {
+			progress.push(...(update.details?.progress ?? []));
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(executions[0]?.assignment).toBe(source.trim());
+		const expected = { assignment: source.trim(), taskFile, taskFileSha256: await sha256(bytes) };
+		expect(result.details?.results[0]).toMatchObject(expected);
+		expect(progress.at(-1)).toMatchObject(expected);
+	});
 
 	it.each([
 		{ batch: false, isolation: false },
@@ -222,7 +282,7 @@ describe("taskFile dispatch", () => {
 			expect(result.isError).not.toBe(true);
 			expect(executions[0]?.assignment).toBe(source);
 			expect(executions[0]?.effort).toBe("hi");
-			expect(result.details?.progress?.[0]?.assignment).toBe(source);
+			expect(result.details?.results[0]?.assignment).toBe(source);
 		},
 	);
 
@@ -263,7 +323,6 @@ describe("taskFile dispatch", () => {
 		expect(job.status).toBe("completed");
 		const dispatched = executions.find(item => item.id === "AsyncFile");
 		expect(dispatched?.assignment).toBe(source.trim());
-		expect(dispatched?.task).toContain(source.trim());
 		expect(updates.at(-1)?.progress?.[0]).toMatchObject({ ...expected, status: "completed" });
 	});
 
@@ -278,7 +337,7 @@ describe("taskFile dispatch", () => {
 		expect(result.isError).not.toBe(true);
 		expect(executions[0]?.assignment).toBe(source);
 		expect(executions[0]?.task).toContain(source);
-		expect(result.details?.progress?.[0]?.assignment).toBe(source);
+		expect(result.details?.results[0]?.assignment).toBe(source);
 	});
 
 	it("waits until dispatch to read files mentioned in streamed task arguments", async () => {
@@ -306,7 +365,7 @@ describe("taskFile dispatch", () => {
 
 		expect(result.isError).not.toBe(true);
 		expect(executions.map(item => item.assignment)).toEqual([source]);
-		expect(result.details?.progress?.[0]?.assignment).toBe(source);
+		expect(result.details?.results[0]?.assignment).toBe(source);
 	});
 
 	it.each([
@@ -359,7 +418,7 @@ describe("taskFile dispatch", () => {
 		const result = await tool.execute("limit-file", { name: "Limit", taskFile });
 
 		expect(result.isError).not.toBe(true);
-		expect(result.details?.progress?.[0]?.assignment).toBe(source);
+		expect(result.details?.results[0]?.assignment).toBe(source);
 	});
 
 	it("rejects malformed UTF-8 instead of dispatching replacement characters", async () => {
@@ -407,7 +466,7 @@ describe("taskFile dispatch", () => {
 
 		expect(result.isError).not.toBe(true);
 		expect(executions[0]?.assignment).toBe("Task through a symlink.");
-		expect(result.details?.progress?.[0]).toMatchObject({
+		expect(result.details?.results[0]).toMatchObject({
 			assignment: "Task through a symlink.",
 			taskFile,
 			taskFileSha256: await sha256(bytes),

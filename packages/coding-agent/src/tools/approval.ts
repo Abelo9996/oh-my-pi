@@ -206,24 +206,21 @@ function resolveCachedModeApproval(
 
 /**
  * The folder a directory answer would grant: the deepest directory holding every path target — a
- * directory target is that directory itself, a file target its parent. `undefined` when that
- * folder's one-level grant would not cover every target, or the call names no filesystem path.
+ * directory target is that directory itself, a file target its parent. `undefined` when the call
+ * names no filesystem path.
  */
 export function approvalFolderCandidate(
 	tool: ApprovalSubject,
 	args: unknown,
 ): { key: string; label: string } | undefined {
-	const targets = approvalCacheTargets(tool, args);
 	const directories: string[] = [];
-	for (const target of targets) {
+	for (const target of approvalCacheTargets(tool, args)) {
 		if (!path.isAbsolute(target)) continue;
 		const directory = approvalTargetDirectory(target);
 		if (directory !== undefined) directories.push(directory);
 	}
 	const key = commonApprovalDirectoryKey(directories);
 	if (key === undefined) return undefined;
-	const directoryGrant = approvalGrantKey("read", key);
-	if (!targets.every(target => coveringGrantKeys(target, "read").includes(directoryGrant))) return undefined;
 	// A filesystem root keeps its separator: stripping it would leave POSIX "" or drive-relative "C:".
 	const label = shortenPath(path.parse(key).root === key ? key : key.replace(/[\\/]+$/, ""));
 	return { key, label: sanitizeText(label) };
