@@ -792,8 +792,9 @@ export class AssistantMessageComponent extends Container {
 		return this.#transcriptBlockFinalized;
 	}
 
-	/** Whether a figure still waits for the raster of its final source; the transcript holds retirement meanwhile. */
+	/** Hold image and figure rendering until the completed block can enter immutable scrollback. */
 	isTranscriptBlockPending(): boolean {
+		if (this.#showImages && this.#kittyConversionsAwaited.size > 0) return true;
 		for (const block of this.#figureBlocks.values()) if (block.pending) return true;
 		return false;
 	}
@@ -1615,6 +1616,7 @@ export class AssistantMessageComponent extends Container {
 				})
 				.catch(() => {
 					this.#kittyConversionsAwaited.delete(key);
+					this.#onImageUpdate?.();
 				});
 		}
 	}
