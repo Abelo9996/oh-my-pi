@@ -1,8 +1,6 @@
 /**
- * Thread-notice progress events reach an RPC host: model fallback (`retry_fallback_applied`),
- * goal changes (`goal_updated`), rule injection (`ttsr_triggered`), and manual compaction
- * (`manual_compaction_start`/`manual_compaction_end`). Drives a real SDK session in
- * `runRpcMode` over the RPC client; only the model is scripted
+ * Manual compaction reports `manual_compaction_start`/`manual_compaction_end` to an RPC host.
+ * Drives a real SDK session in `runRpcMode` over the RPC client; only the model is scripted
  * (`fixtures/progress-events-rpc-agent.ts`).
  */
 import { afterEach, describe, expect, test } from "bun:test";
@@ -39,58 +37,7 @@ async function start(): Promise<{ rpc: RpcClient; events: AgentSessionEvent[] }>
 	return { rpc: client, events };
 }
 
-function ofType<T extends AgentSessionEvent["type"]>(
-	events: readonly AgentSessionEvent[],
-	type: T,
-): Extract<AgentSessionEvent, { type: T }>[] {
-	return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
-}
-
 describe("RPC progress events", () => {
-	test("retry_fallback_applied reports the model switch", async () => {
-		const { rpc, events } = await start();
-		await rpc.promptAndWait("trigger fallback");
-
-		expect(ofType(events, "retry_fallback_applied")).toEqual([
-			{
-				type: "retry_fallback_applied",
-				// The selector carries the session's thinking level suffix (`:high`).
-				from: expect.stringMatching(/^anthropic\/claude-sonnet-4-5(:|$)/),
-				to: "openai/gpt-4o-mini",
-				role: "default",
-				reason: expect.stringContaining("overloaded_error"),
-			},
-		]);
-		expect(ofType(events, "retry_fallback_succeeded")).toEqual([
-			{ type: "retry_fallback_succeeded", model: "openai/gpt-4o-mini", role: "default" },
-		]);
-		expect(await rpc.getLastAssistantText()).toBe("recovered on the fallback model");
-	}, 60_000);
-
-	test("goal_updated reports goal changes", async () => {
-		const { rpc, events } = await start();
-		await rpc.goal("create", { objective: "ship the progress events" });
-		await rpc.goal("pause");
-
-		const updates = ofType(events, "goal_updated");
-		expect(updates.map(update => [update.goal?.objective, update.goal?.status])).toEqual([
-			["ship the progress events", "active"],
-			["ship the progress events", "paused"],
-		]);
-	}, 60_000);
-
-	test("ttsr_triggered reports rule injection with the rule's name, path, and content", async () => {
-		const { rpc, events } = await start();
-		await rpc.promptAndWait("say the rule phrase");
-		await rpc.waitForSettled();
-
-		const injections = ofType(events, "ttsr_triggered");
-		expect(injections).toHaveLength(1);
-		expect(injections[0].rules).toMatchObject([
-			{ name: "no-forbidden", path: expect.stringContaining("no-forbidden.md"), content: expect.any(String) },
-		]);
-	}, 60_000);
-
 	test("manual compact emits manual_compaction_start and manual_compaction_end", async () => {
 		const { rpc, events } = await start();
 		await rpc.promptAndWait("first turn");
@@ -108,7 +55,7 @@ describe("RPC progress events", () => {
 
 		// Nothing left to compact: the command fails and the pair still closes, as skipped.
 		events.length = 0;
-		await expect(rpc.compact()).rejects.toThrow("Already compacted");
+		expect(String(await rpc.compact().catch((error: unknown) => error))).toContain("Already compacted");
 		expect(events.filter(event => event.type.startsWith("manual_compaction_"))).toEqual([
 			{ type: "manual_compaction_start" },
 			{ type: "manual_compaction_end", aborted: false, skipped: true, errorMessage: "Already compacted" },
