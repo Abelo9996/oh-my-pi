@@ -10329,10 +10329,11 @@ export class AgentSession implements SettingsScope {
 	 *  Untriggered hidden next-turn context rides with the next prompt, so it is not queued work for
 	 *  hasPendingMessages()/RPC or the empty-submit abort gate. */
 	get queuedMessageCount(): number {
-		const hiddenTurnScheduled = this.#scheduledHiddenNextTurnGeneration !== undefined;
-		let pendingNextTurnCount = 0;
-		for (const message of this.#pendingNextTurnMessages) {
-			if (hiddenTurnScheduled || isAdvisorCard(message)) pendingNextTurnCount++;
+		// A scheduled hidden turn runs every pending message; otherwise only advisor cards count.
+		let pendingNextTurnCount = this.#pendingNextTurnMessages.length;
+		if (this.#scheduledHiddenNextTurnGeneration === undefined) {
+			pendingNextTurnCount = 0;
+			for (const message of this.#pendingNextTurnMessages) if (isAdvisorCard(message)) pendingNextTurnCount++;
 		}
 		return (
 			this.agent.peekSteeringQueue().filter(isDisplayableQueuedMessage).length +

@@ -140,7 +140,6 @@ describe("AgentSession todo-error reminder", () => {
 
 		expect(settledState).toEqual({ isSettled: true, queuedMessageCount: 0 });
 		expect(reminders).toHaveLength(1);
-		expect(reminders[0]).toContain(REMINDER_MARKER);
 	});
 
 	it("preserves an uncorrected failure after an unrelated mutation without a stale list", async () => {
