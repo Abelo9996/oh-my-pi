@@ -456,7 +456,8 @@ export interface SessionAdvisorsOptions {
 	/** WATCHDOG.yml problems found during discovery; surfaced once as a warning. */
 	configWarnings?: string[];
 	streamFn?: StreamFn;
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/** Builds each advisor's provider request transform; called once per advisor agent. */
+	createTransformProviderContext?: () => (context: Context, model: Model) => Context | Promise<Context>;
 }
 
 /** Options accepted when an advisor injects a primary-session message. */
@@ -558,7 +559,7 @@ export class SessionAdvisors {
 	#advisorContextPrompt: string | undefined;
 	#advisorMemoryPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
-	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
+	#createTransformProviderContext: (() => (context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
 	#advisorConfigWarnings: string[];
@@ -633,7 +634,7 @@ export class SessionAdvisors {
 		this.#advisorConfigs = options.configs;
 		this.#advisorConfigWarnings = options.configWarnings ?? [];
 		this.#advisorStreamFn = options.streamFn;
-		this.#transformProviderContext = options.transformProviderContext;
+		this.#createTransformProviderContext = options.createTransformProviderContext;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 	}
 
@@ -1466,7 +1467,9 @@ export class SessionAdvisors {
 				onPayload: this.#host.onPayload,
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,
-				transformProviderContext: this.#transformProviderContext,
+				// Built per advisor: the transform keeps per-conversation state (the
+				// date/cwd reminder), and each advisor is a conversation of its own.
+				transformProviderContext: this.#createTransformProviderContext?.(),
 				intentTracing: false,
 				transformAssistantMessage: message => {
 					quarantinedAdvisorOutput = quarantineAdvisorUnsafeOutput(

@@ -835,14 +835,20 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 		let options = patterns::FilenameExpansionOptions {
 			require_dot_in_pattern_to_match_dot_files: !self.shell.options().glob_matches_dotfiles,
+			globstar: self.shell.options().enable_star_star_glob,
+			cancel: self.params.cancel_token(),
 		};
 
-		// On error (e.g. malformed pattern), default to NoGlob so the field
-		// passes through as a literal rather than triggering failglob.
-		let expansion = pattern
-			.expand(self.shell.filesystem(), self.shell.working_dir(), &options)
-			.await
-			.unwrap_or_default();
+		let expansion =
+			match pattern.expand(self.shell.filesystem(), self.shell.working_dir(), &options).await {
+				Ok(expansion) => expansion,
+				// A cancelled run stops here instead of running the command with
+				// the word left literal.
+				Err(err) if matches!(err.kind(), error::ErrorKind::Interrupted) => return Err(err),
+				// On error (e.g. malformed pattern), default to NoGlob so the
+				// field passes through as a literal rather than triggering failglob.
+				Err(_) => patterns::PatternExpansionResult::default(),
+			};
 
 		if expansion.is_unmatched_glob() && self.shell.options().fail_expansion_on_globs_without_match
 		{
@@ -2091,6 +2097,52 @@ mod tests {
 		assert_eq!(full_expand_and_split_word(&mut shell, &params, "\"\"").await?, vec![""]);
 		// Unquoted empty string (no characters at all) should still produce no fields.
 		assert_eq!(full_expand_and_split_word(&mut shell, &params, "").await?, Vec::<String>::new());
+
+		Ok(())
+	}
+
+	/// `shopt -s globstar` must reach pathname expansion: `**` then recurses.
+	/// Without it `**/*.rs` is `*/*.rs`, which matches nothing here and stays
+	/// literal, as in bash.
+	#[tokio::test]
+	async fn test_globstar_option_reaches_pathname_expansion() -> Result<()> {
+		let scratch = tempfile::tempdir()?;
+		std::fs::create_dir_all(scratch.path().join("a/b"))?;
+		std::fs::write(scratch.path().join("a/b/f.rs"), "")?;
+		std::fs::write(scratch.path().join("g.rs"), "")?;
+
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		shell.set_working_dir(scratch.path()).await?;
+		let params = shell.default_exec_params();
+		assert_eq!(full_expand_and_split_word(&mut shell, &params, "**/*.rs").await?, vec!["**/*.rs"]);
+
+		shell.options_mut().enable_star_star_glob = true; // shopt -s globstar
+		let params = shell.default_exec_params();
+		assert_eq!(full_expand_and_split_word(&mut shell, &params, "**/*.rs").await?, vec!["a/b/f.rs", "g.rs"]);
+
+		Ok(())
+	}
+
+	/// A cancelled run must reach the `**` walk, which then ends the expansion
+	/// with an interrupt instead of running the command on a literal word.
+	#[tokio::test]
+	async fn test_globstar_walk_sees_the_run_cancellation() -> Result<()> {
+		let scratch = tempfile::tempdir()?;
+		std::fs::create_dir_all(scratch.path().join("a/b"))?;
+		std::fs::write(scratch.path().join("a/b/f.rs"), "")?;
+
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		shell.set_working_dir(scratch.path()).await?;
+		shell.options_mut().enable_star_star_glob = true; // shopt -s globstar
+		let mut params = shell.default_exec_params();
+		let cancel = tokio_util::sync::CancellationToken::new();
+		params.set_cancel_token(cancel.clone());
+		cancel.cancel();
+
+		let err = full_expand_and_split_word(&mut shell, &params, "**/*.rs")
+			.await
+			.expect_err("expansion ignored the cancellation");
+		assert!(matches!(err.kind(), error::ErrorKind::Interrupted), "unexpected error: {err}");
 
 		Ok(())
 	}

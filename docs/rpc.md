@@ -96,6 +96,7 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 13. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 14. Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
 15. Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
+16. Draft-only dictation frames (`dictation_state`, `dictation_transcript`, `dictation_end`); see [Dictation Sub-Protocol](#dictation-sub-protocol)
 
 Protocol v2 may wrap oversized logical frames from these categories in `rpc_chunk` frames.
 
@@ -187,6 +188,10 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "compact", customInstructions?: string }`
 - `{ id?, type: "set_auto_compaction", enabled: boolean }`
+
+`compact` answers with the `CompactionResult` once the compaction ends. Progress
+arrives as `manual_compaction_start` and `manual_compaction_end` events (see
+[Progress events](#progress-events)).
 
 ### Cache warming
 
@@ -863,13 +868,13 @@ Common event types:
 - `turn_start`, `turn_end`
 - `message_start`, `message_update`, `message_end`
 - `tool_execution_start`, `tool_execution_update`, `tool_stream_update`, `tool_execution_end`
-- `auto_compaction_start`, `auto_compaction_end`
+- `auto_compaction_start`, `auto_compaction_end`, `manual_compaction_start`, `manual_compaction_end`
 - `auto_retry_start`, `auto_retry_end`
 - `cache_warming_start`, `cache_warming_end`
 - `retry_fallback_applied`, `retry_fallback_succeeded`
 - `model_changed`, `thinking_level_changed`, `config_warnings_changed`
 - `advisor_cost_changed`, `advisor_yielded`
-- `ttsr_triggered`
+- `ttsr_triggered` (rule injection)
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
 - `queue_update`
@@ -935,6 +940,36 @@ no follow-up run occurs. The optional fields keep older frames terminal-compatib
 when `isTerminal` is absent. Use `yielded` for a prompt's yield and
 `session_settled` for quiescence, rather than assuming every non-terminal end
 guarantees another turn.
+
+### Progress events
+
+These events report work the host should show as a thread notice. RPC mode
+always forwards them, subject only to `set_event_filter`.
+Servers that predate `manual_compaction_start` and `manual_compaction_end`
+report a manual compaction only through the `compact` response.
+
+| Event | When | Payload |
+| --- | --- | --- |
+| `manual_compaction_start` | A manual compaction began: the `compact` command, `/compact`, or an extension's `ctx.compact()`. The live turn is already aborted. | `mode?`: the `/compact <mode>` subcommand |
+| `manual_compaction_end` | That compaction ended. | `aborted`, and one of: `result` (committed), `skipped: true` with `errorMessage` (nothing to compact), or `errorMessage` (failed or cancelled) |
+| `auto_compaction_start`, `auto_compaction_end` | An automatic compaction (threshold, overflow, idle, incomplete response) began or ended. Never sent for a manual compaction. | `reason`, `action`; `result?`, `aborted`, `willRetry`, `errorMessage?`, `skipped?` |
+| `retry_fallback_applied` | A retryable failure switched the session to the next model of a `retry.fallbackChains` chain. | `from`, `to` (model selectors), `role`, `reason?` (the error) |
+| `retry_fallback_succeeded` | The fallback model answered. | `model`, `role` |
+| `ttsr_triggered` | Rule injection: a TTSR rule matched the streamed output and its text was injected into the conversation. | `rules`: each rule object carries at least `name`, `path`, and `content` |
+| `goal_updated` | Goal mode changed, through the `goal` command or the agent's `goal` tool. | `goal` (or `null`), `state?` |
+
+Every manual compaction sends exactly one start/end pair. When a configured
+method fails and the next one is tried, the fallback stays inside the same pair.
+A `compact` call refused before it starts (another compaction is running, or
+`/compact <mode>` was given focus text it does not take) sends no pair.
+
+```json
+{ "type": "manual_compaction_start" }
+{ "type": "manual_compaction_end", "aborted": false, "result": { "summary": "…", "firstKeptEntryId": "…", "tokensBefore": 48210, "details": {} } }
+{ "type": "manual_compaction_end", "aborted": false, "skipped": true, "errorMessage": "Already compacted" }
+{ "type": "retry_fallback_applied", "from": "anthropic/claude-sonnet-4-5:high", "to": "openai/gpt-4o-mini", "role": "default", "reason": "Request failed: overloaded_error: provider returned error 503" }
+{ "type": "ttsr_triggered", "rules": [{ "name": "no-forbidden", "path": "/repo/.omp/rules/no-forbidden.md", "content": "Never write the forbidden word." }] }
+```
 
 ### Cache warming events
 
@@ -1419,7 +1454,7 @@ connection and the pending `live_start` then fails. `voice` defaults to the
 `live.voice` setting and the response reports the voice used. `instructions`
 replaces the bundled live prompt; it is rendered as a Handlebars template with
 `{{username}}` and `{{firstName}}` of the local OS account. Starting while a
-session is connecting, active, or closing fails.
+session is connecting, active, or closing, or while dictation is active, fails.
 
 `live_stop` responds after the session has stopped and succeeds when none is
 active. `live_mute` sets the microphone mute, or toggles it when `muted` is
@@ -1441,6 +1476,38 @@ Live frames are not session events: `set_event_filter` never drops them.
 
 Closing stdin, or `pi.shutdown()`, stops an active live session before the
 process exits.
+
+## Dictation Sub-Protocol
+
+Draft-only dictation captures from the machine's microphone using the session's
+configured `modelRoles.dictation` speech-to-text engine and `stt.language`.
+It requires `stt.enabled: true`; when disabled, start fails before opening the
+microphone or initializing a speech model. It does not submit a prompt,
+interpret speech submit triggers, or play audio.
+Live voice and dictation are mutually exclusive, including while either starts
+or stops.
+
+- `{ id?, type: "dictation_start", captureId: string }` starts a capture and responds when recording. `captureId` must be a non-blank string of at most 128 UTF-16 code units; the host must choose a unique ID for each capture.
+- `{ id?, type: "dictation_stop" }` stops the microphone and flushes transcription, then responds with `data: { text: string }`. With no capture it succeeds with empty text. A failure returns an error response.
+
+Bundled clients allow 600 seconds for both dictation commands: start may need to download and load a cold speech model, and stop may need to finish a slow local or cloud transcription flush. The TypeScript `RpcClient.dictationStart(captureId, timeoutMs)` and `RpcClient.dictationStop(timeoutMs)` accept caller-selected deadlines in milliseconds. A client timeout only stops waiting; it does not cancel the server operation. Send `dictation_stop` (or call `dictationStop()`) to cancel a pending start or stop an active capture, and keep the `dictation_end` subscription active to receive a flush result that arrives after a request deadline.
+
+Stop can be sent while start is pending: it cancels the start, waits for the
+microphone to close, and causes the pending start to fail. The terminal frame
+may arrive before either response, so subscribe before starting and correlate
+by `captureId` rather than response order.
+
+These unsolicited frames bypass `set_event_filter`:
+
+- `{ type: "dictation_state", captureId, state: "starting" | "recording" | "transcribing" }`
+- `{ type: "dictation_transcript", captureId, text }` — full accumulated preview; replace the prior preview for this capture rather than appending it.
+- `{ type: "dictation_end", captureId, text, error? }` — exactly one terminal frame for a started capture, with its accumulated result and an optional error. The stop result and terminal frame describe the same text; insert it only once into the draft that initiated the capture.
+
+Session changes stop and flush dictation before changing sessions, including
+extension-initiated transitions. A transcription failure is reported in the
+terminal frame but does not veto the session change once capture has been
+released. On stdin EOF, RPC output failure, or process shutdown, active capture
+is disposed and the microphone is closed without waiting for transcription.
 
 ## Host URI Sub-Protocol
 
@@ -1666,6 +1733,7 @@ Current helper characteristics:
 - Exposes `onPromptResult()`, `onSessionSettled()`, command-availability and subagent listeners, plus extension UI requests
 - Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
 - Drives live voice sessions with `liveStart()`, `liveStop()`, `liveMute()`, and delivers live frames through `onLive()`
+- Drives draft-only speech input with `dictationStart(captureId)`, `dictationStop()`, and `onDictation()`
 - `promptAndWait()` waits for that prompt's result (or synchronous local completion); `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
 - Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)` and `getLogoutAccounts(...)` / `logout(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
 

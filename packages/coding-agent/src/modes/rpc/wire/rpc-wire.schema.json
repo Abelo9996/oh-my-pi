@@ -353,6 +353,28 @@
 				"clientOmit": []
 			},
 			{
+				"name": "dictation_start",
+				"doc": "Start draft-only speech-to-text; resolves once the microphone is recording.",
+				"params": "DictationStartParams",
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": 600000,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "dictation_stop",
+				"doc": "Stop and flush draft-only dictation, returning the accumulated text.",
+				"params": null,
+				"result": "DictationStopResult",
+				"nullable": false,
+				"unwrap": "text",
+				"timeoutMs": 600000,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "set_model",
 				"doc": "Select a model by provider and id.",
 				"params": "SetModelParams",
@@ -3880,6 +3902,50 @@
 				"willRetry"
 			]
 		},
+		"ManualCompactionStartEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "manual_compaction_start"
+				},
+				"mode": {
+					"type": "string",
+					"description": "The `/compact <mode>` subcommand, when one was given."
+				}
+			},
+			"required": [
+				"type"
+			],
+			"description": "A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."
+		},
+		"ManualCompactionEndEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "manual_compaction_end"
+				},
+				"aborted": {
+					"type": "boolean",
+					"description": "The compaction was cancelled (abort, or a `session_before_compact` hook)."
+				},
+				"result": {
+					"$ref": "#/$defs/CompactionResult",
+					"description": "Present when the compaction committed."
+				},
+				"skipped": {
+					"type": "boolean",
+					"description": "There was nothing to compact; `errorMessage` says why."
+				},
+				"errorMessage": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"aborted"
+			],
+			"description": "Outcome of the compaction announced by the matching `manual_compaction_start`."
+		},
 		"AutoRetryStartEvent": {
 			"type": "object",
 			"properties": {
@@ -4109,7 +4175,8 @@
 			"required": [
 				"type",
 				"rules"
-			]
+			],
+			"description": "Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`."
 		},
 		"TodoReminderEvent": {
 			"type": "object",
@@ -4305,6 +4372,12 @@
 				},
 				{
 					"$ref": "#/$defs/AutoCompactionEndEvent"
+				},
+				{
+					"$ref": "#/$defs/ManualCompactionStartEvent"
+				},
+				{
+					"$ref": "#/$defs/ManualCompactionEndEvent"
 				},
 				{
 					"$ref": "#/$defs/AutoRetryStartEvent"
@@ -4763,6 +4836,74 @@
 				"type"
 			],
 			"description": "Sent exactly once when a live session ends; `error` carries the failure cause."
+		},
+		"DictationStateEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "dictation_state"
+				},
+				"captureId": {
+					"type": "string"
+				},
+				"state": {
+					"enum": [
+						"starting",
+						"recording",
+						"transcribing"
+					],
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"captureId",
+				"state"
+			],
+			"description": "State of one draft-only microphone capture."
+		},
+		"DictationTranscriptEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "dictation_transcript"
+				},
+				"captureId": {
+					"type": "string"
+				},
+				"text": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"captureId",
+				"text"
+			],
+			"description": "Full accumulated draft preview; replaces the previous preview for this capture."
+		},
+		"DictationEndEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "dictation_end"
+				},
+				"captureId": {
+					"type": "string"
+				},
+				"text": {
+					"type": "string"
+				},
+				"error": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"captureId",
+				"text"
+			],
+			"description": "Exactly one terminal frame per capture; text is the accumulated result."
 		},
 		"BtwDeltaEvent": {
 			"type": "object",
@@ -5835,6 +5976,15 @@
 					"$ref": "#/$defs/LiveEndEvent"
 				},
 				{
+					"$ref": "#/$defs/DictationStateEvent"
+				},
+				{
+					"$ref": "#/$defs/DictationTranscriptEvent"
+				},
+				{
+					"$ref": "#/$defs/DictationEndEvent"
+				},
+				{
 					"$ref": "#/$defs/BtwDeltaEvent"
 				},
 				{
@@ -6372,6 +6522,28 @@
 			},
 			"required": [
 				"muted"
+			]
+		},
+		"DictationStartParams": {
+			"type": "object",
+			"properties": {
+				"captureId": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"captureId"
+			]
+		},
+		"DictationStopResult": {
+			"type": "object",
+			"properties": {
+				"text": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"text"
 			]
 		},
 		"SetModelParams": {

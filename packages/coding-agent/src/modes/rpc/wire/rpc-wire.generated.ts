@@ -887,6 +887,25 @@ export interface AutoCompactionEndEvent {
 	skipped?: boolean;
 }
 
+/** A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted. */
+export interface ManualCompactionStartEvent {
+	type: "manual_compaction_start";
+	/** The `/compact <mode>` subcommand, when one was given. */
+	mode?: string;
+}
+
+/** Outcome of the compaction announced by the matching `manual_compaction_start`. */
+export interface ManualCompactionEndEvent {
+	type: "manual_compaction_end";
+	/** The compaction was cancelled (abort, or a `session_before_compact` hook). */
+	aborted: boolean;
+	/** Present when the compaction committed. */
+	result?: CompactionResult;
+	/** There was nothing to compact; `errorMessage` says why. */
+	skipped?: boolean;
+	errorMessage?: string;
+}
+
 export interface AutoRetryStartEvent {
 	type: "auto_retry_start";
 	attempt: number;
@@ -956,6 +975,7 @@ export interface AdvisorYieldedEvent {
 	type: "advisor_yielded";
 }
 
+/** Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`. */
 export interface TtsrTriggeredEvent {
 	type: "ttsr_triggered";
 	rules: Record<string, unknown>[];
@@ -1011,7 +1031,7 @@ export interface QueueUpdateEvent {
 }
 
 /** A session event, discriminated by `type`; `set_event_filter` selects which are sent. */
-export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
+export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
 
 /** First frame after startup; transport fields are absent on servers without protocol v2. */
 export interface ReadyEvent {
@@ -1144,6 +1164,28 @@ export interface LiveTranscriptEvent {
 /** Sent exactly once when a live session ends; `error` carries the failure cause. */
 export interface LiveEndEvent {
 	type: "live_end";
+	error?: string;
+}
+
+/** State of one draft-only microphone capture. */
+export interface DictationStateEvent {
+	type: "dictation_state";
+	captureId: string;
+	state: "starting" | "recording" | "transcribing";
+}
+
+/** Full accumulated draft preview; replaces the previous preview for this capture. */
+export interface DictationTranscriptEvent {
+	type: "dictation_transcript";
+	captureId: string;
+	text: string;
+}
+
+/** Exactly one terminal frame per capture; text is the accumulated result. */
+export interface DictationEndEvent {
+	type: "dictation_end";
+	captureId: string;
+	text: string;
 	error?: string;
 }
 
@@ -1466,7 +1508,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1637,6 +1679,14 @@ export interface LiveMuteParams {
 
 export interface LiveMuteResult {
 	muted: boolean;
+}
+
+export interface DictationStartParams {
+	captureId: string;
+}
+
+export interface DictationStopResult {
+	text: string;
 }
 
 export interface SetModelParams {
@@ -1851,6 +1901,8 @@ export interface RpcWireCommands {
 	live_start: { params: LiveStartParams; result: LiveStartResult };
 	live_stop: { params: undefined; result: undefined };
 	live_mute: { params: LiveMuteParams; result: LiveMuteResult };
+	dictation_start: { params: DictationStartParams; result: undefined };
+	dictation_stop: { params: undefined; result: DictationStopResult };
 	set_model: { params: SetModelParams; result: ModelInfo };
 	cycle_model: { params: undefined; result: ModelCycleResult | null };
 	get_available_models: { params: undefined; result: GetAvailableModelsResult };
