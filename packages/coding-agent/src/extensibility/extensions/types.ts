@@ -14,6 +14,7 @@ import {
 	type ExtensionWidgetContent,
 	type MessageRenderer,
 	type AssistantThinkingRenderer,
+	type AssistantTextRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 export {
 	type ExtensionUiComponent,
@@ -23,6 +24,8 @@ export {
 	type MessageRenderer,
 	type AssistantThinkingRenderContext,
 	type AssistantThinkingRenderer,
+	type AssistantTextRenderContext,
+	type AssistantTextRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
@@ -37,6 +40,8 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
+import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
+import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type {
 	Api,
@@ -77,9 +82,11 @@ import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
+import type { LiveTranscript } from "../../live/controller";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -206,6 +213,13 @@ export interface ExtensionUIDialogOptions {
 	onTimeoutStart?: () => void;
 	/** Invoked when user input resets a UI-managed timeout countdown */
 	onTimeoutReset?: () => void;
+	/**
+	 * Host hint to mask entered characters in `input` dialogs.
+	 * Enforced by the interactive TUI (masked as bullets), forwarded on RPC `input`
+	 * requests for hosts that honor it, and rejected (`undefined`) in ACP mode where
+	 * form elicitation does not support secret masking.
+	 */
+	secret?: boolean;
 	/** Initial cursor position for select dialogs (0-indexed) */
 	initialIndex?: number;
 	/** Render an outlined list for select dialogs */
@@ -341,6 +355,13 @@ export interface ExtensionUIContext {
 
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
+
+	/**
+	 * Draw the assistant reply sent at `timestamp` (`message.timestamp`) again, re-running the
+	 * assistant text renderers, e.g. after a click changed what they return. Interactive mode only,
+	 * and only while `extensionRenderers.assistantText` is on; a no-op elsewhere.
+	 */
+	rerenderMessage(timestamp: number): void;
 
 	/** Set status text in the footer/status bar. Pass undefined to clear. */
 	setStatus(key: string, text: string | undefined): void;
@@ -668,6 +689,50 @@ export type ExtensionAnnotationsFactory = (
 	sendUserMessage: (text: string, options?: SendUserMessageOptions) => void,
 ) => ExtensionAnnotationsAPI;
 
+/** Options for {@link ExtensionContext.startLive}. */
+export interface ExtensionLiveStartOptions {
+	/**
+	 * SDP offer from the extension's own WebRTC peer, e.g. a browser `RTCPeerConnection` with one
+	 * sendrecv Opus audio track and an `oai-events` data channel. That peer carries all audio;
+	 * the host opens no microphone or speaker.
+	 */
+	sdpOffer: string;
+	/** Realtime voice; defaults to the `live.voice` setting. */
+	voice?: string;
+	/**
+	 * Handlebars template replacing the bundled live instructions, rendered with
+	 * `{ username, firstName }` like the bundled prompt.
+	 */
+	instructions?: string;
+	/**
+	 * Phase changes (`connecting`, `listening`, `working`, `muted`, `error`). `muted` is a request:
+	 * the host has no track to mute, so silence the peer's microphone track until the next phase.
+	 */
+	onPhase?(phase: LivePhase): void;
+	/** Streaming and final transcripts of both sides of the conversation. */
+	onTranscript?(transcript: LiveTranscript): void;
+	/**
+	 * Called exactly once when the session ends, with the failure that ended it if any. A start
+	 * that fails to connect calls it too, before `startLive` rejects.
+	 */
+	onEnd?(error?: Error): void;
+}
+
+/** A live voice session started by {@link ExtensionContext.startLive}. */
+export interface ExtensionLiveSession {
+	/** SDP answer to apply to the extension's peer. */
+	sdpAnswer: string;
+	/** Voice in use. */
+	voice: string;
+	/**
+	 * Ends the session; resolves once it has stopped. Safe to call repeatedly. The host has no media
+	 * peer, so it never sees the extension's peer go away: call this when that peer disconnects
+	 * (`connectionstatechange` to `failed` or `closed`, or the relay socket closing). Until then the
+	 * call stays open and the TUI keeps its live visualizer up.
+	 */
+	stop(): Promise<void>;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -728,6 +793,11 @@ export interface ExtensionContext {
 	 * plan file exists.
 	 */
 	openPlanReview(): Promise<boolean>;
+	/**
+	 * Query and control the built-in plan, vibe, goal, and loop modes. Interactive (TUI) sessions
+	 * only: `undefined` in print, JSON, RPC, and ACP modes and in subagents.
+	 */
+	sessionModes?: ExtensionSessionModes;
 	/** Identity of the agent this session runs: the top-level session or a subagent. */
 	agent: ExtensionAgentIdentity;
 	/**
@@ -748,6 +818,13 @@ export interface ExtensionContext {
 	 * Optional for compatibility with hosts that do not provide side turns.
 	 */
 	runEphemeralTurn?(options: EphemeralTurnOptions): Promise<EphemeralTurnResult>;
+	/**
+	 * Start a Codex live voice session bound to this session, like `/live`, but with audio on the
+	 * extension's own WebRTC peer (for example a browser on another device). Delegated work runs as
+	 * normal turns of this session. Rejects while another live session is active.
+	 * Optional: present only in hosts that run live sessions (currently interactive mode).
+	 */
+	startLive?(options: ExtensionLiveStartOptions): Promise<ExtensionLiveSession>;
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
 	/** `/annotate` as an API: build or collect annotation feedback on text and diffs. */
@@ -991,6 +1068,14 @@ export interface ToolInfo {
 	parameters: TSchema;
 	promptGuidelines?: string[];
 	sourceInfo: SourceInfo;
+	/** MCP server name (as configured) when this tool fronts an MCP server. */
+	mcpServerName?: string;
+	/** Original MCP tool name, before `mcp__<server>_<tool>` minting. */
+	mcpToolName?: string;
+	/** The MCP tool's `annotations.readOnlyHint`, when it declared one. Lets an
+	 *  extension tell a read-only MCP call from one that changes things (e.g.
+	 *  to allow only read-only tools in a restricted turn). */
+	mcpReadOnlyHint?: boolean;
 }
 
 // ============================================================================
@@ -1333,6 +1418,57 @@ export interface PlanReviewResolvedEvent {
 	by: "local" | "extension";
 }
 
+/**
+ * An explicit, idempotent mode transition. Requesting a state that already holds succeeds with
+ * `changed: false`. No transition submits a prompt; send one separately (e.g. `pi.sendUserMessage`).
+ * Plan `exit` leaves plan mode fully without approving the plan or deleting its draft. Loop `prompt`
+ * sets the text repeated after each turn ends (otherwise the user's next typed prompt); on an active
+ * loop it replaces that text, and on a paused loop `enter` resumes it.
+ */
+export type SessionModeRequest =
+	| { mode: "plan" | "vibe"; action: "enter" | "exit" }
+	| { mode: "goal"; action: "enter"; objective: string; tokenBudget?: number }
+	| { mode: "goal"; action: "pause" | "resume" | "drop" }
+	| { mode: "loop"; action: "enter"; prompt?: string; limit?: LoopLimitConfig; condition?: LoopConditionConfig }
+	| { mode: "loop"; action: "exit" };
+
+/** Detached snapshot of the built-in session modes. `paused` states come from the slash commands or a goal pause. */
+export interface SessionModeState {
+	plan: { status: "inactive" | "active" | "paused"; planFilePath?: string };
+	vibe: { status: "inactive" | "active" };
+	goal: { status: "inactive" | "active" | "paused"; objective?: string; tokenBudget?: number };
+	loop: { status: "inactive" | "active" | "paused" };
+}
+
+/**
+ * Outcome of `ctx.sessionModes.set()`. `busy`: a turn, compaction, or another mode transition is
+ * running, the session is still restoring its saved modes (startup or a session switch), or a
+ * completed goal is still being torn down — retry once idle. `conflict`: another mode blocks this one
+ * (exit it first). `disabled`: a setting gates it (`extensionHandlers.modeControl`, `plan.enabled`,
+ * `goal.enabled`). `invalid_request`: malformed or not applicable now.
+ */
+export type SessionModeResult =
+	| { ok: true; changed: boolean; state: SessionModeState }
+	| {
+			ok: false;
+			code: "busy" | "conflict" | "disabled" | "invalid_request";
+			message: string;
+			state: SessionModeState;
+	  };
+
+/** Direct built-in mode control, without slash commands or dialogs. */
+export interface ExtensionSessionModes {
+	getState(): SessionModeState;
+	set(request: SessionModeRequest): Promise<SessionModeResult>;
+}
+
+/** A built-in session mode changed, from any source: `ctx.sessionModes`, a slash command, a tool, or session restore. */
+export interface ModeChangedEvent {
+	type: "mode_changed";
+	previous: SessionModeState;
+	state: SessionModeState;
+}
+
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
@@ -1511,7 +1647,8 @@ export type ExtensionEvent =
 	| ToolApprovalRequestedEvent
 	| ToolApprovalResolvedEvent
 	| PlanReviewRequestedEvent
-	| PlanReviewResolvedEvent;
+	| PlanReviewResolvedEvent
+	| ModeChangedEvent;
 
 // ============================================================================
 // Event Results
@@ -1716,6 +1853,7 @@ export interface ExtensionAPI {
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
 	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
 	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
+	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
@@ -1834,6 +1972,15 @@ export interface ExtensionAPI {
 
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+
+	/**
+	 * Register a display-only transform for assistant text blocks: it returns the markdown to draw.
+	 * Called with the full text so far each time a streaming update is drawn (replies skip the
+	 * smooth-streaming reveal while renderers are active) and once more when the text is final.
+	 * The session, exports and model context keep the original text. Interactive mode only, and
+	 * only while the `extensionRenderers.assistantText` setting is on.
+	 */
+	registerAssistantTextRenderer(renderer: AssistantTextRenderer): void;
 
 	/**
 	 * Register a composer shape for the interactive editor.
@@ -2177,10 +2324,12 @@ export interface ExtensionContextActions {
 	) => boolean;
 	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
 	openPlanReview?: () => Promise<boolean>;
+	sessionModes?: ExtensionSessionModes;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
 	runEphemeralTurn?: (options: EphemeralTurnOptions) => Promise<EphemeralTurnResult>;
+	startLive?: (options: ExtensionLiveStartOptions) => Promise<ExtensionLiveSession>;
 }
 
 /** Actions for ExtensionCommandContext (ctx.* in command handlers). */
@@ -2213,6 +2362,7 @@ export interface Extension {
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
+	assistantTextRenderers: AssistantTextRenderer[];
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;

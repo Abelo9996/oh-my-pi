@@ -54,7 +54,7 @@ import type { NativeNode } from "../native/node";
 import { OwnerMemo, sameItems } from "../native/memo";
 import { plainText } from "../native/spans";
 import { errorText, noteText, resultText } from "./native-view";
-import { describeJsonTree } from "./json-tree";
+import { describeJsonValue } from "./json-tree";
 import { taskSummary } from "../overlays/agent-hub-renderer";
 import type { NativeToolView, ToolRenderResult } from "./renderer";
 
@@ -1839,6 +1839,8 @@ interface AgentDescribeState {
 	readonly nowMs: number;
 	readonly expanded: boolean;
 	readonly background: boolean;
+	/** The host draws the `json` kind. */
+	readonly json: boolean;
 }
 
 /** Settled and in-flight child snapshots a subagent carries, as nested agent nodes. */
@@ -1989,8 +1991,9 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 			warning ? errorLine(warning, "warning") : undefined,
 			result.error ? errorLine(result.error) : undefined,
 			result.retryFailure ? errorLine(`auto-retry gave up: ${result.retryFailure.errorMessage}`) : undefined,
+			// The structured result is the agent's answer: its containers open one level, as in the fallback tree.
 			structured !== undefined
-				? describeJsonTree(structured)
+				? describeJsonValue(structured, { native: state.json, open: 1 })
 				: output
 					? md(output, { role: "omp.task.output" })
 					: undefined,
@@ -2104,6 +2107,7 @@ function describeTaskResult(
 			nowMs: options.renderContext?.nowMs ?? Date.now(),
 			expanded: options.expanded,
 			background,
+			json: options.json === true,
 		},
 		0,
 	);
@@ -2176,7 +2180,7 @@ export const taskToolRenderer = {
 		options: TaskRenderOptions,
 		args?: TaskParams,
 	): NativeToolView | undefined {
-		return taskResultMemo.get(result, [options.renderContext?.nowMs, options.expanded], () =>
+		return taskResultMemo.get(result, [options.renderContext?.nowMs, options.expanded, options.json], () =>
 			describeTaskResult(result, options, args),
 		);
 	},
@@ -2263,7 +2267,7 @@ export interface TaskParams {
 	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;
-	/** Absolute UTF-8 file path (flat form), mutually exclusive with task. */
+	/** Absolute path or local:// URL to a UTF-8 file (flat form), mutually exclusive with task. */
 	taskFile?: string;
 	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
 	solutionSpace?: string;

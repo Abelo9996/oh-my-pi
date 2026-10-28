@@ -534,6 +534,47 @@ describe("ExtensionRunner", () => {
 
 			expect(runner.getAssistantThinkingRenderers().length).toBe(1);
 		});
+
+		it("hands out assistant text renderers only while extensionRenderers.assistantText is on", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "text-renderer.ts"),
+				`export default function(pi) { pi.registerAssistantTextRenderer(context => context.text.toUpperCase()); }`,
+			);
+			const result = await loadTestExtensions();
+			const runnerWith = (settings: Settings | undefined) =>
+				new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+					undefined,
+					settings,
+				);
+
+			// Off (the default, or no session settings at all): nothing reaches the transcript.
+			expect(runnerWith(Settings.isolated({})).getAssistantTextRenderers()).toEqual([]);
+			expect(runnerWith(undefined).getAssistantTextRenderers()).toEqual([]);
+			const [renderer] = runnerWith(
+				Settings.isolated({ "extensionRenderers.assistantText": true }),
+			).getAssistantTextRenderers();
+			expect(
+				renderer?.({ message: createAssistantMessage("hi"), contentIndex: 0, text: "hi", streaming: false }),
+			).toBe("HI");
+		});
+
+		it("fails an extension's load when it registers an assistant text renderer that is not a function", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "bad-text-renderer.ts"),
+				`export default function(pi) { pi.registerAssistantTextRenderer("upper"); }`,
+			);
+			const result = await loadTestExtensions();
+
+			expect(result.extensions).toEqual([]);
+			expect(result.errors).toHaveLength(1);
+			expect(result.errors[0]?.error).toContain("registerAssistantTextRenderer expects a function, got string");
+			expect(result.errors[0]?.error).toContain("bad-text-renderer.ts");
+		});
 	});
 
 	describe("flags", () => {
@@ -1202,6 +1243,40 @@ describe("ExtensionRunner", () => {
 				},
 			]);
 			expect(stopResult).toEqual({ continue: true, additionalContext: "Run one more pass." });
+		});
+
+		it("keeps both cleanup and unfinished-work feedback from separate stop handlers", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "session-stop-merge.ts"),
+				`
+				export default function(pi) {
+					pi.on("session_stop", () => ({ continue: true, additionalContext: "", reason: "Clean abandoned process." }));
+					pi.on("session_stop", () => ({ continue: true, additionalContext: "Continue unfinished work." }));
+				}
+			`,
+			);
+			const loaded = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const message = createAssistantMessage("Next is another unfinished change.");
+			const result = await runner.emitSessionStop({
+				messages: [message],
+				turn_id: 1,
+				last_assistant_message: message,
+				session_id: "session-123",
+				session_file: "/tmp/session.jsonl",
+				stop_hook_active: false,
+				signal: new AbortController().signal,
+			});
+			expect(result).toEqual({
+				continue: true,
+				additionalContext: "Clean abandoned process.\n\nContinue unfinished work.",
+			});
 		});
 
 		it("skips cancelled handlers, releases in-flight handlers, and preserves timeout errors", async () => {
@@ -2541,6 +2616,7 @@ describe("ExtensionRunner", () => {
 					input: async () => undefined,
 					notify: () => {},
 					onTerminalInput: () => () => {},
+					rerenderMessage: () => {},
 					setStatus: () => {},
 					setWorkingMessage: () => {},
 					setWidget: () => {},
@@ -4574,6 +4650,7 @@ describe("ExtensionRunner", () => {
 				handlers: new Map([["input", [async (...args: unknown[]) => handler(args[0] as InputEvent)]]]),
 				tools: new Map(),
 				assistantThinkingRenderers: [],
+				assistantTextRenderers: [],
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),

@@ -45,6 +45,7 @@ Use the interactive `/settings` panel inside a session, or the `omp config` comm
 ```bash
 omp config list                 # all settings with current effective values
 omp config list --json          # same, machine-readable
+omp config list --scope global --json   # only what config.yml sets, as written
 omp config get theme.dark       # one value
 omp config get theme.dark --json
 omp config set compaction.enabled false
@@ -65,14 +66,14 @@ This only controls the startup splash animation. It does not rerun setup or chan
 
 | Command                        | Effect                                                                                                                                                                                                                                                                                            |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `omp config list`              | Print every setting grouped by tab, with its current value and type. `--json` emits an object keyed by setting path with `{ value, type, description }`. Configured credential fields are masked as `********` in human output; in JSON their `value` is omitted and `redacted: true` is emitted. |
+| `omp config list`              | Print every setting grouped by tab, with its current value and type. `--json` emits an object keyed by setting path with `{ value, type, description }`. Configured credential fields are masked as `********` in human output; in JSON their `value` is omitted and `redacted: true` is emitted. With `--scope global` or `--scope project`, it lists only the keys that layer (`config.yml`, or the project's settings files for the current directory) sets, with the values as the layer holds them: path-scoped arrays (`enabledModels`, `enabledProviders`, `disabledProviders`) keep their `{ path, … }` entries instead of resolving them for the current directory, and `--json` emits `{ value, type, description }` per key. Defaults, other layers and environment variables are not consulted. |
 | `omp config get <key>`         | Print the effective value of one key. Unknown keys exit non-zero. `--json` emits `{ key, value, type, description }`. This is an explicit single-key request, so credential values are returned unmasked.                                                                                         |
 | `omp config set <key> <value>` | Parse `<value>` against the key's schema type, write it to the global main YAML file, and print the value written. When another source still supplies the effective value, it says which instead (`--json`: `overriddenBy` is the env var name, or `project`, `overlay`, or `runtime`; `fallbackEnv` names a fallback env var used while the saved value is blank). |
 | `omp config reset <key>`       | Delete the global key, allowing another configured layer or the schema default to apply. Prints the resulting effective value, masking non-empty credentials as `********`; JSON omits a credential's `value` and emits `{ key, redacted: true }`. |
 | `omp config path`              | Print the active agent directory (honors `PI_CODING_AGENT_DIR`).                                                                                                                                                                                                                                  |
 | `omp config init-xdg`          | On Linux and macOS, create the `omp` directories under the effective XDG data, state, and cache homes. It does not move existing files or set the XDG environment variables. Other platforms exit non-zero.                                                                                       |
 
-`omp config` with no subcommand lists settings. `--help` or `-h` displays command help. The `--json` flag is accepted by `list`, `get`, `set`, and `reset`.
+`omp config` with no subcommand lists settings. `--help` or `-h` displays command help. The `--json` flag is accepted by `list`, `get`, `set`, and `reset`. `--scope` is accepted by `list` only.
 
 ### Value parsing
 
@@ -371,6 +372,15 @@ The default is an empty array (nothing disabled). For the two subsystems' provid
 
 Native project `modelRoles` are also read directly from `.omp/config.yml`; disabling the `native` discovery provider does not suppress that model-role layer.
 
+## Resume picker scope
+
+By default, `omp --resume` and `/resume` include sessions from other worktrees of
+this repository in the current-folder list. To keep long-lived workspaces
+separate, run `omp config set session.worktreeScope directory` (or choose
+**Resume Worktree Scope** in `/settings`). Set it to `repo` to restore the default.
+The all-projects tab still shows sessions across every directory, including
+sessions in deleted worktrees; this setting only narrows the current-folder list.
+
 ## Settings catalog
 
 The catalog below highlights common settings; it is not the complete schema. `omp config list` is the authoritative reference for every key, current value, type, and description. Defaults and enum values shown here come from the schema. Settings that accept an env or flag override are noted; those overrides are process-local and not persisted.
@@ -576,6 +586,7 @@ providers:
 | `retry.maxDelayMs`                       | number  | `300000`          | Backoff ceiling (5 min). Provider-stated waits longer than this fail fast when no credential or model fallback succeeds, unless `retry.waitForUsageReset` admits an authoritative quota-reset wait. `0` disables the cap.                                                                                                                                                                                                                                                                                                                  |
 | `retry.modelFallback`                    | boolean | `true`            | Fall back to another chat model when one is unavailable. Role-driven helpers that honor this switch, including online session-title generation, stop after their first resolvable candidate when it is `false`. Independent of `contextPromotion.enabled`: this is the toggle that stops `retry.fallbackChains` from switching models.                                                                                                                                                                                                          |
 | `retry.fallbackOn` | enum | `any` | Which failed requests in a session turn (subagents included) or advisor turn may walk `retry.fallbackChains`. `any` switches on every provider error. `usage-limit` switches only on usage limits (quota windows, spend caps, exhausted balances); in a session turn other retryable errors retry the same model with the normal backoff up to `retry.maxRetries` and then surface, and non-retryable errors, refusals included, surface at once. `except-usage-limit` switches on everything else and waits out or surfaces usage limits. Advisors kept off the chain keep their own retry and drop behaviour (see `docs/advisor-watchdog.md`). Credential rotation and `retry.usageAwareFallback` are unaffected. |
+| `retry.rateLimitWalksChain` | boolean | `false` | Opt in to walking `retry.fallbackChains` at once on a rate limit instead of holding it for a turn whose thinking is signed by the failing model. By default such a turn retries the rate-limited model until `retry.maxRetries` is spent before the chain is reached. |
 | `retry.fallbackChains`                   | record  | `{}`              | Maps roles, model selectors, or `provider/*` wildcards to ordered fallback selectors. Keys containing `/` are model-oriented and win over roles: `provider/model-id` matches that exact model, `provider/*` matches every model of the provider. A `provider/*` _entry_ keeps the failing model's id and swaps the provider. Model-kind roles use their built-in chain when unset and no fallbacks when set to `[]`; the `default` chain never applies to them. Unknown models/providers or malformed chains are reported as config warnings at startup. |
 | `retry.fallbackRevertPolicy`             | enum    | `cooldown-expiry` | `cooldown-expiry` returns to the primary model once its suppression window ends; `never` stays on the fallback until switched manually.                                                                                                                                                                                                                                                                                                                                                     |
 | `retry.waitForUsageReset` | boolean | `false` | Allow provider-stated usage-limit waits past `retry.maxDelayMs` when a reset hint or complete usage report supplies authoritative timing. Waits are abortable but can also hold subagents. |
@@ -586,7 +597,7 @@ providers:
 
 When the active chat model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default` — which also owns a live model that belongs to no role (`/model` switch, ephemeral hop). The effective chain is the owning role's primary followed by its configured entries, and a live selector that appears nowhere in it is offered the whole chain. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching chat roles when the session is not on those roles. It skips chat candidates whose selectors are still cooling down and switches for the rest of the turn. Model-kind runners resolve their named role chain separately and never consume `default`. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`. A subagent spawned on a single model inherits its role's chain (`@reviewer` → `fallbackChains.reviewer`), or `default`'s when the role has none; an explicit `[]` gives it no fallbacks even when `default` is assigned the same model. Exact-model and `provider/*` keys still take precedence over that inherited chain.
 
-A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or entry: it matches ids under that prefix or prepends the prefix to the failing model's bare id when changing providers. Bare fallback entries inherit the failing turn's thinking level; an explicit suffix can replace it. When a chain is exhausted, recovery can consult the current fallback model's own chain as well, and each hop still consumes a retry attempt. See [Retry policy](./non-compaction-retry-policy.md) for recovery ordering and quota behavior.
+A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or entry: it matches ids under that prefix or prepends the prefix to the failing model's bare id when changing providers. Bare fallback entries inherit the failing turn's thinking level (including `auto`); an explicit suffix, `:auto` included, replaces it. When a chain is exhausted, recovery can consult the current fallback model's own chain as well, and each hop still consumes a retry attempt. See [Retry policy](./non-compaction-retry-policy.md) for recovery ordering and quota behavior.
 
 Retry model fallback is not context promotion. `contextPromotion.enabled: false` only disables [context promotion](./models.md#context-promotion) to a model's `contextPromotionTarget`; set `retry.modelFallback: false` to stop `retry.fallbackChains` from switching the active model after provider errors. Same-model retries and compaction remain available.
 
@@ -620,6 +631,7 @@ tools:
 | `tools.xdev` | boolean | `true` | Mount discoverable tools under `xd://` device URLs instead of exposing every schema directly. Disabling it exposes enabled tools top-level. |
 | `tools.xdevDocs` | enum | `catalog` | `inline` includes all mounted docs/schemas, `builtins` inlines built-ins only, `catalog` lists devices with docs fetched on demand. |
 | `tools.xdevInlineDevices` | array | `[]` | Dynamic-device name globs to inline in `builtins` mode; ignored in `catalog` mode. |
+| `tools.xdevNotices` | boolean | `true` | Show the `xd://: mounted …` / `unmounted …` notice when MCP or extension tools mount or unmount. Off hides only the notice; the model still learns of the change with its next prompt. `startup.quiet: true` also hides it. |
 | `async.enabled` | boolean | `true` | Enable async bash commands and background task execution. |
 | `async.maxJobs` | number | `100` | Running background-job cap, floored to at least 1; parked/queued jobs do not consume execution slots. |
 | `async.printWake` | boolean | `false` | Print mode (`-p`, `--mode json`) waits for the run's background jobs instead of cancelling them at exit, and starts another turn in the same session with each result; same as `--wait-async`. |
@@ -899,7 +911,7 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `followUpMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`.                                                                                 |
 | `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
 | `doubleEscapeAction`   | enum    | `rewind`          | `rewind`, `tree`, `none`: open the rewind selector, open the session tree, or do nothing. |
-| `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
+| `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd. If its saved model cannot be restored without forbidden fallback, implicit interactive startup warns and starts a new session without the old history; explicit resume and headless behavior are unchanged. |
 | `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
 | `plan.defaultOnStartup` | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
 | `ask.timeout`          | number  | `0`             | Auto-select the recommended ask option after this many seconds; `0` disables automatic selection. Also bounds `cfg://` approval prompts; an unanswered approval denies the write instead of auto-selecting. |
@@ -1019,7 +1031,7 @@ Every schema path not individually tabulated in this catalog is explicitly defer
 
 - Agent behavior and safety: `ask.*`, `dev.*`, `eval.*`, `features.*`, `goal.*`, `loop.*`, `model.loopGuard.*`, `model.toolCallLoopGuard.*`, `prewalk.*`, `recap.*`, `sharpshooter.*`, `task.*`, `tools.*`, and `vault.*`.
 - Execution and content: `commit.*`, `completion.*`, `edit.*`, `error.*`, `extensionHandlers.*`, `generate_image.*`, `git.*`, `images.*`, `live.*`, `paste.*`, `power.*`, `read.*`, `shellMinimizer.*`, `speech.*`, `terminal.*`, and `title.*`.
-- Interface and startup: `composer.*`, `display.*`, `input.*`, `marketplace.*`, `spelling.*`, `statusLine.*`, `startup.*`, `stt.*`, `tui.*`, `ttsr.*`, and `update.*`.
+- Interface and startup: `composer.*`, `display.*`, `extensionRenderers.*`, `input.*`, `marketplace.*`, `spelling.*`, `statusLine.*`, `startup.*`, `stt.*`, `tui.*`, `ttsr.*`, and `update.*`. `extensionRenderers.assistantText` (default `false`) enables [assistant text renderers](./extensions.md#assistant-text-renderer).
 - Discovery, sharing, and auth: `auth.*`, `browser.*`, `claudeResets.*`, `codexResets.*`, `collab.*`, `commands.*`, `contextFiles.*`, `gc.*`, `ida.*`, `mcp.*`, `share.*`, `skills.*`, `stream.*`, and `telemetry.*`. `contextFiles.extra` is documented in [Context files](./context-files.md#extra-filenames).
 - Ungrouped keys: `setupVersion`, `proseOnlyThinking`, `omitThinking`, `externalThinking`, `includeWorkspaceTree`, `autocompleteMaxVisible`, `emojiAutocomplete`, `disabledExtensions`, `inlineToolDescriptors`, and `treeFilterMode`.
 

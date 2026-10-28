@@ -4,6 +4,28 @@
 
 ### Added
 
+- `PI_INTENT_DESC` replaces the schema description of the injected `i` intent field
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+### Fixed
+
+- Fixed chat-completions context estimates counting past thinking that the request drops (no reasoning replay), which triggered compaction far below the threshold ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#17231](https://github.com/can1357/oh-my-pi/pull/17231) by [@ghisguth](https://github.com/ghisguth))
+
+## [18.13.2] - 2026-10-27
+
+### Added
+
+- `AgentTool` gained the optional `handlesToolInterrupt` flag: an interruptible tool that sets it (such as `wait`) still runs, without blocking, when a loop-owned interrupt is already queued, so it can drain the queued wake event instead of being skipped; user cancellation still skips it ([#17174](https://github.com/can1357/oh-my-pi/pull/17174) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.13.1] - 2026-10-27
+
+### Added
+
 - Hosts can distinguish safely paused agents from turns still draining with `Agent.isPaused` ([#17073](https://github.com/can1357/oh-my-pi/pull/17073) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.13.0] - 2026-10-26
