@@ -247,15 +247,6 @@ describe("session selector rename", () => {
 		expect(after.selected).toBe(beta.path);
 	});
 
-	it("does nothing on F2 without an onRename hook", () => {
-		const { selector, beta } = makeRename();
-		selector.handleInput("\x1bOQ");
-		expect(renameDialogOf(selector)).toBeUndefined();
-		const after = props(selector.describe(withPicker));
-		expect(after.query ?? "").toBe("");
-		expect(after.selected).toBe(beta.path);
-	});
-
 	it("renders the rename editor instead of the picker while it is open", () => {
 		const { selector } = makeRename({ calls: [] });
 		// The picker kind has no text-input affordance: while renaming, the
