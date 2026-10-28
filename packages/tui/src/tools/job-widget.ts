@@ -190,20 +190,13 @@ function headlineGlance(view: JobWidgetView): JobWidgetGlance | undefined {
 	};
 }
 
-/** The leading figure of a formatted value: `140` of `140/190`, `1.10k` of `1.10k req/s`. */
-const FIGURE_LEAD = /^\s*([-+]?(?:\d[\d,]*(?:\.\d+)?|\.\d+)[kKMGT]?%?)/;
-
-/**
- * The meter's whole when the headline only repeats its numerator: `140` over a
- * bar reading `140/190` says nothing about how far the job got, so the glance
- * reads `140/190` instead. Undefined when no meter restates the headline.
- */
+/** The meter's `140/190` when the headline only restates its numerator (`140`). */
 function meterWhole(headline: JobWidgetGlance, view: JobWidgetView): string | undefined {
 	const meter = view.blocks.find((block): block is JobWidgetMeterBlock => block.kind === "meter");
 	const whole = meter ? plainLine(meter.text) : "";
-	if (!whole || whole === headline.text) return undefined;
-	const lead = FIGURE_LEAD.exec(headline.text)?.[1];
-	return lead !== undefined && lead === FIGURE_LEAD.exec(whole)?.[1] ? whole : undefined;
+	return /^\s*\/\s*\S/.test(whole.slice(headline.text.trim().length)) && whole.startsWith(headline.text.trim())
+		? whole
+		: undefined;
 }
 
 /** What one glance at the widget reads: the headline, else the latest figure of its first spark or meter. */
