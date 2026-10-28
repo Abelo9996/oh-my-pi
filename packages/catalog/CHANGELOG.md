@@ -5,6 +5,7 @@
 ### Added
 
 - Added DeepSeek V4.1 Flash 1017 to the Factory Droid provider for accounts with Factory's 1017 flag; turning thinking off on its Baseten route disables reasoning instead of falling back to low effort ([#17234](https://github.com/can1357/oh-my-pi/pull/17234) by [@skipper019](https://github.com/skipper019))
+
 ### Changed
 
 - Updated Bun engine requirement to ≥1.4.4
