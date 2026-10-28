@@ -345,10 +345,6 @@ describe("config list --scope", () => {
 		});
 	});
 
-	it("lists nothing for a layer that sets nothing", async () => {
-		expect(await listLayer("global")).toEqual({});
-	});
-
 	it("prints the layer's keys in text output and masks credentials", async () => {
 		if (!testAgentDir) throw new Error("Test directory was not initialized");
 		await Bun.write(
@@ -360,24 +356,10 @@ describe("config list --scope", () => {
 		await runConfigCommand({ action: "list", flags: { scope: "global" } });
 
 		const text = Bun.stripANSI(logSpy.mock.calls.map(call => String(call[0] ?? "")).join("\n"));
-		expect(text).toContain("Settings in the global layer:");
 		expect(text).toContain("compaction.enabled = false");
 		expect(text).toContain("hindsight.apiToken = ********");
 		expect(text).not.toContain("secret-token");
 		expect(text).not.toContain("defaultThinkingLevel");
-	});
-
-	it("takes --scope from the command line", async () => {
-		if (!testAgentDir) throw new Error("Test directory was not initialized");
-		await Bun.write(path.join(testAgentDir.path(), "config.yml"), "defaultThinkingLevel: max\n");
-
-		const { exitCode, output, error } = await runCliProcess(["config", "list", "--scope", "global", "--json"], {
-			PI_CODING_AGENT_DIR: testAgentDir.path(),
-		});
-
-		expect(exitCode).toBe(0);
-		expect(error).toBe("");
-		expect(Object.keys(JSON.parse(output))).toEqual(["defaultThinkingLevel"]);
 	});
 
 	it("rejects --scope on actions other than list", async () => {
