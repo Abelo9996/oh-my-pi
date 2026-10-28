@@ -73,8 +73,6 @@ export class RpcLiveBridge {
 	}
 
 	/** Connects a live session and resolves once it is recording (or, with `sdpOffer`, once the call is signaled). */
-	start(options: RpcLiveStartOptions & { sdpOffer: string }): Promise<Required<RpcLiveStartResult>>;
-	start(options?: RpcLiveStartOptions): Promise<RpcLiveStartResult>;
 	async start(options: RpcLiveStartOptions = {}): Promise<RpcLiveStartResult> {
 		if (this.#controller) throw new Error("A live session is already active");
 		const voice = resolveLiveVoice(this.#session.settings, options.voice);

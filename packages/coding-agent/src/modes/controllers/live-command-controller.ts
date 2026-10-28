@@ -88,7 +88,6 @@ export class LiveCommandController {
 		if (typeof options.sdpOffer !== "string" || !options.sdpOffer.trim()) {
 			throw new Error("startLive requires a non-empty sdpOffer");
 		}
-		if (this.#session) throw new Error("A live session is already active");
 		while (this.#settling) await this.#settling;
 		const voice = resolveLiveVoice(this.#ctx.settings, options.voice);
 		const outcome = await this.#start(voice, options);

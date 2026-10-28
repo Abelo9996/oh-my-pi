@@ -2361,41 +2361,24 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return success(id, "set_host_tools", { toolNames: tools.map(tool => tool.name) });
 			}
 
-			case "live_start": {
-				if (dictationBridge.active) return error(id, "live_start", "End dictation before starting live voice");
-				if (sessionChangesInProgress > 0 || shutdownState.requested)
-					return error(id, "live_start", "Session is changing or shutting down");
-				try {
-					return success(
-						id,
-						"live_start",
-						await liveBridge.start({ voice: command.voice, instructions: command.instructions }),
-					);
-				} catch (err) {
-					return error(id, "live_start", err instanceof Error ? err.message : String(err));
-				}
-			}
-
+			case "live_start":
 			case "live_connect": {
-				// The frame is untyped input: without an offer, the bridge would open the host microphone.
-				if (typeof command.sdpOffer !== "string" || !command.sdpOffer.trim()) {
-					return error(id, "live_connect", "live_connect requires a non-empty sdpOffer");
+				const sdpOffer = command.type === "live_connect" ? command.sdpOffer : undefined;
+				// The frame is untyped input: without an offer, live_connect would open the host microphone.
+				if (command.type === "live_connect" && (typeof sdpOffer !== "string" || !sdpOffer.trim())) {
+					return error(id, command.type, "live_connect requires a non-empty sdpOffer");
 				}
-				if (dictationBridge.active) return error(id, "live_connect", "End dictation before starting live voice");
+				if (dictationBridge.active) return error(id, command.type, "End dictation before starting live voice");
 				if (sessionChangesInProgress > 0 || shutdownState.requested)
-					return error(id, "live_connect", "Session is changing or shutting down");
+					return error(id, command.type, "Session is changing or shutting down");
 				try {
 					return success(
 						id,
-						"live_connect",
-						await liveBridge.start({
-							sdpOffer: command.sdpOffer,
-							voice: command.voice,
-							instructions: command.instructions,
-						}),
+						command.type,
+						await liveBridge.start({ voice: command.voice, instructions: command.instructions, sdpOffer }),
 					);
 				} catch (err) {
-					return error(id, "live_connect", err instanceof Error ? err.message : String(err));
+					return error(id, command.type, err instanceof Error ? err.message : String(err));
 				}
 			}
 
