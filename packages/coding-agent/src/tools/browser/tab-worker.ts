@@ -3552,10 +3552,8 @@ export class WorkerCore {
 	}
 
 	/**
-	 * What `Worker.terminate()` does to an isolated worker, for an inline one that shares the host's thread: stop
-	 * taking messages, abort the run in flight, and drop the browser connection. A core left connected keeps its
-	 * relay session on the tab, which keeps Chrome's debugger (and its "started debugging" bar) attached. It also
-	 * drops the connection under a close still in progress, which a wedged CDP socket can hold up indefinitely.
+	 * Inline counterpart of `Worker.terminate()`: stop taking messages, abort the active run, and drop the browser
+	 * connection (a connected core keeps Chrome's debugger attached to the tab), even under a close in progress.
 	 */
 	terminate(): void {
 		this.#stop();
