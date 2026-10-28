@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `read` rejecting artifact URLs from truncation hints when cached approvals or restricted folders are configured.
+
 ## [18.13.3] - 2026-10-28
 
 ### Added
