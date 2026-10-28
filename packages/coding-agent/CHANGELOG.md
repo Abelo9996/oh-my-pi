@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Manual compactions (RPC `compact`, `/compact`, extension `ctx.compact()`) emit `manual_compaction_start` and `manual_compaction_end` session events, so RPC hosts can show compaction progress; `docs/rpc.md` documents these with the other progress events (`retry_fallback_applied`, `ttsr_triggered`, `goal_updated`)
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
