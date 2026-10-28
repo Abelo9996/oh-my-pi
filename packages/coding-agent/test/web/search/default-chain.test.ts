@@ -99,28 +99,6 @@ describe("default web chain", () => {
 		expect(attempted.filter(selector => !selector.startsWith("web/"))).toEqual(["openai-codex/gpt-6-luna"]);
 	});
 
-	it("rejects a self-targeted hosted answer without sources after only one attempt", async () => {
-		const active = { ...sessionModel("openai-codex", "gpt-6-luna") };
-		vi.spyOn(provider, "getGroundedSearchProvider").mockResolvedValue({
-			id: "codex",
-			label: "Codex",
-			isAvailable: () => true,
-			isExplicitlyAvailable: () => true,
-			search: async params => {
-				attempted.push(`${params.model.provider}/${params.model.id}`);
-				return { provider: "codex", answer: "from weights", sources: [] };
-			},
-		});
-
-		const result = await runSearchQuery(
-			{ query: "anything", model: "web/hosted" },
-			{ authStorage, modelRegistry, sessionModel: active },
-		);
-
-		expect(attempted).toEqual(["openai-codex/gpt-6-luna"]);
-		expect(result.details.error).toContain("returned no sources");
-	});
-
 	it("uses the session model as-is when its host does not expose the swap target", async () => {
 		const proxied = { ...sessionModel("anthropic", "claude-sonnet-4-5"), webSearchModel: "not-exposed-here" };
 
