@@ -813,6 +813,41 @@ describe("persisted subagent revival", () => {
 		expect(revived.thinkingLevel).toBe(level);
 	});
 
+	it("revives a per-call worker on its exact model, not on a session-local switch", async () => {
+		const models = [perCallModelFixture("coding-router"), perCallModelFixture("switched")];
+		const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async options =>
+				({
+					session: Object.assign(createRevivedSession([]).session, { model: options?.model }),
+				}) as CreateAgentSessionResult,
+		);
+		const cwd = makeTempDir("@pi-revive-per-call-switched-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			perCallModel: true,
+			resolvedModel: "mock/coding-router",
+			perCallModelIdentity: "mock/coding-router",
+			perCallThinkingLevel: Effort.Low,
+		});
+		// A focused worker can still be switched by hand; that persists a session-local model change.
+		const manager = await SessionManager.open(sessionFile);
+		manager.appendModelChange("mock/switched", "temporary");
+		await manager.close();
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, {
+			modelRegistry: {
+				authStorage: {},
+				awaitBackgroundRefresh: async () => {},
+				getAvailable: () => models,
+				getAll: () => models,
+			} as unknown as ModelRegistry,
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+
+		const revived = await reviver(ref);
+		expect(`${revived.model?.provider}/${revived.model?.id}`).toBe("mock/coding-router");
+		expect(create.mock.calls[0]?.[0]?.modelPattern).toBeUndefined();
+	});
+
 	it.each([
 		{ identity: undefined, level: Effort.Low },
 		{ identity: "mock/coding-router", level: undefined },

@@ -4173,7 +4173,9 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		// fork's selections belong to its source run, never to the consult.
 		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
 		const sessionLocalModel =
-			capture.spec.preparedSession || capture.perCallModel ? undefined : reopened.getSessionLocalModelChange()?.model;
+			capture.spec.preparedSession || capture.perCallModel
+				? undefined
+				: reopened.getSessionLocalModelChange()?.model;
 		try {
 			try {
 				const options = buildSubagentSessionOptions(
