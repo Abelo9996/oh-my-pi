@@ -6078,7 +6078,7 @@ export function buildCursorSystemPromptJsons(systemPrompt: readonly string[] | u
  * rebuilding this entry, so the client carries it (as the native CLI does) right
  * after the system entries. Undefined when there is no system prompt (#17059).
  */
-export function buildCursorRulesEntryJson(systemPrompt: readonly string[] | undefined): string | undefined {
+function buildCursorRulesEntryJson(systemPrompt: readonly string[] | undefined): string | undefined {
 	const systemPrompts = normalizeSystemPrompts(systemPrompt);
 	if (systemPrompts.length === 0) return undefined;
 	return JSON.stringify({ role: "user", content: `<rules>\n${systemPrompts.join("\n\n")}\n</rules>` });
