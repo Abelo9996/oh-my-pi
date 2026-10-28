@@ -2708,7 +2708,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				extensionRunner.onSuspensionChange(() => {
 					if (!cfgExtensionAssistantTextRenderers.get(this.settings)) return;
 					this.#eventController.applyAssistantTextRenderers();
-					// Before the first transcript replay commits, that replay draws with the current set.
+					// A transcript replay in flight builds its components again before it commits.
+					if (this.#uiHelpers.restartTranscriptReplay()) return;
+					// Before the first transcript replay, that replay draws with the current set.
 					if (!this.initialChatRendered) return;
 					this.rebuildChatFromMessages();
 					this.ui.resetDisplay();

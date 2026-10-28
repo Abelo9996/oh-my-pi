@@ -239,6 +239,10 @@ export class UiHelpers {
 	#replaysInFlight = 0;
 	/** `initialChatRendered` to restore when the latest replay ends without committing. */
 	#chatRenderedBeforeReplay = false;
+	/** Bumped by {@link restartTranscriptReplay}; a replay pass that saw it move rebuilds again. */
+	#textRendererSetVersion = 0;
+	/** The text renderer set changed while a replay was in flight; the commit retires stale scrollback. */
+	#textRendererSetChangedDuringReplay = false;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -1070,6 +1074,19 @@ export class UiHelpers {
 		return run;
 	}
 
+	/**
+	 * Make a transcript replay still in flight rebuild its components with the current extension
+	 * text renderers before it commits. Components take the renderer set when built, so a set that
+	 * changes while a replay yields would otherwise stay on the committed transcript. Returns
+	 * whether a replay was in flight; the caller then leaves the redraw to it.
+	 */
+	restartTranscriptReplay(): boolean {
+		if (this.#replaysInFlight === 0) return false;
+		this.#textRendererSetVersion++;
+		this.#textRendererSetChangedDuringReplay = true;
+		return true;
+	}
+
 	async #renderInitialMessages(options: RenderInitialMessagesOptions, generation: number): Promise<void> {
 		if (generation !== this.#replayGeneration) return;
 		// Collapsed replay keeps in-flight calls so pending tools remain routable during mid-turn rebuilds.
@@ -1115,6 +1132,7 @@ export class UiHelpers {
 			this.ctx.pendingBashComponents = [];
 			this.ctx.pendingPythonComponents = [];
 			while (true) {
+				const passRendererSetVersion = this.#textRendererSetVersion;
 				if (this.ctx.viewSession.isStreaming) {
 					// Live events mutate the same component maps; keep their replay atomic so
 					// a delta cannot land halfway through rebuilding its pending tool block.
@@ -1123,7 +1141,8 @@ export class UiHelpers {
 					await this.ctx.renderSessionContextIncrementally(context, renderOptions);
 				}
 				if (generation !== this.#replayGeneration) return;
-				if (this.ctx.viewSession.sessionManager.getEntries().length === replayEntryCount) {
+				const entriesChanged = this.ctx.viewSession.sessionManager.getEntries().length !== replayEntryCount;
+				if (!entriesChanged && passRendererSetVersion === this.#textRendererSetVersion) {
 					break;
 				}
 				replayAttempts++;
@@ -1138,10 +1157,10 @@ export class UiHelpers {
 					});
 					break;
 				}
-				// An extension persisted a display message while the transcript replay
-				// yielded. The display callback stayed gated by initialChatRendered;
-				// discard the stale partial tree and replay the current session once
-				// more instead of letting a reentrant synchronous rebuild interleave.
+				// An extension persisted a display message, or the extension text renderer set
+				// changed, while the transcript replay yielded. The display callback stayed gated by
+				// initialChatRendered; discard the stale partial tree and replay the current session
+				// once more instead of letting a reentrant synchronous rebuild interleave.
 				context = this.ctx.viewSession.buildTranscriptSessionContext({
 					collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
 					keepInFlightToolCalls: this.ctx.viewSession.isStreaming,
@@ -1189,7 +1208,11 @@ export class UiHelpers {
 				const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
 				this.ctx.showStatus(`Session compacted ${times}`);
 			}
-			if (options.clearTerminalHistory) {
+			// Rows of the previous transcript already in native scrollback were drawn with the old
+			// text renderer set; retire them as the direct renderer-change rebuild does.
+			const staleRendererRows = this.#textRendererSetChangedDuringReplay && this.#chatRenderedBeforeReplay;
+			this.#textRendererSetChangedDuringReplay = false;
+			if (options.clearTerminalHistory || staleRendererRows) {
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 			} else {
 				this.ctx.ui.requestRender();

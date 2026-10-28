@@ -56,7 +56,8 @@ describe("assistant text renderers of a suspended extension", () => {
 		resetSettingsForTest();
 	});
 
-	it("stops drawing with them while suspended, and draws with them again on resume", async () => {
+	/** Start the mode with one extension whose text renderer upper-cases "now", and store a reply. */
+	async function initWithShoutingExtension(): Promise<ExtensionRunner> {
 		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
 		const extension: Extension = {
 			path: "/test/shout.ts",
@@ -102,12 +103,18 @@ describe("assistant text renderers of a suspended extension", () => {
 			},
 			timestamp: 1,
 		});
+		return runner;
+	}
+
+	const chat = () =>
+		mode.chatContainer
+			.render(120)
+			.map(row => Bun.stripANSI(row).trimEnd())
+			.join("\n");
+
+	it("stops drawing with them while suspended, and draws with them again on resume", async () => {
+		const runner = await initWithShoutingExtension();
 		await mode.renderInitialMessages();
-		const chat = () =>
-			mode.chatContainer
-				.render(120)
-				.map(row => Bun.stripANSI(row).trimEnd())
-				.join("\n");
 		expect(chat()).toContain("Read this NOW.");
 
 		// A live `disabledExtensions` edit suspends it: the transcript is drawn without its renderer.
@@ -120,5 +127,25 @@ describe("assistant text renderers of a suspended extension", () => {
 		// A redraw may be queued as a microtask.
 		await Promise.resolve();
 		expect(chat()).toContain("Read this NOW.");
+	});
+
+	it("redraws a transcript replay that was building when the extension was suspended", async () => {
+		const runner = await initWithShoutingExtension();
+		await mode.renderInitialMessages();
+		expect(chat()).toContain("Read this NOW.");
+
+		// Suspend after the replay built its components with the renderer, before it commits.
+		const renderIncrementally = mode.renderSessionContextIncrementally.bind(mode);
+		let suspendAfterPass = true;
+		mode.renderSessionContextIncrementally = async (context, options, renderChunk) => {
+			await renderIncrementally(context, options, renderChunk);
+			if (!suspendAfterPass) return;
+			suspendAfterPass = false;
+			runner.setSuspendedExtensions(() => true);
+		};
+		await mode.renderInitialMessages();
+		expect(suspendAfterPass).toBe(false);
+		expect(chat()).toContain("Read this now.");
+		expect(chat()).not.toContain("NOW");
 	});
 });
