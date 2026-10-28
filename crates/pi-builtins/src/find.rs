@@ -5115,7 +5115,8 @@ mod tests {
 				.join()
 				.unwrap()
 		};
-		let leaf = leaf.display().to_string();
+		// find joins operand and names with '/', not the OS separator (Windows `display()` uses '\').
+		let leaf = format!("deep{}/f", "/d".repeat(depth));
 
 		let (code, out, err) = find(&["deep", "-name", "f"]);
 		assert_eq!((code, out, err.as_str()), (0, format!("{leaf}\n"), ""));

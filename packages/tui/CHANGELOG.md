@@ -2,14 +2,32 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
 ### Fixed
 
-- Fixed `run_watch` failed-job rows hiding why a job's logs are unavailable; multiline `gh` errors now stay on one row ([#17173](https://github.com/can1357/oh-my-pi/pull/17173) by [@alphastorm](https://github.com/alphastorm))
+- Restored WebP and JPEG images stay visible in Kitty scrollback after resuming a session ([#17220](https://github.com/can1357/oh-my-pi/issues/17220)).
+- Escape in an annotation note no longer discards it: the overlay closes and `getDraft()`/`restoreDraft()` let the host keep and reopen the note; **Discard notes and close** (confirmed by a second press) clears them instead, and code review's actions start on Paste so a stray Enter never sends the LLM review ([#17271](https://github.com/can1357/oh-my-pi/pull/17271) by [@H4vC](https://github.com/H4vC), based on [#17230](https://github.com/can1357/oh-my-pi/pull/17230) by [@Shadorain](https://github.com/Shadorain)).
+- Fixed terminal replies such as Tern's `tsp;e;{"ev":"ack",…}` showing up in the shell prompt after quitting omp; the exit drain now waits for the terminal to answer a final DA1 sentinel
+- Fixed the plan review sheet in Tern squeezing the "continue with" model tiers under a long plan, so the model name overlapped the tier buttons
+- `/usage` in Tern shows when each quota resets as a countdown (`resets in 2h30m`) instead of a clock time; hovering shows the date and time
+- Fixed extension `ui.select` dialogs treating unconfigured `j`/`k` keys as navigation, which could turn a default No into Yes when typing `ok` then Enter ([#17255](https://github.com/can1357/oh-my-pi/pull/17255) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT)).
+
+## [18.13.2] - 2026-10-27
+
 ### Added
 
 - Added a frame-write listener (`TUI.addFrameWriteListener`) for terminal integrations that need to react to emitted ANSI output, including resize paints ([#17145](https://github.com/can1357/oh-my-pi/issues/17145))
 - `HookInputComponent` (`showHookInput`) now accepts `{ secret: true }` to mask typed characters as bullets (`•`) in input overlays ([#17080](https://github.com/can1357/oh-my-pi/pull/17080) by [@GTanger](https://github.com/GTanger))
 - Added an ANSI and native `/context` viewer with category navigation, content inspection, token-usage and compaction estimates, and keyboard/mouse controls that adapt across Tern and other terminals ([#16160](https://github.com/can1357/oh-my-pi/pull/16160) by [@C-W-Z](https://github.com/C-W-Z)).
+
+### Fixed
+
+- Fixed `AskDialogComponent`'s draft input guard holding the keyboard until the draft was cleared; Up/Down (or a pointer action) now release it so the question can be answered with the draft parked, and `syncPresentation` receives the effective blocked state ([#17215](https://github.com/can1357/oh-my-pi/pull/17215) by [@H4vC](https://github.com/H4vC))
+- Fixed the prompt editor's autocomplete popup (e.g. emoji suggestions after `:D`) staying open and following the cursor after Shift/Ctrl/Alt+Enter inserted a newline, so the next Enter submitted past a stale list; newlines and cursor motion (arrows, Home/End, word jumps, character jumps) now close it ([#17215](https://github.com/can1357/oh-my-pi/pull/17215) by [@H4vC](https://github.com/H4vC))
+- Fixed `run_watch` failed-job rows hiding why a job's logs are unavailable; multiline `gh` errors now stay on one row ([#17173](https://github.com/can1357/oh-my-pi/pull/17173) by [@alphastorm](https://github.com/alphastorm))
 
 ### Removed
 
