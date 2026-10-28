@@ -45,6 +45,7 @@ Use the interactive `/settings` panel inside a session, or the `omp config` comm
 ```bash
 omp config list                 # all settings with current effective values
 omp config list --json          # same, machine-readable
+omp config list --scope global --json   # only what config.yml sets, as written
 omp config get theme.dark       # one value
 omp config get theme.dark --json
 omp config set compaction.enabled false
@@ -65,14 +66,14 @@ This only controls the startup splash animation. It does not rerun setup or chan
 
 | Command                        | Effect                                                                                                                                                                                                                                                                                            |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `omp config list`              | Print every setting grouped by tab, with its current value and type. `--json` emits an object keyed by setting path with `{ value, type, description }`. Configured credential fields are masked as `********` in human output; in JSON their `value` is omitted and `redacted: true` is emitted. |
+| `omp config list`              | Print every setting grouped by tab, with its current value and type. `--json` emits an object keyed by setting path with `{ value, type, description }`. Configured credential fields are masked as `********` in human output; in JSON their `value` is omitted and `redacted: true` is emitted. With `--scope global` or `--scope project`, it lists only the keys that layer (`config.yml`, or the project's settings files for the current directory) sets, with the values as the layer holds them: path-scoped arrays (`enabledModels`, `enabledProviders`, `disabledProviders`) keep their `{ path, … }` entries instead of resolving them for the current directory, and `--json` emits `{ value, type, description }` per key. Defaults, other layers and environment variables are not consulted. |
 | `omp config get <key>`         | Print the effective value of one key. Unknown keys exit non-zero. `--json` emits `{ key, value, type, description }`. This is an explicit single-key request, so credential values are returned unmasked.                                                                                         |
 | `omp config set <key> <value>` | Parse `<value>` against the key's schema type, write it to the global main YAML file, and print the value written. When another source still supplies the effective value, it says which instead (`--json`: `overriddenBy` is the env var name, or `project`, `overlay`, or `runtime`; `fallbackEnv` names a fallback env var used while the saved value is blank). |
 | `omp config reset <key>`       | Delete the global key, allowing another configured layer or the schema default to apply. Prints the resulting effective value, masking non-empty credentials as `********`; JSON omits a credential's `value` and emits `{ key, redacted: true }`. |
 | `omp config path`              | Print the active agent directory (honors `PI_CODING_AGENT_DIR`).                                                                                                                                                                                                                                  |
 | `omp config init-xdg`          | On Linux and macOS, create the `omp` directories under the effective XDG data, state, and cache homes. It does not move existing files or set the XDG environment variables. Other platforms exit non-zero.                                                                                       |
 
-`omp config` with no subcommand lists settings. `--help` or `-h` displays command help. The `--json` flag is accepted by `list`, `get`, `set`, and `reset`.
+`omp config` with no subcommand lists settings. `--help` or `-h` displays command help. The `--json` flag is accepted by `list`, `get`, `set`, and `reset`. `--scope` is accepted by `list` only.
 
 ### Value parsing
 
@@ -629,6 +630,7 @@ tools:
 | `tools.xdev` | boolean | `true` | Mount discoverable tools under `xd://` device URLs instead of exposing every schema directly. Disabling it exposes enabled tools top-level. |
 | `tools.xdevDocs` | enum | `catalog` | `inline` includes all mounted docs/schemas, `builtins` inlines built-ins only, `catalog` lists devices with docs fetched on demand. |
 | `tools.xdevInlineDevices` | array | `[]` | Dynamic-device name globs to inline in `builtins` mode; ignored in `catalog` mode. |
+| `tools.xdevNotices` | boolean | `true` | Show the `xd://: mounted …` / `unmounted …` notice when MCP or extension tools mount or unmount. Off hides only the notice; the model still learns of the change with its next prompt. `startup.quiet: true` also hides it. |
 | `async.enabled` | boolean | `true` | Enable async bash commands and background task execution. |
 | `async.maxJobs` | number | `100` | Running background-job cap, floored to at least 1; parked/queued jobs do not consume execution slots. |
 | `async.printWake` | boolean | `false` | Print mode (`-p`, `--mode json`) waits for the run's background jobs instead of cancelling them at exit, and starts another turn in the same session with each result; same as `--wait-async`. |

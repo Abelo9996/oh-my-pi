@@ -40,12 +40,8 @@ import {
 } from "@oh-my-pi/pi-wire";
 import type { Terminal } from "../terminal";
 import {
-	bindTheme,
 	getCurrentThemeName,
-	getNativeThemePalette,
-	getNativeThemePaletteKey,
 	isLightTheme,
-	type NativeThemePalette,
 	setNativeSymbolPreset,
 } from "../theme/theme";
 import type { Component, OverlayOptions, RenderScheduler, RenderTimer } from "../tui";
@@ -313,11 +309,6 @@ export class NativeBackend {
 	#sawResize = false;
 	#live = false;
 	#overlayNodes = new Map<Component, { key: string; node: NativeNode }>();
-	#unbindTheme: (() => void) | undefined;
-	#palette: NativeThemePalette | undefined;
-	#paletteKey: string | undefined;
-	/** Serialized palette last sent, to skip resends of an unchanged theme. */
-	#paletteSent: string | undefined;
 	/** Pending delivery owns bytes until sent or confirmed held; settled descriptions may already be released. */
 	#blobs = new Map<string, NativeBlob | "sent">();
 	/** `blobs` queries sent, oldest first: the terminal answers each once, in order. */
@@ -366,52 +357,9 @@ export class NativeBackend {
 		if (this.#live) return;
 		this.#live = true;
 		this.#useNerdSymbols(true);
-		this.#watchTheme();
 		this.#open(this.#inline);
 		setNativeRendering(true);
 		this.render();
-	}
-
-	/**
-	 * Any theme swap (switch, selector preview, auto light/dark, file reload)
-	 * schedules a render; `render()` resends the palette when it changed, so
-	 * bursts coalesce into one `t` and no frame is needed for it.
-	 */
-	#watchTheme(): void {
-		this.#unbindTheme?.();
-		let initial = true;
-		this.#unbindTheme = bindTheme(() => {
-			if (initial) return;
-			this.#host.requestRender();
-		});
-		initial = false;
-	}
-
-	/** The current palette, recomputed only when its inputs changed. */
-	#currentPalette(): NativeThemePalette {
-		const key = getNativeThemePaletteKey();
-		if (this.#palette === undefined || key !== this.#paletteKey) {
-			this.#paletteKey = key;
-			this.#palette = getNativeThemePalette();
-		}
-		return this.#palette;
-	}
-
-	/** Send the palette to `surface` (right after its `o`, before any `f`). */
-	#sendPalette(surface: Surface): void {
-		const palette = this.#currentPalette();
-		if (!palette.dark && !palette.light) return;
-		this.#paletteSent = JSON.stringify(palette);
-		this.#write("t", { sf: surface.id, ...palette });
-	}
-
-	/** Resend the palette to every open surface when the theme changed since it was sent. */
-	#refreshPalette(): void {
-		const key = this.#paletteKey;
-		const palette = this.#currentPalette();
-		if (key === this.#paletteKey || JSON.stringify(palette) === this.#paletteSent) return;
-		this.#sendPalette(this.#inline);
-		if (this.#screen) this.#sendPalette(this.#screen);
 	}
 
 	/**
@@ -435,8 +383,6 @@ export class NativeBackend {
 		this.#close(this.#inline, keep);
 		this.#inline.doc?.close();
 		setNativeRendering(false);
-		this.#unbindTheme?.();
-		this.#unbindTheme = undefined;
 		this.#useNerdSymbols(false);
 		this.#clearStallTimer();
 		// Replies no longer reach the backend: forget the queries outright.
@@ -455,7 +401,6 @@ export class NativeBackend {
 		this.#applyHello(hello);
 		this.#live = true;
 		this.#useNerdSymbols(true);
-		this.#watchTheme();
 		this.#resetBlobs();
 		const surface = this.#inline;
 		surface.reconciler.detachLive();
@@ -466,7 +411,6 @@ export class NativeBackend {
 		surface.focus = null;
 		surface.dirty = false;
 		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
-		this.#sendPalette(surface);
 		// After the `o`, as in `start()`.
 		setNativeRendering(true);
 		this.render();
@@ -508,7 +452,6 @@ export class NativeBackend {
 	/** Reconcile and send a frame, unless the target surface is out of credits. */
 	render(): void {
 		if (!this.#live) return;
-		this.#refreshPalette();
 		const overlays = this.#host.overlays();
 		let fullscreen = -1;
 		for (let i = overlays.length - 1; i >= 0; i--) {
@@ -608,7 +551,6 @@ export class NativeBackend {
 
 	#open(surface: Surface): void {
 		this.#write("o", { id: surface.id, mode: surface.mode, title: "omp", role: surface.role });
-		this.#sendPalette(surface);
 	}
 
 	#close(surface: Surface, keep: boolean): void {
@@ -776,7 +718,7 @@ export class NativeBackend {
 		}
 	}
 
-	#write(verb: "o" | "f" | "t" | "x" | "q", body: unknown): void {
+	#write(verb: "o" | "f" | "x" | "q", body: unknown): void {
 		this.#record("out", verb, undefined, body);
 		this.#host.terminal.write(encodeTspJson(verb, body, undefined, this.#limit));
 	}
