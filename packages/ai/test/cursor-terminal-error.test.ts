@@ -719,16 +719,17 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 	);
 
 	it.each([
-		// A zero-token PROVIDER_ERROR poisons the conversation, so the provider
-		// rotates the wire id and marks this one attempt transient; the caller's
-		// retry rebuilds on the fresh id. A rejection after visible output is not
-		// a conversation poison and keeps Cursor's non-retryable verdict.
-		{ isRetryable: false, retriable: true, status: 400, sawTokens: false },
+		// This fixture has no session or conversation id, so it uses the
+		// ephemeral path. Its fresh one-off conversation cannot be poisoned by
+		// an earlier cut, and `finally` discards the rotation; Cursor's
+		// isRetryable verdict must stand. The persistent rotated case is covered
+		// by `cursor-conversation-rotate.test.ts`.
+		{ isRetryable: false, retriable: false, status: 400, sawTokens: false },
 		{ isRetryable: false, retriable: false, status: 400, sawTokens: true },
 		{ isRetryable: true, retriable: true, status: 503, sawTokens: false },
 		{ isRetryable: undefined, retriable: true, status: 503, sawTokens: false },
 	])(
-		"recovers a rotated zero-token PROVIDER_ERROR (isRetryable=$isRetryable, sawTokens=$sawTokens)",
+		"keeps Cursor's verdict on an ephemeral zero-token PROVIDER_ERROR (isRetryable=$isRetryable, sawTokens=$sawTokens)",
 		async ({ isRetryable, retriable, status, sawTokens }) => {
 			scenario = { kind: "connect-provider-error-after-step", isRetryable, sawTokens };
 			const baseUrl = await startServer();

@@ -1857,7 +1857,9 @@ function streamCursorWithWireMode(
 					from: conversationId,
 					to: rotated,
 				});
-				rotatedRejection = true;
+				// Ephemeral calls discard the rotation in `finally`, so keep
+				// Cursor's non-retryable verdict there.
+				rotatedRejection = !ephemeralConversation;
 			}
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
