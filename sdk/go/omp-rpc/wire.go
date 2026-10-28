@@ -5144,6 +5144,113 @@ func (v LiveEndEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"live_end"`, nil)
 }
 
+// State of one draft-only microphone capture.
+type DictationStateEvent struct {
+	CaptureID string                   `json:"captureId"`
+	State     DictationStateEventState `json:"state"`
+}
+
+func (v *DictationStateEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DictationStateEvent", v.decodeFrom)
+}
+
+func (v *DictationStateEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DictationStateEvent
+	d := fieldDecoder{raw: raw, owner: "DictationStateEvent"}
+	d.constant("type", "dictation_state")
+	d.required("captureId", &out.CaptureID)
+	d.required("state", &out.State)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DictationStateEvent) MarshalJSON() ([]byte, error) {
+	type plain DictationStateEvent
+	return encodeObject(plain(v), `"type":"dictation_state"`, nil)
+}
+
+type DictationStateEventState string
+
+const (
+	DictationStateEventStateStarting     DictationStateEventState = "starting"
+	DictationStateEventStateRecording    DictationStateEventState = "recording"
+	DictationStateEventStateTranscribing DictationStateEventState = "transcribing"
+)
+
+func (v *DictationStateEventState) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "DictationStateEventState")
+	if err != nil {
+		return err
+	}
+	switch value := DictationStateEventState(s); value {
+	case DictationStateEventStateStarting, DictationStateEventStateRecording, DictationStateEventStateTranscribing:
+		*v = value
+		return nil
+	}
+	return unknownValue("DictationStateEventState", s)
+}
+
+// Full accumulated draft preview; replaces the previous preview for this capture.
+type DictationTranscriptEvent struct {
+	CaptureID string `json:"captureId"`
+	Text      string `json:"text"`
+}
+
+func (v *DictationTranscriptEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DictationTranscriptEvent", v.decodeFrom)
+}
+
+func (v *DictationTranscriptEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DictationTranscriptEvent
+	d := fieldDecoder{raw: raw, owner: "DictationTranscriptEvent"}
+	d.constant("type", "dictation_transcript")
+	d.required("captureId", &out.CaptureID)
+	d.required("text", &out.Text)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DictationTranscriptEvent) MarshalJSON() ([]byte, error) {
+	type plain DictationTranscriptEvent
+	return encodeObject(plain(v), `"type":"dictation_transcript"`, nil)
+}
+
+// Exactly one terminal frame per capture; text is the accumulated result.
+type DictationEndEvent struct {
+	CaptureID string  `json:"captureId"`
+	Text      string  `json:"text"`
+	Error     *string `json:"error,omitempty"`
+}
+
+func (v *DictationEndEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DictationEndEvent", v.decodeFrom)
+}
+
+func (v *DictationEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DictationEndEvent
+	d := fieldDecoder{raw: raw, owner: "DictationEndEvent"}
+	d.constant("type", "dictation_end")
+	d.required("captureId", &out.CaptureID)
+	d.required("text", &out.Text)
+	d.optional("error", &out.Error)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DictationEndEvent) MarshalJSON() ([]byte, error) {
+	type plain DictationEndEvent
+	return encodeObject(plain(v), `"type":"dictation_end"`, nil)
+}
+
 // Text appended to the running side question's latest answer.
 type BtwDeltaEvent struct {
 	RecordID string `json:"recordId"`
@@ -6509,6 +6616,9 @@ func (LivePhaseEvent) isRpcNotification()               {}
 func (LiveLevelsEvent) isRpcNotification()              {}
 func (LiveTranscriptEvent) isRpcNotification()          {}
 func (LiveEndEvent) isRpcNotification()                 {}
+func (DictationStateEvent) isRpcNotification()          {}
+func (DictationTranscriptEvent) isRpcNotification()     {}
+func (DictationEndEvent) isRpcNotification()            {}
 func (BtwDeltaEvent) isRpcNotification()                {}
 func (BtwRecordEvent) isRpcNotification()               {}
 func (CommandOutputEvent) isRpcNotification()           {}
@@ -6586,6 +6696,12 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[LiveTranscriptEvent](raw)
 	case "live_end":
 		value, err = decodeVariant[LiveEndEvent](raw)
+	case "dictation_state":
+		value, err = decodeVariant[DictationStateEvent](raw)
+	case "dictation_transcript":
+		value, err = decodeVariant[DictationTranscriptEvent](raw)
+	case "dictation_end":
+		value, err = decodeVariant[DictationEndEvent](raw)
 	case "btw_delta":
 		value, err = decodeVariant[BtwDeltaEvent](raw)
 	case "btw_record":
@@ -6699,6 +6815,9 @@ func (LivePhaseEvent) isRpcServerFrame()               {}
 func (LiveLevelsEvent) isRpcServerFrame()              {}
 func (LiveTranscriptEvent) isRpcServerFrame()          {}
 func (LiveEndEvent) isRpcServerFrame()                 {}
+func (DictationStateEvent) isRpcServerFrame()          {}
+func (DictationTranscriptEvent) isRpcServerFrame()     {}
+func (DictationEndEvent) isRpcServerFrame()            {}
 func (BtwDeltaEvent) isRpcServerFrame()                {}
 func (BtwRecordEvent) isRpcServerFrame()               {}
 func (CommandOutputEvent) isRpcServerFrame()           {}
@@ -6786,6 +6905,12 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[LiveTranscriptEvent](raw)
 	case "live_end":
 		value, err = decodeVariant[LiveEndEvent](raw)
+	case "dictation_state":
+		value, err = decodeVariant[DictationStateEvent](raw)
+	case "dictation_transcript":
+		value, err = decodeVariant[DictationTranscriptEvent](raw)
+	case "dictation_end":
+		value, err = decodeVariant[DictationEndEvent](raw)
 	case "btw_delta":
 		value, err = decodeVariant[BtwDeltaEvent](raw)
 	case "btw_record":
@@ -7112,6 +7237,25 @@ func (v *LiveMuteResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out LiveMuteResult
 	d := fieldDecoder{raw: raw, owner: "LiveMuteResult"}
 	d.required("muted", &out.Muted)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type DictationStopResult struct {
+	Text string `json:"text"`
+}
+
+func (v *DictationStopResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DictationStopResult", v.decodeFrom)
+}
+
+func (v *DictationStopResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DictationStopResult
+	d := fieldDecoder{raw: raw, owner: "DictationStopResult"}
+	d.required("text", &out.Text)
 	if d.err != nil {
 		return d.err
 	}
@@ -7747,6 +7891,23 @@ func (c Commands) LiveMute(ctx context.Context, p LiveMuteCommand) (bool, error)
 	var out LiveMuteResult
 	err := c.call(ctx, "live_mute", p, 0, &out)
 	return out.Muted, err
+}
+
+// DictationStartCommand holds the parameters of "dictation_start".
+type DictationStartCommand struct {
+	CaptureID string `json:"captureId"`
+}
+
+// DictationStart sends "dictation_start": Start draft-only speech-to-text; resolves once the microphone is recording.
+func (c Commands) DictationStart(ctx context.Context, p DictationStartCommand) error {
+	return c.call(ctx, "dictation_start", p, 600*time.Second, nil)
+}
+
+// DictationStop sends "dictation_stop": Stop and flush draft-only dictation, returning the accumulated text.
+func (c Commands) DictationStop(ctx context.Context) (string, error) {
+	var out DictationStopResult
+	err := c.call(ctx, "dictation_stop", nil, 600*time.Second, &out)
+	return out.Text, err
 }
 
 // SetModelCommand holds the parameters of "set_model".

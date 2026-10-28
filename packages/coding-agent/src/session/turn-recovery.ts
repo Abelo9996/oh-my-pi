@@ -2646,7 +2646,13 @@ export class TurnRecovery {
 			!staleOpenAIResponsesReplayError &&
 			!AIError.is(id, AIError.Flag.UsageLimit) &&
 			parsedRetryAfterMs === undefined &&
-			(rateLimitReason === "CONCURRENT_LIMIT" || rateLimitReason === "RATE_LIMIT_EXCEEDED")
+			(rateLimitReason === "CONCURRENT_LIMIT" ||
+				rateLimitReason === "RATE_LIMIT_EXCEEDED" ||
+				(rateLimitReason === "MODEL_CAPACITY_EXHAUSTED" &&
+					(AIError.isUsageLimitStatus(message.errorStatus) ||
+						/\b(?:429|MODEL_CAPACITY_EXHAUSTED|MODEL_CAPACITY_EXCEEDED|resource.?exhausted)\b/i.test(
+							errorMessage,
+						))))
 		) {
 			const reasonBackoffMs = calculateRateLimitBackoffMs(rateLimitReason);
 			if (reasonBackoffMs > delayMs) delayMs = reasonBackoffMs;

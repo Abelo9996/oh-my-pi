@@ -89,6 +89,10 @@ export type RpcCommand =
 	| { id?: string; type: "live_stop" }
 	| { id?: string; type: "live_mute"; muted?: boolean }
 
+	// Draft-only speech-to-text
+	| { id?: string; type: "dictation_start"; captureId: string }
+	| { id?: string; type: "dictation_stop" }
+
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model" }
@@ -305,6 +309,30 @@ export interface RpcLiveEndFrame {
 }
 
 export type RpcLiveFrame = RpcLivePhaseFrame | RpcLiveLevelsFrame | RpcLiveTranscriptFrame | RpcLiveEndFrame;
+
+/** Draft-only dictation frames bypass the session event filter. */
+export interface RpcDictationStateFrame {
+	type: "dictation_state";
+	captureId: string;
+	state: "starting" | "recording" | "transcribing";
+}
+
+/** Full accumulated preview, replacing the previous preview for this capture. */
+export interface RpcDictationTranscriptFrame {
+	type: "dictation_transcript";
+	captureId: string;
+	text: string;
+}
+
+/** Exactly one terminal frame per capture, including any failure. */
+export interface RpcDictationEndFrame {
+	type: "dictation_end";
+	captureId: string;
+	text: string;
+	error?: string;
+}
+
+export type RpcDictationFrame = RpcDictationStateFrame | RpcDictationTranscriptFrame | RpcDictationEndFrame;
 
 /** `open_session` result: `resumed` is false when a fresh session was started in the directory. */
 export interface RpcOpenSessionResult {
@@ -589,6 +617,9 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "live_start"; success: true; data: { voice: string } }
 	| { id?: string; type: "response"; command: "live_stop"; success: true }
 	| { id?: string; type: "response"; command: "live_mute"; success: true; data: { muted: boolean } }
+	// Draft-only speech-to-text
+	| { id?: string; type: "response"; command: "dictation_start"; success: true }
+	| { id?: string; type: "response"; command: "dictation_stop"; success: true; data: { text: string } }
 	| { id?: string; type: "response"; command: "handoff"; success: true; data: RpcHandoffResult | null }
 
 	// Messages

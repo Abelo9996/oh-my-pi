@@ -198,10 +198,11 @@ impl Drop for ActiveSpawnsGuard {
 }
 
 pub struct Shell {
-	session:       Arc<TokioMutex<Option<ShellSessionCore>>>,
-	abort_state:   ShellAbortState,
-	config:        ShellConfig,
-	active_spawns: ActiveSpawns,
+	session:                  Arc<TokioMutex<Option<ShellSessionCore>>>,
+	abort_state:              ShellAbortState,
+	config:                   ShellConfig,
+	active_spawns:            ActiveSpawns,
+	background_reaper_active: Arc<AtomicBool>,
 }
 
 impl Shell {
@@ -232,6 +233,7 @@ impl Shell {
 			abort_state: ShellAbortState::default(),
 			config,
 			active_spawns: ActiveSpawns::default(),
+			background_reaper_active: Arc::new(AtomicBool::new(false)),
 		}
 	}
 
@@ -253,6 +255,7 @@ impl Shell {
 			self.session.clone(),
 			self.abort_state.clone(),
 			self.active_spawns.clone(),
+			self.background_reaper_active.clone(),
 			self.config.clone(),
 			run_config,
 			on_chunk,
@@ -278,30 +281,26 @@ impl Shell {
 		registry.map_or_else(Vec::new, |registry| registry.live_pids())
 	}
 
-	/// Number of live background jobs (running `&`/`nohup` children) tracked by
-	/// the persistent session. Completed jobs are reaped first via a silent
-	/// `JobManager::poll()` (no job-control notifications), so the count
-	/// reflects only processes still alive. Returns 0 when no session core is
-	/// materialized. The host uses this to decide whether to retain a per-call
-	/// shell whose background children are still running instead of dropping it
-	/// (which would SIGKILL them on kill-on-drop).
+	/// Number of live external background jobs tracked by the persistent
+	/// session. The host retains a per-call shell while this is nonzero, since
+	/// dropping it would kill its children. Reaps exited children without
+	/// discarding their status, so a later `wait` still sees the exit code.
 	pub async fn live_background_job_count(&self) -> u32 {
 		let mut guard = self.session.lock().await;
 		let Some(core) = guard.as_mut() else {
 			return 0;
 		};
 		let jobs = core.shell.jobs_mut();
-		// Fail closed: a poll error leaves the job table in an unknown state, so
-		// report 0 (drop the shell) rather than pin a retained session forever on
-		// stale `representative_pid()` entries.
-		if jobs.poll().is_err() {
+		// A poll error leaves the table in an unknown state; fail closed
+		// rather than retain a per-call shell forever on stale entries.
+		if jobs.poll_preserving_completed().is_err() {
 			return 0;
 		}
 		u32::try_from(
 			jobs
 				.jobs
 				.iter()
-				.filter(|job| job.representative_pid().is_some())
+				.filter(|job| job.external_process_count() > 0)
 				.count(),
 		)
 		.unwrap_or(u32::MAX)
@@ -405,10 +404,53 @@ const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
 #[cfg(not(windows))]
 const CANCEL_READER_GRACE: Duration = Duration::from_millis(1250);
 
+/// Poll only the persistent session's background children, never process-wide
+/// waitpid: foreground runs and other shells own their own child handles.
+/// Finished jobs keep their statuses so `wait` can consume them on a later run.
+/// The caller holds the session lock, including through this initial poll.
+fn ensure_background_reaper(
+	core: &mut ShellSessionCore,
+	session: &Arc<TokioMutex<Option<ShellSessionCore>>>,
+	active: &Arc<AtomicBool>,
+) {
+	let _ = core.shell.jobs_mut().poll_preserving_completed();
+	if !core.shell.jobs().has_live_external_jobs() || active.swap(true, Ordering::AcqRel) {
+		return;
+	}
+
+	// A weak session reference lets dropping Shell keep its existing
+	// kill-on-drop behavior; the reaper never extends the session's lifetime
+	// across sleeps.
+	let session = Arc::downgrade(session);
+	let active = Arc::clone(active);
+	tokio::spawn(async move {
+		loop {
+			time::sleep(Duration::from_millis(25)).await;
+			let Some(session) = session.upgrade() else {
+				active.store(false, Ordering::Release);
+				break;
+			};
+			let mut guard = session.lock().await;
+			let still_running = guard.as_mut().is_some_and(|core| {
+				let _ = core.shell.jobs_mut().poll_preserving_completed();
+				core.shell.jobs().has_live_external_jobs()
+			});
+			if !still_running {
+				// Clear while holding the session lock. A concurrent run
+				// cannot add jobs and observe `active == true` between our
+				// last poll and this store.
+				active.store(false, Ordering::Release);
+				break;
+			}
+		}
+	});
+}
+
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
 	active_spawns: ActiveSpawns,
+	background_reaper_active: Arc<AtomicBool>,
 	config: ShellConfig,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
@@ -438,8 +480,8 @@ async fn run_shell_session(
 			// after `session_guard`, so it clears before the lock is released.
 			let _active_spawns = ActiveSpawnsGuard::publish(&active_spawns, spawn_registry.clone());
 
-			let session = match &mut *session_guard {
-				Some(session) => session,
+			let core = match &mut *session_guard {
+				Some(core) => core,
 				None => session_guard.insert(
 					create_session_for_run(
 						&config,
@@ -450,7 +492,12 @@ async fn run_shell_session(
 				),
 			};
 			abort_state.set(at).await;
-			run_shell_command(session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
+			let result =
+				run_shell_command(core, &run_config, on_chunk, tokio_cancel, spawn_registry).await;
+			if result.is_ok() {
+				ensure_background_reaper(core, &session, &background_reaper_active);
+			}
+			result
 		}
 	});
 
@@ -1795,9 +1842,13 @@ async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
 fn register_background_jobs(shell: &BrushShell, registry: &process::SpawnRegistry) {
 	// Include retained session jobs in the same cancellation wave as new spawns.
 	for job in &shell.jobs().jobs {
-		let process = job
-			.representative_pid()
-			.and_then(process::Process::from_pid);
+		// A reaped job keeps its representative PID for `wait`, but that PID
+		// may later be reused by an unrelated process. Use an external child
+		// still held by the job (the first pipeline stage may have exited).
+		let Some(pid) = job.process_ids().next() else {
+			continue;
+		};
+		let process = process::Process::from_pid(pid);
 		registry.record(job.process_group_id(), process);
 	}
 }
@@ -6802,6 +6853,139 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 
 		// Dropping the shell at scope end reaps the child via kill-on-drop.
 		shell.abort().await;
+	}
+
+	/// An exited `&` child must be waited on while the persistent shell is
+	/// idle, not only when the host submits another command. Keep its status
+	/// for a later explicit `wait` after the OS process has disappeared.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn persistent_shell_reaps_background_child_without_followup_run() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded::<String>();
+		let started = shell
+			.run(
+				ShellRunOptions {
+					command: "/bin/sh -c 'sleep 1; exit 7' >/dev/null 2>&1 & pid=$!; printf '%s\\n' \
+					          \"$pid\""
+						.into(),
+					..Default::default()
+				},
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("start external background child");
+		assert_eq!(started.exit_code, Some(0));
+		let output: String = rx.try_iter().collect();
+		let pid = output
+			.trim()
+			.parse::<i32>()
+			.expect("background process pid");
+		assert!(pid > 0);
+
+		// No calls to the shell (including the live-job counter) until this
+		// child has exited and its parent has reaped it.
+		time::timeout(Duration::from_secs(5), async {
+			loop {
+				// SAFETY: signal 0 only probes this pid's existence.
+				if unsafe { libc::kill(pid, 0) } == -1 {
+					let err = io::Error::last_os_error();
+					assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "probe child: {err}");
+					break;
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("background child remained a zombie after exit");
+
+		assert_eq!(shell.live_background_job_count().await, 0);
+
+		let waited = shell
+			.run(
+				ShellRunOptions { command: "wait \"$pid\"".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("wait for already-reaped child");
+		assert_eq!(waited.exit_code, Some(7));
+	}
+
+	/// A short-lived stage of a background pipeline must be reaped even if
+	/// another stage is still running. The pipeline's last-stage status must
+	/// remain available to `wait` after both children have been reaped.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn persistent_shell_reaps_early_exiting_background_pipeline_stage() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		let first_pidfile = tempfile::NamedTempFile::new().expect("pipeline pidfile");
+		let command = format!(
+			"/bin/sh -c 'echo $$ > \"$1\"; exec /bin/sleep 15' _ {} | /bin/sh -c 'sleep 1; exit 9' \
+			 >/dev/null 2>&1 & pid=$!; printf '%s\\n' \"$pid\"",
+			quote_arg(&first_pidfile.path().to_string_lossy())
+		);
+		let (tx, rx) = flume::unbounded::<String>();
+		let started = shell
+			.run(ShellRunOptions { command, ..Default::default() }, Some(tx), CancelToken::default())
+			.await
+			.expect("start background pipeline");
+		assert_eq!(started.exit_code, Some(0));
+		let output: String = rx.try_iter().collect();
+		let last_pid = output
+			.trim()
+			.parse::<i32>()
+			.expect("last pipeline stage pid");
+		assert!(last_pid > 0);
+		let first_pid = time::timeout(Duration::from_secs(2), async {
+			loop {
+				if let Ok(pid) = fs::read_to_string(first_pidfile.path())
+					.unwrap_or_default()
+					.trim()
+					.parse::<i32>()
+				{
+					break pid;
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("first pipeline stage did not record its pid");
+		assert_ne!(first_pid, last_pid, "pipeline stages need distinct pids");
+
+		// A zombie still responds to signal 0. The last stage must disappear
+		// while the first is alive, without another shell/tool invocation.
+		time::timeout(Duration::from_secs(5), async {
+			loop {
+				// SAFETY: signal 0 only probes this pid's existence.
+				if unsafe { libc::kill(last_pid, 0) } == -1 {
+					let err = io::Error::last_os_error();
+					assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "probe child: {err}");
+					break;
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("early exiting pipeline stage remained a zombie");
+		// SAFETY: signal 0 only probes the other child, which must still be
+		// running for this to prove independent reaping.
+		assert_eq!(unsafe { libc::kill(first_pid, 0) }, 0, "first stage exited too soon");
+		// SAFETY: end only this test-owned sleep so the final wait is prompt.
+		assert_eq!(unsafe { libc::kill(first_pid, libc::SIGTERM) }, 0);
+
+		let waited = shell
+			.run(
+				ShellRunOptions { command: "wait \"$pid\"".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("wait for background pipeline");
+		assert_eq!(waited.exit_code, Some(9), "wait must report the pipeline's last stage");
 	}
 
 	/// `exit` and errexit end the command, not the session: later runs keep

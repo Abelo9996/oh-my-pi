@@ -457,16 +457,6 @@ export class MarketplaceManager {
 			}
 		}
 
-		// Only now clean up old entries — new cache succeeded, so it is safe to remove old ones.
-		if (existing && existing.length > 0) {
-			// Remove from scope-appropriate registry first, then cross-check refs before disk deletion.
-			const prunedReg = removeInstalledPlugin(await readInstalledPluginsRegistry(registryPath), pluginId);
-			await writeInstalledPluginsRegistry(registryPath, prunedReg);
-			await this.#removeUnreferencedCachePaths(
-				existing.map(entry => entry.installPath).filter(installPath => installPath !== cachePath),
-			);
-		}
-
 		// 6. Build and register the entry, preserving enabled state from previous install
 		const now = new Date().toISOString();
 		// Carry over enabled flag from existing entry — a disabled plugin must stay disabled after upgrade
@@ -480,10 +470,21 @@ export class MarketplaceManager {
 			...(wasDisabled ? { enabled: false } : {}),
 		};
 
-		const freshInstReg = await readInstalledPluginsRegistry(registryPath);
-		const newInstReg = addInstalledPlugin(freshInstReg, pluginId, installedEntry);
-		await writeInstalledPluginsRegistry(registryPath, newInstReg);
+		// One write replaces the old entries with the new one, so a running session that reads the
+		// registry during the upgrade never finds the plugin missing.
+		const currentInstReg = await readInstalledPluginsRegistry(registryPath);
+		const baseInstReg =
+			existing && existing.length > 0 ? removeInstalledPlugin(currentInstReg, pluginId) : currentInstReg;
+		await writeInstalledPluginsRegistry(registryPath, addInstalledPlugin(baseInstReg, pluginId, installedEntry));
 		if (scope === "project") await this.#trackProjectRegistry();
+
+		// Only now clean up old installs — the new one is cached and registered, so the
+		// reference check reads the replaced registries.
+		if (existing && existing.length > 0) {
+			await this.#removeUnreferencedCachePaths(
+				existing.map(entry => entry.installPath).filter(installPath => installPath !== cachePath),
+			);
+		}
 
 		// Carry the renamed-from key's runtime state (feature selection + settings)
 		// so a case-only rename preserves the user's configuration.

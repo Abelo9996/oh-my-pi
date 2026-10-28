@@ -161,6 +161,7 @@ describe("github copilot usage provider — billing units", () => {
 /** Answers `/user`, billing, and `copilot_internal/user` with the given outcomes; `/user` defaults to a login. */
 function endpointFetch(outcomes: {
 	user?: number | Error;
+	userBody?: unknown;
 	billing?: number | Error;
 	internal: number | Error;
 }): FetchImpl {
@@ -183,7 +184,7 @@ function endpointFetch(outcomes: {
 				},
 			});
 		}
-		return respond(outcomes.user ?? 200, { login: "octocat" });
+		return respond(outcomes.user ?? 200, "userBody" in outcomes ? outcomes.userBody : { login: "octocat" });
 	};
 }
 
@@ -230,6 +231,7 @@ describe("github copilot usage provider — auth rejection (#17081)", () => {
 			[API_KEY, { billing: 404, internal: 401 }],
 			[BARE_API_KEY, { user: 503, internal: 401 }],
 			[BARE_API_KEY, { user: new TypeError("fetch failed"), internal: 401 }],
+			[BARE_API_KEY, { userBody: { login: null }, internal: 401 }],
 		] as const) {
 			expect(await fetchWith(credential, endpointFetch(outcomes))).toBeNull();
 		}

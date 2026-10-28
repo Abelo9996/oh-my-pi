@@ -150,7 +150,10 @@ async function fetchJson(ctx: UsageFetchContext, url: string, init: RequestInit)
 	return response.json();
 }
 
-/** Resolves the token owner's login via `/user`; throws `ProviderHttpError` on a non-2xx response. */
+/**
+ * Resolves the token owner's login via `/user`; throws `ProviderHttpError` on a
+ * non-2xx response or a body without a string `login`.
+ */
 async function resolveGitHubUsername(
 	ctx: UsageFetchContext,
 	baseUrl: string,
@@ -165,8 +168,10 @@ async function resolveGitHubUsername(
 		},
 		signal,
 	});
-	if (!isRecord(data)) return undefined;
-	return typeof data.login === "string" ? data.login : undefined;
+	if (!isRecord(data) || typeof data.login !== "string") {
+		throw new AIError.ProviderHttpError("Invalid GitHub user response", 200);
+	}
+	return data.login;
 }
 
 async function fetchInternalUsage(

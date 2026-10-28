@@ -353,6 +353,28 @@
 				"clientOmit": []
 			},
 			{
+				"name": "dictation_start",
+				"doc": "Start draft-only speech-to-text; resolves once the microphone is recording.",
+				"params": "DictationStartParams",
+				"result": null,
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": 600000,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "dictation_stop",
+				"doc": "Stop and flush draft-only dictation, returning the accumulated text.",
+				"params": null,
+				"result": "DictationStopResult",
+				"nullable": false,
+				"unwrap": "text",
+				"timeoutMs": 600000,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "set_model",
 				"doc": "Select a model by provider and id.",
 				"params": "SetModelParams",
@@ -4764,6 +4786,74 @@
 			],
 			"description": "Sent exactly once when a live session ends; `error` carries the failure cause."
 		},
+		"DictationStateEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "dictation_state"
+				},
+				"captureId": {
+					"type": "string"
+				},
+				"state": {
+					"enum": [
+						"starting",
+						"recording",
+						"transcribing"
+					],
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"captureId",
+				"state"
+			],
+			"description": "State of one draft-only microphone capture."
+		},
+		"DictationTranscriptEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "dictation_transcript"
+				},
+				"captureId": {
+					"type": "string"
+				},
+				"text": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"captureId",
+				"text"
+			],
+			"description": "Full accumulated draft preview; replaces the previous preview for this capture."
+		},
+		"DictationEndEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "dictation_end"
+				},
+				"captureId": {
+					"type": "string"
+				},
+				"text": {
+					"type": "string"
+				},
+				"error": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"captureId",
+				"text"
+			],
+			"description": "Exactly one terminal frame per capture; text is the accumulated result."
+		},
 		"BtwDeltaEvent": {
 			"type": "object",
 			"properties": {
@@ -5835,6 +5925,15 @@
 					"$ref": "#/$defs/LiveEndEvent"
 				},
 				{
+					"$ref": "#/$defs/DictationStateEvent"
+				},
+				{
+					"$ref": "#/$defs/DictationTranscriptEvent"
+				},
+				{
+					"$ref": "#/$defs/DictationEndEvent"
+				},
+				{
 					"$ref": "#/$defs/BtwDeltaEvent"
 				},
 				{
@@ -6372,6 +6471,28 @@
 			},
 			"required": [
 				"muted"
+			]
+		},
+		"DictationStartParams": {
+			"type": "object",
+			"properties": {
+				"captureId": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"captureId"
+			]
+		},
+		"DictationStopResult": {
+			"type": "object",
+			"properties": {
+				"text": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"text"
 			]
 		},
 		"SetModelParams": {

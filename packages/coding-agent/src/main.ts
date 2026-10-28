@@ -107,6 +107,7 @@ import {
 	discoverAuthStorage,
 	loadSessionExtensions,
 	resolvePrewalkTarget,
+	SessionModelRestoreError,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
@@ -194,6 +195,7 @@ import {
 	cfgPrewalkEnabled,
 	cfgSessionMaxCost,
 	cfgSessionWarnCost,
+	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
@@ -461,7 +463,7 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			await session.promptCustomMessage(message, { streamingBehavior });
+			input.dispatched = await session.promptCustomMessage(message, { streamingBehavior });
 		} else if (input.synthetic) {
 			// Synthetic continue shortcuts are hidden developer prompts. The streaming
 			// queue (#queueUserMessage) only carries user-attributed messages, so we do
@@ -2087,6 +2089,13 @@ export async function runRootCommand(
 
 		// Resolve native resume/fork flags or import one foreign transcript into a
 		// fresh persisted OMP session before constructing the AgentSession.
+		const explicitSessionSelection = Boolean(
+			parsedArgs.continue ||
+			parsedArgs.resume ||
+			parsedArgs.fork ||
+			parsedArgs.restore ||
+			isForeignSessionImport(parsedArgs),
+		);
 		let sessionManager: SessionManager | undefined;
 		let foreignSource: ForeignSessionSource | undefined;
 		// A resumed session whose conversation went on in another file resumes that file; say so.
@@ -2170,6 +2179,8 @@ export async function runRootCommand(
 			}
 			throw error;
 		}
+		// Only createSessionManager's implicit auto-resume promotes continue here.
+		const autoResumed = !explicitSessionSelection && parsedArgs.continue === true;
 
 		if ((typeof parsedArgs.resume === "string" || foreignSource) && sessionManager && !parsedArgs.noSession) {
 			const previousCwd = cwd;
@@ -2211,6 +2222,8 @@ export async function runRootCommand(
 				SessionManager.listForPicker,
 				cwd,
 				parsedArgs.sessionDir,
+				undefined,
+				cfgSessionWorktreeScope.get(settingsInstance),
 			);
 			let preloadedAllSessions: SessionInfo[] | undefined;
 			if (folderSessions.length === 0) {
@@ -2306,31 +2319,39 @@ export async function runRootCommand(
 				: undefined;
 		daemonPresencePromise?.catch(() => {});
 
-		const sessionOptions = await logger.time(
-			"buildSessionOptions",
-			buildSessionOptions,
-			parsedArgs,
-			scopedModels,
-			sessionManager,
-			modelRegistry,
-			settingsInstance,
-		);
+		let startupTelemetry: CreateAgentSessionOptions["telemetry"];
+		let startupExtensions: CreateAgentSessionOptions["extensions"];
+		const buildStartupSessionOptions = async (manager: SessionManager | undefined) => {
+			const options = await logger.time(
+				"buildSessionOptions",
+				buildSessionOptions,
+				parsedArgs,
+				scopedModels,
+				manager,
+				modelRegistry,
+				settingsInstance,
+			);
+			options.authStorage = authStorage;
+			options.modelRegistry = modelRegistry;
+			options.hasUI = isInteractive || mode === "rpc-ui";
+			options.allowSessionModelFallback = isInteractive;
+			options.settingsApproval = isInteractive;
+			options.tuiTranscript = isInteractive;
+			options.autoTitle = isInteractive;
+			options.settings = settingsInstance;
+			options.telemetry = startupTelemetry;
+			options.extensions = startupExtensions;
+			options.onPrewalkWarning = warning => {
+				if (isInteractive) notifs.push({ kind: "warn", message: warning });
+				else process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+			};
+			return options;
+		};
+		let sessionOptions = await buildStartupSessionOptions(sessionManager);
 		const marketplaceAutoUpdateOptions: MarketplaceAutoUpdateOptions = {
 			autoUpdate: cfgMarketplaceAutoUpdate.get(settingsInstance),
 			resolveActiveProjectRegistryPath,
 			clearPluginRootsCache: clearPluginRootsAndCaches,
-		};
-		sessionOptions.authStorage = authStorage;
-		sessionOptions.modelRegistry = modelRegistry;
-		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
-		sessionOptions.allowSessionModelFallback = isInteractive;
-		sessionOptions.settingsApproval = isInteractive;
-		sessionOptions.tuiTranscript = isInteractive;
-		sessionOptions.autoTitle = isInteractive;
-		sessionOptions.settings = settingsInstance;
-		sessionOptions.onPrewalkWarning = warning => {
-			if (isInteractive) notifs.push({ kind: "warn", message: warning });
-			else process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
 		};
 
 		// OTEL: unless `telemetry.otlpExportEnabled` is off, register global OTLP
@@ -2350,6 +2371,7 @@ export async function runRootCommand(
 				const model = modelRegistry.find(providerId, modelId);
 				return model !== undefined && getModelPricingStatus(model) !== "unknown";
 			});
+			startupTelemetry = sessionOptions.telemetry;
 		}
 		await daemonPresencePromise;
 
@@ -2418,7 +2440,10 @@ export async function runRootCommand(
 			// file — and the same result is handed to createAgentSession via
 			// `preloadedExtensions` so the discovery work is not repeated.
 			if (isInteractive && !parsedArgs.trustedExtensions?.length) {
-				sessionOptions.extensions = [...(sessionOptions.extensions ?? []), createWarpEventBridgeExtension()];
+				startupExtensions = sessionOptions.extensions = [
+					...(sessionOptions.extensions ?? []),
+					createWarpEventBridgeExtension(),
+				];
 			}
 
 			const eventBus = new EventBus();
@@ -2548,6 +2573,38 @@ export async function runRootCommand(
 					)
 				: undefined;
 
+			const preloadProviderRegistrations =
+				isInteractive && autoResumed ? extensionsResult.runtime.pendingProviderRegistrations.slice() : [];
+			const startupContext = {
+				eventBus,
+				subagentEventBus,
+				preloadedExtensions: extensionsResult,
+				deferredExtensionPaths: extensionsResult.deferredPaths,
+				// Validation waits for background refresh and the first interactive frame.
+				deferRetryFallbackValidation: true,
+			};
+			let createdSession: CreateAgentSessionResult;
+			try {
+				createdSession = await createSession({ ...sessionOptions, ...startupContext });
+			} catch (error) {
+				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof SessionModelRestoreError)) {
+					throw error;
+				}
+				await sessionManager.close();
+				sessionManager = undefined;
+				parsedArgs.continue = false;
+				// The failed SDK attempt consumed this queue; the fresh attempt clears
+				// source registrations again before applying it.
+				extensionsResult.runtime.pendingProviderRegistrations.unshift(...preloadProviderRegistrations);
+				const startupDeadline = sessionOptions.deadline;
+				sessionOptions = await buildStartupSessionOptions(undefined);
+				sessionOptions.deadline = startupDeadline;
+				createdSession = await createSession({ ...sessionOptions, ...startupContext });
+				notifs.push({
+					kind: "warn",
+					message: `Auto resume skipped: ${sanitizeDisplayWarnings([error.message])[0]}. Started a new session without the saved history.`,
+				});
+			}
 			const {
 				session,
 				setToolUIContext,
@@ -2555,17 +2612,7 @@ export async function runRootCommand(
 				lspServers,
 				mcpManager,
 				startBackgroundModelDiscovery,
-			} = await createSession({
-				...sessionOptions,
-				eventBus,
-				subagentEventBus,
-				preloadedExtensions: extensionsResult,
-				deferredExtensionPaths: extensionsResult.deferredPaths,
-				// Validated once the background refresh is in flight, so selectors it
-				// may still supply defer instead of warning; interactive mode also
-				// waits for the first frame (`startDeferredStartupWork`).
-				deferRetryFallbackValidation: true,
-			});
+			} = createdSession;
 			if (!isInteractive) session.validateRetryFallbackChains();
 
 			const sessionToolNames = session.getAllToolNames();
