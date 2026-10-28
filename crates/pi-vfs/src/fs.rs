@@ -204,6 +204,7 @@ enum ScopedOpen {
 /// or when the `stat` fails, the open is [`ScopedOpen::Plain`]. If the path
 /// changes between the `stat` and the open, the file is opened as the `stat`
 /// described it.
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn, reason = "const only off Unix"))]
 fn plan_scoped_open(scope: &Scope, path: &Path, options: &OpenOptions) -> ScopedOpen {
 	#[cfg(unix)]
 	if let Some(token) = &scope.cancel
@@ -249,6 +250,10 @@ fn native_open_scoped(scope: &Scope, path: &Path, options: &OpenOptions) -> io::
 /// [`native_open_scoped`] for async callers: a FIFO's wait for its other end
 /// is awaited, so it never holds the runtime worker that end may need (a
 /// background job queued on the same worker, as in `echo hi > f & cat < f`).
+#[cfg_attr(
+	not(unix),
+	allow(clippy::unused_async, reason = "the FIFO wait is awaited only on Unix")
+)]
 async fn native_open_scoped_async(
 	scope: &Scope,
 	path: &Path,

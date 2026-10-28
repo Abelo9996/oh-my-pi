@@ -321,6 +321,7 @@ import { formatPersistenceNotice } from "./persistence-failure";
 import { resolveComposerHint } from "@oh-my-pi/pi-tui/prompt/composer-hints";
 import { hintUsage } from "../utils/usage-counter";
 import {
+	getInspectableSubagentCount,
 	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
 } from "@oh-my-pi/pi-tui/overlays/running-subagent-badge";
@@ -756,14 +757,47 @@ interface RunningSegmentSpec {
 	readonly act: string;
 }
 
-/** `prev` while it still shows `running`, else a fresh segment for `spec`; undefined when nothing runs. */
-function runningSegment(
-	prev: RunningSegment | undefined,
+/** The agents segment with the session's inspectable agent count it was described from. */
+interface AgentsSegment extends RunningSegment {
+	readonly inSession: number;
+}
+
+/**
+ * The running count while subagents run; once none do, a muted icon while the
+ * session still has agents the hub can inspect (finished, parked, killed), so
+ * the click into the hub outlives the last running subagent. Undefined when
+ * the session has none.
+ */
+function agentsSegment(
+	prev: AgentsSegment | undefined,
 	running: number,
+	inSession: number,
 	spec: RunningSegmentSpec,
-): RunningSegment | undefined {
-	if (running === 0) return undefined;
-	return prev?.running === running ? prev : { running, node: describeRunningSegment(spec, running) };
+): AgentsSegment | undefined {
+	if (running > 0) {
+		return prev?.running === running ? prev : { running, inSession, node: describeRunningSegment(spec, running) };
+	}
+	if (inSession === 0) return undefined;
+	if (prev?.running === 0 && prev.inSession === inSession) return prev;
+	return { running: 0, inSession, node: describeIdleAgentsSegment(spec, inSession) };
+}
+
+/** The idle agents segment: a muted icon, no count; the hover label says how many agents the hub holds. */
+function describeIdleAgentsSegment(spec: RunningSegmentSpec, inSession: number): NativeNode {
+	const label = `No ${spec.noun}s running · ${inSession} in this session`;
+	return node(
+		"row",
+		{
+			role: "omp.hud.seg",
+			gap: "xs",
+			align: "center",
+			title: `${label}  ${spec.shortcut}`,
+			aria: label,
+			actions: { click: spec.act },
+		},
+		[node("icon", { name: spec.icon, tone: "muted" }, undefined, "icon")],
+		spec.key,
+	);
 }
 
 /** The background-jobs segment of the running-work counter. */
@@ -1494,7 +1528,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#todoHudNative: { checklist: NativeNode; fallback: NativeNode } | undefined;
 	#hudPillsNative: { children: readonly NativeChild[]; node: NativeNode } | undefined;
-	#agentsSegment: RunningSegment | undefined;
+	#agentsSegment: AgentsSegment | undefined;
 	#jobsSegment: JobsSegment | undefined;
 	/** The job widget registry this mode repaints on, and how to stop listening to it. */
 	#jobWidgetsListener: { registry: JobWidgetRegistry; unsubscribe: () => void } | undefined;
@@ -1538,21 +1572,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * The native HUD pills row: one running-work counter (`omp.hud.pill`) with
 	 * an agents segment, then a jobs segment, each present only while its
-	 * count is non-zero; the row is hidden while both are absent.
+	 * count is non-zero (the agents segment stays as a muted icon while the
+	 * session holds finished subagents); the row is hidden while both are absent.
 	 */
 	describeHudPills(): NativeNode {
 		// Agents count as the status-line badge counts them, from the agent
 		// registry: the observer registry only hears task-executor lifecycles,
 		// so an agent a peer message woke or revived would run without a segment.
-		const agents = cfgDisplayPinnedAgents.get(settings) === "off" ? 0 : this.#runningSubagentCount;
-		this.#agentsSegment = runningSegment(this.#agentsSegment, agents, {
-			key: "agents",
-			icon: "users",
-			tone: "accent",
-			noun: "agent",
-			shortcut: formatDoubleTap("left"),
-			act: "agents.open",
-		});
+		const showAgents = cfgDisplayPinnedAgents.get(settings) !== "off";
+		this.#agentsSegment = agentsSegment(
+			this.#agentsSegment,
+			showAgents ? this.#runningSubagentCount : 0,
+			showAgents ? this.#inspectableSubagentCount : 0,
+			{
+				key: "agents",
+				icon: "users",
+				tone: "accent",
+				noun: "agent",
+				shortcut: formatDoubleTap("left"),
+				act: "agents.open",
+			},
+		);
 		this.#syncJobWidgetsListener();
 		// A subagent's task job draws a widget too, though it counts as no
 		// background job: its widget alone keeps the segment and hover card up.
@@ -1915,6 +1955,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
 	#todoHudSubagentKey: string | undefined;
 	#runningSubagentCount = 0;
+	/** Agents the hub can show, running or not: keeps the HUD agents segment up after the last one finishes. */
+	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
 	#subagentHudKey = "";
@@ -4311,6 +4353,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.#runningSubagentCount = agentIds.length;
+		const inspectable = getInspectableSubagentCount(registry);
+		const inspectableChanged = inspectable !== this.#inspectableSubagentCount;
+		this.#inspectableSubagentCount = inspectable;
 		const agentsChanged = this.statusLine.setRunningSubagents(agentIds);
 		let treeCost = 0;
 		if (!this.collabGuest) {
@@ -4324,7 +4369,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 		}
 		const costChanged = this.statusLine.setSubagentTreeCost(treeCost);
-		const changed = agentsChanged || costChanged;
+		const changed = agentsChanged || costChanged || inspectableChanged;
 		if (changed && options.requestRender !== false) this.ui.requestRender();
 		return changed;
 	}
