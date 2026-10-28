@@ -1837,6 +1837,7 @@ function streamCursorWithWireMode(
 			const currentRotated =
 				baseConversationId === undefined ? undefined : rotatedConversationIds.get(baseConversationId);
 			const canRotate = currentRotated === undefined || successfulRotatedConversationIds.has(currentRotated);
+			let rotatedRejection = false;
 			if (
 				conversationId !== undefined &&
 				baseConversationId !== undefined &&
@@ -1856,10 +1857,15 @@ function streamCursorWithWireMode(
 					from: conversationId,
 					to: rotated,
 				});
+				rotatedRejection = true;
 			}
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
-			output.errorId = result.id;
+			// The rejection is non-retriable on the poisoned id, but the fresh id
+			// is a different request. Mark this one attempt transient so the
+			// caller's retry loop actually rebuilds on the rotated id; if that id
+			// rejects too, `canRotate` is false and the original status surfaces.
+			output.errorId = rotatedRejection ? AIError.create(AIError.Flag.Transient) : result.id;
 			if (error instanceof ConnectEndStreamError) {
 				output.errorClassificationMessage = result.message;
 				output.errorMessage = error.diagnosticMessage;
