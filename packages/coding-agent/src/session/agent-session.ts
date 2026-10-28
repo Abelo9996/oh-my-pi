@@ -995,6 +995,14 @@ export class AgentSession implements SettingsScope {
 	 *  (`clearQueue({ forInterrupt: true })`). The abort that follows takes them out of the
 	 *  queues and records them in the transcript without starting a turn. */
 	#interruptWithdrawnMessages = new WeakSet<AgentMessage>();
+	/** Whether a turn has run and ended on its own since the last user interrupt that
+	 *  stopped one. The interrupt's own `agent_end` does not count. Read only together with
+	 *  {@link SessionAdvisors.autoResumeSuppressed}, and only by the yield queue's idle
+	 *  injection: a background completion that lands once a later turn has already come and
+	 *  gone is not what the user stopped, so it may wake the session. The user's own queued
+	 *  follow-up stays suppressed until they resume deliberately, which is why this is a
+	 *  separate flag rather than an early clear of the suppression latch. */
+	#turnSettledSinceUserInterrupt = false;
 	#queuedMessageDrainScheduled = false;
 	/** A single model-only notebook reminder queued for the current prompt generation. */
 	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
@@ -2281,8 +2289,14 @@ export class AgentSession implements SettingsScope {
 				// A user interrupt is still in effect: background completions (async job
 				// results, launch completions, MCP/LSP/advisor asides) must not restart
 				// the run the user stopped. Fold them into context so the next deliberate
-				// prompt sees them — same policy as #resumeStrandedIrcAsides.
-				if (this.#advisors.autoResumeSuppressed) {
+				// prompt sees them — same policy as #resumeStrandedIrcAsides. Once a later
+				// turn has run and ended on its own, that run is over and a completion is
+				// no longer a restart of it, so the session wakes again.
+				if (this.#advisors.autoResumeSuppressed && !this.#turnSettledSinceUserInterrupt) {
+					logger.debug("Background delivery folded into context without a turn", {
+						count: messages.length,
+						customTypes: messages.map(message => (message.role === "custom" ? message.customType : message.role)),
+					});
 					this.#recordWithoutTurn(messages);
 					return;
 				}
@@ -4834,6 +4848,11 @@ export class AgentSession implements SettingsScope {
 				await emitAgentEndNotification();
 				return;
 			}
+			// This turn reached its own end — a typed prompt, an IRC/peer wake, an extension
+			// turn or a continuation alike. Whatever a user interrupt stopped is over, so a
+			// background completion arriving from here on is not a restart of it. The
+			// interrupt's own settle is excluded: it carries the aborted assistant message.
+			if (!isUserInterruptAbort(msg)) this.#turnSettledSinceUserInterrupt = true;
 
 			const yieldOnThisMessage = this.#assistantEndedWithSuccessfulYield(msg);
 			const successfulYieldMessage = yieldOnThisMessage
@@ -11072,7 +11091,16 @@ export class AgentSession implements SettingsScope {
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
-		if (userInterrupt) this.#advisors.autoResumeSuppressed = true;
+		// The latch exists so the run the user stopped cannot resume by itself — through a
+		// queued steer/follow-up, a reclaimed advisor concern, or a background completion.
+		// An interrupt that arrives with no run in flight and nothing queued to resume into
+		// one stops nothing, so it has nothing to suppress; latching there would silently
+		// fold every later background completion for the rest of a session that never takes
+		// another typed prompt (an unattended agent woken by its own jobs).
+		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
+			this.#advisors.autoResumeSuppressed = true;
+			this.#turnSettledSinceUserInterrupt = false;
+		}
 		// Pull the agent work an editor-restoring interrupt withdrew (clearQueue({ forInterrupt:
 		// true })), and on a user interrupt advisor concerns, out of the steer/follow-up queues
 		// before any await so the post-abort stranded-message drain can't auto-resume the run on
