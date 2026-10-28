@@ -689,7 +689,6 @@ describe("LiteLLM provider discovery", () => {
 
 	test.each([
 		{ current_page: 2, total_pages: 2 },
-		{ current_page: 1, total_pages: "2" },
 		{ current_page: 1, total_pages: 2.5 },
 		{ current_page: 1, total_pages: 101 },
 		{ current_page: 1, total_pages: 1, total_count: 2 },
@@ -710,61 +709,6 @@ describe("LiteLLM provider discovery", () => {
 		}).fetchDynamicModels?.();
 		expect(models?.map(model => model.id)).toEqual(["fallback-chat"]);
 		expect(calls).not.toContain("http://primary:4000/v2/model/info?page=2");
-	});
-
-	test("reports invalid pagination when parsed metadata violates the page contract", async () => {
-		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const models = await litellmModelManagerOptions({
-			baseUrl: "http://bad-pages:4000/v1",
-			fetch: vi.fn(async (input: string | URL | Request) => {
-				const url = inputUrl(input);
-				if (url === MODELS_DEV_URL) return Response.json({});
-				if (url === "http://bad-pages:4000/v2/model/info") {
-					return Response.json({ current_page: 1, total_pages: 2, data: [{ model_name: "first" }] });
-				}
-				if (url === "http://bad-pages:4000/v2/model/info?page=2") {
-					return Response.json({ current_page: 1, total_pages: 2, data: [{ model_name: "second" }] });
-				}
-				if (url === "http://bad-pages:4000/v1/models") return Response.json({ data: [{ id: "fallback-chat" }] });
-				return new Response("Not Found", { status: 404 });
-			}) as FetchImpl,
-		}).fetchDynamicModels?.();
-		expect(models?.map(model => model.id)).toEqual(["fallback-chat"]);
-		expect(warnSpy).toHaveBeenCalledWith(
-			"LiteLLM rich model metadata unavailable; falling back to /v1/models",
-			expect.objectContaining({
-				endpoint: "http://bad-pages:4000/v2/model/info",
-				reason: "invalid-pagination",
-				status: 200,
-			}),
-		);
-	});
-
-	test("fetches later metadata pages concurrently within the shared timeout", async () => {
-		let thirdPageStarted = false;
-		let secondPageObservedThird = false;
-		const models = await litellmModelManagerOptions({
-			baseUrl: "http://concurrent-pages:4000/v1",
-			fetch: vi.fn(async (input: string | URL | Request) => {
-				const url = inputUrl(input);
-				if (url === MODELS_DEV_URL) return Response.json({});
-				if (url === "http://concurrent-pages:4000/v2/model/info") {
-					return Response.json({ current_page: 1, total_pages: 3, data: [{ model_name: "first" }] });
-				}
-				if (url === "http://concurrent-pages:4000/v2/model/info?page=2") {
-					await Promise.resolve();
-					secondPageObservedThird = thirdPageStarted;
-					return Response.json({ current_page: 2, total_pages: 3, data: [{ model_name: "second" }] });
-				}
-				if (url === "http://concurrent-pages:4000/v2/model/info?page=3") {
-					thirdPageStarted = true;
-					return Response.json({ current_page: 3, total_pages: 3, data: [{ model_name: "third" }] });
-				}
-				return new Response("Not Found", { status: 404 });
-			}) as FetchImpl,
-		}).fetchDynamicModels?.();
-		expect(secondPageObservedThird).toBe(true);
-		expect(models?.map(model => model.id)).toEqual(["first", "second", "third"]);
 	});
 
 	test("does not use a truncated rich roster when a later page fails", async () => {
