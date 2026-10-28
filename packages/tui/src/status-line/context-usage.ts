@@ -128,8 +128,11 @@ export interface NonMessageTokenSource {
 		readonly state?: {
 			readonly tools?: readonly ContextTool[];
 		};
-		/** Tool specs ship description-stripped because the catalog rides in the system prompt (`Agent.pruneToolDescriptions`). */
-		readonly pruneToolDescriptions?: boolean;
+		/**
+		 * Whether requests to `model` ship description-stripped tool specs because
+		 * the catalog rides in the system prompt (`Agent.prunesToolDescriptions`).
+		 */
+		prunesToolDescriptions?(model: Model | undefined): boolean;
 	};
 	readonly skills?: readonly ContextSkill[];
 	/** Provider-facing, session-frozen descriptions when available. */
@@ -331,7 +334,7 @@ export function estimateContextToolSchemaTokens(
  * Exposed so callers like `StatusLineComponent` can cache the non-message
  * total separately from the growing message total. A model switch can change
  * which tool schemas occupy context without changing the roster; a prune-mode
- * change (`Agent.pruneToolDescriptions`) changes how much of each spec ships.
+ * change (`Agent.prunesToolDescriptions`) changes how much of each spec ships.
  */
 // The per-turn threshold and compaction paths call these helpers repeatedly.
 // Cache by prompt, roster, skills, tokenizer, revision, model schema policy, and
@@ -374,7 +377,7 @@ function nonMessageTokenCacheEntry(
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const toolSchemasInContext = session.model?.toolSchemasInContext !== false;
-	const pruneToolDescriptions = session.agent?.pruneToolDescriptions === true;
+	const pruneToolDescriptions = session.agent?.prunesToolDescriptions?.(session.model) === true;
 	const toolsRevision = getToolSchemaMetadataRevision(toolsRef);
 	const skillsRef = session.renderedSkills ?? session.skills ?? EMPTY_SKILLS;
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];

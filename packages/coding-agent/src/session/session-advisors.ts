@@ -2401,7 +2401,7 @@ export class SessionAdvisors {
 				fixedPromptTokens +
 					estimateContextToolSchemaTokens(agent.state.tools, agent.tokenizer, model, {
 						sourceRevision: this.#host.settings.revision,
-						pruneDescriptions: agent.pruneToolDescriptions,
+						pruneDescriptions: agent.prunesToolDescriptions(model),
 					}) +
 					storedConversationTokens +
 					incomingTokens,

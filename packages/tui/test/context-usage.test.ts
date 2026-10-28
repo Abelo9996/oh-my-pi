@@ -148,14 +148,15 @@ describe("pruned tool description accounting", () => {
 
 	it("counts the pruned wire specs while the agent prunes, and the full specs otherwise", () => {
 		const systemPrompt = ["You are an assistant."];
-		const agent = { state: { tools }, pruneToolDescriptions: true };
+		let prune = true;
+		const agent = { state: { tools }, prunesToolDescriptions: () => prune };
 		const session: NonMessageTokenSource = { systemPrompt, agent };
 		const pruned = computeNonMessageBreakdown(session, tokenizer).toolsTokens;
 		expect(pruned).toBe(prunedWireTokens);
 		expect(computeNonMessageTokens(session, tokenizer)).toBe(tokenizer.countTokens(systemPrompt) + pruned);
 
-		// A model switch flips pruning on the live agent without replacing the roster.
-		agent.pruneToolDescriptions = false;
+		// A model or dialect switch flips pruning on the live agent without replacing the roster.
+		prune = false;
 		const full = computeNonMessageBreakdown(session, tokenizer).toolsTokens;
 		expect(full).toBe(estimateToolSchemaTokens(tools as never, tokenizer));
 		expect(full).toBeGreaterThan(pruned);

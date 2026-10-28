@@ -131,7 +131,7 @@ function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuild
 		// Count the compact wire text; show the same fragments with an indented schema.
 		const { fragments, display, schemaError } = toolSchemaFragments(tool, {
 			displayIndent: 2,
-			pruneDescriptions: session.agent.pruneToolDescriptions,
+			pruneDescriptions: session.agent.prunesToolDescriptions(session.model),
 		});
 		const tokens = session.model?.toolSchemasInContext === false ? 0 : session.agent.tokenizer.countTokens(fragments);
 		const shown = display ?? fragments;
