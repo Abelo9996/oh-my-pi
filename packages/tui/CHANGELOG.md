@@ -2,13 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- The resume picker renames the selected session in place: F2 opens a dialog prefilled with the current title, Enter commits, Esc cancels ([#17262](https://github.com/can1357/oh-my-pi/pull/17262) by [@Twilight0](https://github.com/Twilight0))
+
 ### Changed
 
 - Updated Bun engine requirement to ≥1.4.4
-
-### Removed
-
-- Removed support for the TSP `t` (theme) verb, as surface theme synchronization is no longer required
 
 ### Fixed
 
@@ -18,6 +18,10 @@
 - Fixed the plan review sheet in Tern squeezing the "continue with" model tiers under a long plan, so the model name overlapped the tier buttons
 - `/usage` in Tern shows when each quota resets as a countdown (`resets in 2h30m`) instead of a clock time; hovering shows the date and time
 - Fixed extension `ui.select` dialogs treating unconfigured `j`/`k` keys as navigation, which could turn a default No into Yes when typing `ok` then Enter ([#17255](https://github.com/can1357/oh-my-pi/pull/17255) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT)).
+
+### Removed
+
+- Removed support for the TSP `t` (theme) verb, as surface theme synchronization is no longer required
 
 ## [18.13.2] - 2026-10-27
 

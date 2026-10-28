@@ -217,7 +217,7 @@ type SessionPicker = (
 ) => Promise<SessionInfo | null>;
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
-async function loadSessionPicker(): Promise<SessionPicker> {
+async function loadSessionPicker(init?: { allowRename?: boolean }): Promise<SessionPicker> {
 	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds }, { FileSessionStorage }] = await Promise.all([
 		import("@oh-my-pi/pi-tui/apps/session-picker"),
 		import("./session/history-storage"),
@@ -236,6 +236,14 @@ async function loadSessionPicker(): Promise<SessionPicker> {
 				await storage.deleteSessionWithArtifacts(session.path);
 				return true;
 			},
+			// Foreign import pickers list source-owned sessions, so F2 rename is
+			// native pickers only.
+			...(init?.allowRename === false
+				? {}
+				: {
+						renameSession: (session: SessionInfo, title: string) =>
+							SessionManager.renameSessionTitle(session.path, title, { cwd: session.cwd }),
+					}),
 			loadAllSessions: () => SessionManager.listAllForPicker(storage),
 		});
 	};
@@ -2124,7 +2132,7 @@ export async function runRootCommand(
 				pauseStartupWatchdog();
 				let selected: SessionInfo | null;
 				try {
-					const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker());
+					const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker({ allowRename: false }));
 					selected = await logger.time(`select${sourceName}Session`, selectSessionImpl, choices, {
 						title: `Import ${sourceName} Session`,
 						scopeLabel: false,
