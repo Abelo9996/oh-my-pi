@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
@@ -293,6 +293,7 @@ export class HindsightSessionState {
 	}
 
 	async recallForContext(query: string, signal?: AbortSignal): Promise<RecallOutcome> {
+		const generation = this.#recallGeneration;
 		try {
 			const response = await this.client.recall(this.bankId, query, {
 				budget: this.config.recallBudget,
@@ -313,7 +314,12 @@ export class HindsightSessionState {
 			if (signal?.aborted) return { context: null, ok: false };
 			const errorText = err instanceof Error ? err.message : String(err);
 			logger.warn("Hindsight: recall failed", { bankId: this.bankId, error: errorText });
-			this.session.emitNotice("warning", `Memory recall failed: ${errorText}`, "Hindsight");
+			// A conversation reset or session switch since the request makes its failure stale.
+			if (this.#recallGeneration === generation) {
+				// The error can carry server response text: strip terminal controls and bound it.
+				const shown = truncate(sanitizeText(errorText).replace(/\s+/g, " ").trim(), 200);
+				this.session.emitNotice("warning", `Memory recall failed: ${shown}`, "Hindsight");
+			}
 			return { context: null, ok: false };
 		}
 	}
