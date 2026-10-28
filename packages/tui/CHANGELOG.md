@@ -24,6 +24,9 @@
 ### Fixed
 
 - Fixed the LSP diagnostics view showing "No issues" for files whose language server had not reported yet; they now show as unverified ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+### Fixed
+
+- A streamed code block (SQL, logs) now retires its finished lines into terminal scrollback while the fence is still open, instead of staying in the mutable viewport until the closing fence arrives and losing every row that scrolled off screen ([#17333](https://github.com/can1357/oh-my-pi/pull/17333) by [@gzkGit777](https://github.com/gzkGit777))
 
 ## [18.13.3] - 2026-10-28
 
