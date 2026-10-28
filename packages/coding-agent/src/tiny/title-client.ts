@@ -573,7 +573,6 @@ export class TinyTitleClient {
 			worker.unsubscribe();
 			void worker.handle.terminate();
 		}
-		this.#downloads.observe({ modelKey, status: "error" }, error);
 		let failed = 0;
 		for (const [id, pending] of this.#pending) {
 			if (pending.modelKey !== modelKey) continue;
@@ -590,9 +589,11 @@ export class TinyTitleClient {
 		// A worker exiting on its own while idle is routine; losing requests is not.
 		if (failed === 0 && error.message.startsWith(WORKER_CONNECTION_CLOSED)) {
 			logger.debug("tiny-title: worker went away while idle", { modelKey });
-		} else {
-			logger.warn("tiny-title: worker error", { modelKey, error: error.message, failedRequests: failed });
+			return;
 		}
+		// Failed requests already surfaced through `#fail`; this covers a connect failure with nothing in flight.
+		if (failed === 0) this.#downloads.observe({ modelKey, status: "error" }, error.message);
+		logger.warn("tiny-title: worker error", { modelKey, error: error.message, failedRequests: failed });
 	}
 }
 

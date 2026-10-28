@@ -26,6 +26,7 @@
 - A failed Hindsight memory recall (for example `recall request timed out after 30s`) now shows a warning instead of silently sending the prompt without memories; `omp -p` writes it, and Hindsight retain failures, to stderr ([#17278](https://github.com/can1357/oh-my-pi/pull/17278) by [@enieuwy](https://github.com/enieuwy))
 - Fixed cancelling an MCP OAuth login or `/mcp` auth lookup at the wrong moment crashing the session with an unhandled rejection ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 - Large Python dicts and lists printed or left as a cell's last expression in eval now show as a collapsible JSON tree instead of a line cut off at 768 bytes
+- Fixed a spurious `failed: worker connection closed` row in the progress HUD when an unused local tiny model's worker exited after 15 idle minutes ([#17305](https://github.com/can1357/oh-my-pi/pull/17305) by [@H4vC](https://github.com/H4vC))
 
 ## [18.13.3] - 2026-10-28
 
