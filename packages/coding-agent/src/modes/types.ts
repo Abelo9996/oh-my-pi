@@ -9,7 +9,7 @@ import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
-import type { Composer, ViewportLink } from "@oh-my-pi/pi-tui/prompt/composer";
+import type { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import type { Settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -211,10 +211,6 @@ export interface InteractiveModeContext {
 	 * drawn there. Returns false when no extension link is under the click.
 	 */
 	activateViewportLink(index: number, col: number): boolean;
-	/** The extension-owned link label drawn at cell `col` of a mutable-viewport line, or `undefined`. */
-	viewportLinkAt(index: number, col: number): ViewportLink | undefined;
-	/** Highlight one extension link label (across the rows it wraps) and show a hand pointer, or clear both. */
-	setLinkHover(link: ViewportLink | undefined): void;
 	/**
 	 * Enter keyboard link-hint mode: tag each extension link label on screen, or show a status when
 	 * none is drawn. Returns false, doing nothing, unless extension links are routed (a scheme
@@ -227,11 +223,6 @@ export interface InteractiveModeContext {
 	typeLinkHint(letter: string): void;
 	/** Leave link-hint mode without activating a link. */
 	cancelLinkHints(): void;
-	/**
-	 * Whether a claimed link can be activated now: links are routed and either the link-hint key is
-	 * bound or `tui.mouse` delivers clicks. Backs `ctx.ui.getLinkClicksAvailable()`.
-	 */
-	readonly linkActivationAvailable: boolean;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */

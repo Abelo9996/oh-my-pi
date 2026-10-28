@@ -51,7 +51,7 @@ import manualContinuePrompt from "../../prompts/system/manual-continue.md" with 
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { PINNED_HUD_TOGGLE_ID, type ViewportLink } from "@oh-my-pi/pi-tui/prompt/composer";
+import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
@@ -321,8 +321,6 @@ export class InputController {
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
-	/** Extension link label the hover highlight currently tracks; repaint only on change. */
-	#lastHoverLink: ViewportLink | undefined;
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -841,19 +839,11 @@ export class InputController {
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
 		if (!cfgTuiMouse.get(this.ctx.settings)) return undefined;
-		if (this.ctx.ui.hasOverlay()) {
-			// The overlay owns the pointer now; drop a link hover it would otherwise keep.
-			this.#updateLinkHover(undefined);
-			return undefined;
-		}
+		if (this.ctx.ui.hasOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
-		if (event.motion) {
-			this.#updateHoverHighlight(event.row);
-			this.#updateLinkHover(this.#viewportLinkAt(event.row, event.col));
-		} else if (event.leftClick && !this.#activateClickedLink(event.row, event.col)) {
-			this.#focusClickedAgent(event.row);
-		}
+		if (event.motion) this.#updateHoverHighlight(event.row);
+		else if (event.leftClick && !this.#activateClickedLink(event.row, event.col)) this.#focusClickedAgent(event.row);
 		return { consume: true };
 	}
 
@@ -917,25 +907,10 @@ export class InputController {
 		return local;
 	}
 
-	#viewportLinkAt(screenRow: number, col: number): ViewportLink | undefined {
-		const line = this.#viewportLine(screenRow);
-		return line === undefined ? undefined : this.ctx.viewportLinkAt(line, col);
-	}
-
 	// A click on an extension-owned link goes to that extension instead of focusing an agent.
 	#activateClickedLink(screenRow: number, col: number): boolean {
 		const line = this.#viewportLine(screenRow);
 		return line !== undefined && this.ctx.activateViewportLink(line, col);
-	}
-
-	/** Highlight the extension link label under the pointer and show a hand pointer, repainting only on a change. */
-	#updateLinkHover(link: ViewportLink | undefined): void {
-		// Idempotent, and re-asserts the pointer shape a tracking reset (e.g. an overlay) dropped.
-		this.ctx.setLinkHover(link);
-		const last = this.#lastHoverLink;
-		if (link?.url === last?.url && link?.row === last?.row && link?.start === last?.start) return;
-		this.#lastHoverLink = link;
-		this.ctx.ui.requestRender();
 	}
 
 	/**
@@ -946,7 +921,6 @@ export class InputController {
 	 */
 	clearHoverHighlight(): void {
 		this.#lastHoverClickId = undefined;
-		this.#lastHoverLink = undefined;
 	}
 
 	#focusClickedAgent(screenRow: number): void {

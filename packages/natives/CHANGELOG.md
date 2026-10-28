@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `wrapTextWithAnsi` continuing a wrapped styled underline (`4:3`, `4:4`) as a background colour, `4:0` setting background `40`, and colon-form colours (`38:2::r:g:b`) being dropped ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed
@@ -91,9 +95,6 @@
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
 
 ## [18.12.4] - 2026-10-20
-### Fixed
-
-- Fixed `wrapTextWithAnsi` turning styled underlines into background colours: a wrapped `4:4` (dotted) or `4:3` (curly) underline now continues in the same style on the next row instead of as background `44`/`43`, `4:0` ends underlining instead of setting background `40`, and colon-form colours (`38:2::r:g:b`, `58:…`) are read as colours ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 
 ### Changed
 

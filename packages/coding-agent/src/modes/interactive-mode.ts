@@ -224,7 +224,6 @@ import {
 	extensionLinkClicksAvailable,
 	extensionLinksRouted,
 	extensionLinksVersion,
-	onExtensionLinkDrawn,
 	setExtensionLinkPicking,
 	setExtensionLinks,
 } from "@oh-my-pi/pi-tui/render/extension-links";
@@ -297,7 +296,6 @@ import {
 	type ComposerPreferences,
 	type ComposerStatusCache,
 	PINNED_HUD_TOGGLE_ID,
-	type ViewportLink,
 } from "@oh-my-pi/pi-tui/prompt/composer";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
@@ -1980,8 +1978,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	/** Mirror of `tui.mouse`, read by the TUI's per-frame inline mouse tracking probe. */
 	#mouseCapture = false;
-	/** The "press alt+o to pick an extension link" hint is shown at most once per interactive session. */
-	#linkKeyHintShown = false;
 	/** A link-scheme change awaits its transcript rebuild; any rebuild before it covers it. */
 	#extensionLinkRebuildPending = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
@@ -2106,23 +2102,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#mouseCapture = cfgTuiMouse.get(this.settings);
 		this.#eventBusUnsubscribers.push(
 			cfgTuiMouse.listen(this.settings, on => {
-				const linksWereAvailable = this.linkActivationAvailable;
+				const linksWereAvailable = extensionLinkClicksAvailable();
 				this.#mouseCapture = on;
 				// With the hint key unbound, the mouse is the only way to activate extension links.
-				if (this.linkActivationAvailable !== linksWereAvailable) this.#redrawExtensionLinks();
+				if (extensionLinkClicksAvailable() !== linksWereAvailable) this.#redrawExtensionLinks();
 				// Dropping capture must also drop the band: with reporting off no
 				// motion event will ever arrive to clear a mid-hover highlight.
 				// The controller cache goes too, or a re-enable plus motion over
 				// the same card would look unchanged and skip restoring the band.
 				if (!on) {
 					this.composer.setHoveredClickId(undefined);
-					this.setLinkHover(undefined);
 					this.#inputController?.clearHoverHighlight();
 				}
 				this.ui.requestRender();
 			}),
 		);
 		this.ui.setInlineMouseTrackingProvider(() => this.#mouseCapture);
+		setExtensionLinkPicking(this.#linkPickable);
 		// Tern's native view routes link clicks itself, so claimed links stop (or start) being
 		// pickable here: re-run the renderers reading `getLinkClicksAvailable()`.
 		this.#eventBusUnsubscribers.push(
@@ -4323,31 +4319,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const viewed = this.viewSession.extensionRunner;
 		viewed?.followSuspension(this.session.extensionRunner);
 		setExtensionLinks(viewed?.getLinkSchemes() ?? []);
-		onExtensionLinkDrawn(this.#showLinkKeyHint);
-		setExtensionLinkPicking(this.#linkPickable);
 		return extensionLinksVersion() !== before;
 	}
 
 	/** Whether the user can pick a claimed link: the link-hint key is bound or `tui.mouse` delivers clicks. */
 	#linkPickable = (): boolean => this.#mouseCapture || Boolean(appKey(this.keybindings, "app.links.hint"));
-
-	/** A claimed link was drawn: say at most once which key picks it (nothing while it is unbound). */
-	#showLinkKeyHint = (): void => {
-		if (this.#linkKeyHintShown) return;
-		this.#linkKeyHintShown = true;
-		const key = appKey(this.keybindings, "app.links.hint");
-		// Called while markdown renders; show the status after this frame.
-		if (key) queueMicrotask(() => this.showStatus(`Press ${key} to pick an extension link`));
-	};
-
-	/**
-	 * Whether a claimed link drawn now can be activated: links are routed (plain terminal, setting
-	 * on) and either the link-hint key is bound or `tui.mouse` delivers clicks. The same process-wide
-	 * answer a subagent's UI-less runner gives, since its links are picked on this screen.
-	 */
-	get linkActivationAvailable(): boolean {
-		return extensionLinkClicksAvailable();
-	}
 
 	syncExtensionLinks(): void {
 		if (!this.#applyExtensionLinks()) return;
@@ -4424,15 +4400,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	cancelLinkHints(): void {
 		this.composer.cancelLinkHints();
-	}
-
-	viewportLinkAt(index: number, col: number): ViewportLink | undefined {
-		return this.composer.viewportLinkAt(index, col);
-	}
-
-	setLinkHover(link: ViewportLink | undefined): void {
-		this.composer.setHoveredLink(link);
-		this.ui.setPointerShape(link === undefined ? undefined : "pointer");
 	}
 
 	/** Coalesce status-cache writes; `stop()` flushes a pending one synchronously. */
@@ -7922,7 +7889,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// The markdown renderer's extension-link state is process-wide; release this session's schemes
 		// only after the TUI's final history flush, which still strips their markers.
 		setExtensionLinks([]);
-		onExtensionLinkDrawn(undefined);
 		setExtensionLinkPicking(undefined);
 		this.isInitialized = false;
 	}

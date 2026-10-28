@@ -7,6 +7,7 @@
 - Added file-backed task previews and optional `taskFile` and `taskFileSha256` provenance on `AgentProgress` and `SingleResult` ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal)).
 - Added `PI_LINK_SCHEME` and `PI_LINK_HOST` for host-qualified file links with optional line and column positions in remote sessions ([#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu)).
 - `AssistantMessageComponent` accepts display-only assistant text renderers and redraws one reply with `rerenderMessage(timestamp)`; `splitAssistantMessageToolTimeline` reports each segment's `contentOffsets` ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
+- `setExtensionLinks()` makes markdown draw links of registered schemes as a dotted-underlined label without URL suffix or terminal hyperlink; `Composer.viewportLinkAt()` and `Composer.startLinkHints()` / `typeLinkHint()` pick them by click or keyboard tag (new `app.links.hint` keybinding, Alt+O) ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 ### Changed
 
 - Improved view placement for JSON trees when output lines are column‑capped
@@ -145,10 +146,6 @@
 - Fixed an inline image (such as a table's chart) disappearing in iTerm2 when new output pushed it past the top of the screen; it now moves to scrollback whole ([#16467](https://github.com/can1357/oh-my-pi/pull/16467) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
 - Fixed inline images, hyperlinks, notifications and styled underlines staying off in iTerm2 sessions reached over SSH, where the forwarded `LC_TERMINAL` marker was ignored ([#16450](https://github.com/can1357/oh-my-pi/pull/16450) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Added Eval `mcp_progress` status events, updated in place per call and evictable under the status-event cap, plus `formatMCPProgress()` and `MCPToolDetails.progress` for MCP progress display ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
-### Added
-
-- `AssistantMessageComponent` accepts display-only assistant text renderers and redraws one reply with `rerenderMessage(timestamp)`; `splitAssistantMessageToolTimeline` reports each segment's `contentOffsets` ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
-- `setExtensionLinks()` makes markdown draw links with registered schemes without a URL suffix or openable hyperlink and draws their labels with a dotted underline, `Composer.viewportLinkAt(row, col)` finds the one under a click, `Composer.setHoveredLink()` highlights a hovered one, `Composer.startLinkHints()` / `typeLinkHint()` tag the ones on screen for picking by keyboard (new `app.links.hint` keybinding, Alt+O), `setExtensionLinkPicking()` / `extensionLinkClicksAvailable()` share whether they can be picked process-wide, and `TUI.setPointerShape()` sets the mouse pointer shape (OSC 22) on the normal screen ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 
 ## [18.12.3] - 2026-10-19
 

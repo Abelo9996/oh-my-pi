@@ -402,41 +402,20 @@ describe("inline click-to-focus geometry", () => {
 		click("the details");
 		await firstActivation;
 		expect(activated).toEqual(["demo:open/7"]);
-
-		// Hovering the extension link asks for a hand pointer; moving off it restores the default.
-		const move = (col: number) => term.sendInput(`\x1b[<35;${col + 1};${screenRow + 1}M`);
-		written.length = 0;
-		move(viewport[screenRow]!.indexOf("the details") + 1);
-		await term.waitForRender();
-		expect(written.join("")).toContain("\x1b]22;pointer\x1b\\");
-		written.length = 0;
-		move(viewport[screenRow]!.indexOf("the docs") + 1);
-		await term.waitForRender();
-		expect(written.join("")).toContain("\x1b]22;\x1b\\");
 	});
 
 	it("picks an extension link by its hint tag with tui.mouse off; Esc cancels without picking", async () => {
-		const statuses: string[] = [];
-		const showStatus = mode.showStatus.bind(mode);
-		vi.spyOn(mode, "showStatus").mockImplementation((message, options) => {
-			statuses.push(message);
-			showStatus(message, options);
-		});
 		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
 		const { activated, firstActivation } = installDemoLinkExtension();
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await term.waitForRender();
-		// Rebound, so the hint must name the key actually bound, not the default.
+		// A user rebinding of the hint key is honored.
 		mode.keybindings.setUserBindings({ "app.links.hint": "alt+k" });
 		expect(cfgTuiMouse.get(mode.settings)).toBe(false);
 		expect(session.extensionRunner?.getUIContext()?.getLinkClicksAvailable()).toBe(true);
 
 		await showReply("Open [the details](demo:open/7) or read [the docs](https://example.com/docs).", "the details");
-		await term.waitForRender(() => statuses.some(message => message.includes("pick an extension link")));
-		expect(statuses.filter(message => message.includes("pick an extension link"))).toEqual([
-			"Press Alt+K to pick an extension link",
-		]);
 		const tagged = () => plainRows(term.getViewport()).some(row => row.includes("Open ahe details"));
 		const hintKey = "\x1bk";
 

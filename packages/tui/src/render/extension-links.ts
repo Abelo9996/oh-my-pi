@@ -11,7 +11,6 @@ import { visibleWidth } from "../utils";
 
 let schemes: ReadonlySet<string> = new Set();
 let version = 0;
-let drawnListener: (() => void) | undefined;
 let pickingProvider: (() => boolean) | undefined;
 // Tern's native view routes its own link clicks, so markers are drawn only for a plain terminal.
 onNativeRenderingChange(() => {
@@ -53,14 +52,6 @@ export function extensionLinksVersion(): number {
  */
 export function extensionLinksRouted(): boolean {
 	return schemes.size > 0 && !isNativeRendering();
-}
-
-/**
- * Called whenever markdown draws a registered-scheme link a click or hint tag can reach, so the
- * product can tell the user how to pick it. `undefined` unsubscribes.
- */
-export function onExtensionLinkDrawn(listener: (() => void) | undefined): void {
-	drawnListener = listener;
 }
 
 /**
@@ -123,7 +114,6 @@ export function formatExtensionLink(label: string, href: string, key: string): s
 	if (isNativeRendering()) return label;
 	const safe = href.replaceAll("\x1b", "").replaceAll("\x07", "");
 	if (!safe) return label;
-	drawnListener?.();
 	const body = label.replace(SGR_PATTERN, (sequence, params: string) =>
 		endsUnderline(params) ? sequence + UNDERLINE.on : sequence,
 	);
@@ -183,9 +173,6 @@ export interface ExtensionLinkLabel {
 	readonly end: number;
 	/** Whether only blank cells follow the label on its row, so a wrapped label may go on below. */
 	readonly endsRow: boolean;
-	/** Code-unit range of the label's drawn text in the row. */
-	readonly from: number;
-	readonly to: number;
 }
 
 /**
@@ -198,32 +185,30 @@ export function extensionLinkLabels(line: string): ExtensionLinkLabel[] {
 	const labels: ExtensionLinkLabel[] = [];
 	let x = 0;
 	let cursor = 0;
-	let open: { url: string; id: string; start: number; from: number } | undefined;
+	/** Code-unit index where the last pushed label's text ends. */
+	let lastClose = 0;
+	let open: { url: string; id: string; start: number } | undefined;
 	for (const match of line.matchAll(OSC8_PATTERN)) {
 		x += visibleWidth(line.slice(cursor, match.index));
-		if (open && x > open.start) labels.push({ ...open, end: x, endsRow: false, to: match.index });
+		if (open && x > open.start) {
+			labels.push({ ...open, end: x, endsRow: false });
+			lastClose = match.index;
+		}
 		open = undefined;
 		const params = match[1]!;
 		const uri = match[2]!;
 		cursor = match.index + match[0].length;
 		if (uri && MARKER_PARAMS_PATTERN.test(params) && extensionLinkScheme(uri)) {
-			open = { url: uri, id: params, start: x, from: cursor };
+			open = { url: uri, id: params, start: x };
 		}
 	}
 	x += visibleWidth(line.slice(cursor));
-	if (open && x > open.start) labels.push({ ...open, end: x, endsRow: true, to: line.length });
-	const last = labels.at(-1);
-	if (last && !last.endsRow && Bun.stripANSI(line.slice(last.to)).trim() === "") {
-		labels[labels.length - 1] = { ...last, endsRow: true };
+	if (open && x > open.start) {
+		labels.push({ ...open, end: x, endsRow: true });
+	} else {
+		const last = labels.at(-1);
+		if (last && Bun.stripANSI(line.slice(lastClose)).trim() === "")
+			labels[labels.length - 1] = { ...last, endsRow: true };
 	}
 	return labels;
-}
-
-/** `line` with `style` applied to `label`, one of its {@link extensionLinkLabels}, for a hover highlight. */
-export function restyleExtensionLinkLabel(
-	line: string,
-	label: ExtensionLinkLabel,
-	style: (label: string) => string,
-): string {
-	return `${line.slice(0, label.from)}${style(line.slice(label.from, label.to))}${line.slice(label.to)}`;
 }
