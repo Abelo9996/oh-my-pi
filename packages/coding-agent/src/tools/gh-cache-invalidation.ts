@@ -10,8 +10,8 @@
  * eliminates the much-worse "issue shows OPEN for up to softTtlSec after
  * `gh issue close`" failure mode reported by users.
  *
- * Plain git pushes are handled separately after successful completion, when
- * their destination can be resolved without dropping unrelated repositories.
+ * Plain `git push` calls are handled after the command exits 0 instead, once
+ * their destination repository can be resolved (`invalidateGithubCacheForBashResult`).
  *
  * Detector scope: ops that change visible issue/PR state — `close`,
  * `reopen`, `merge`, `delete`, `ready`, `lock`, `unlock`, `pin`, `unpin`,
@@ -26,7 +26,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { parseGitUrl } from "../extensibility/plugins/git-url";
 import { formatRepoRef } from "./gh-common";
 import { invalidateAllForNumber, invalidateAllForRepo, invalidatePullRequestsForRepo } from "./github-cache";
-import { extractLiteralAndChainSegments, lexShellCommand, tokenizeShellSegments } from "./shell-tokenize";
+import { tokenizeShellSegments } from "./shell-tokenize";
 
 const PR_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
 const ISSUE_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/issues\/(\d+)(?:[/?#].*)?$/i;
@@ -182,86 +182,76 @@ export function invalidateGithubCacheForBashCommand(command: string): void {
 	}
 }
 
-/** Only literal commands whose successful exit establishes that each push ran. */
-function successfulCommandArgv(command: string): readonly string[][] {
-	const chain = extractLiteralAndChainSegments(command);
-	if (chain) return chain.map(segment => segment.argv);
-	const tokens = lexShellCommand(command);
-	if (tokens.some(token => token.kind === "separator" && token.raw.trim() !== "")) return [];
-	// Do not guess expanded argv, redirects or shell control flow.
-	if (tokens.some(token => token.kind === "word" && /[$`<>{}*?]/.test(token.raw))) return [];
-	return [tokens.filter(token => token.kind === "word").map(token => token.value)];
-}
+/** Options of `git push` that consume the next argv token. */
+const PUSH_VALUE_FLAGS: Record<string, true> = {
+	"--receive-pack": true,
+	"--exec": true,
+	"-o": true,
+	"--push-option": true,
+};
 
+/** A redirection word (`2>&1` lexes as `2>`, `>/dev/null`) ends the argv. */
+const REDIRECT = /^\d*[<>]/;
+
+/** Repository a `git push` argv sends to, or undefined for dry runs and non-push commands. */
 async function pushedRepo(tokens: readonly string[], cwd: string): Promise<string | undefined> {
-	if (path.basename(tokens[0] ?? "") !== "git") return undefined;
+	if (path.basename(tokens[0]) !== "git") return undefined;
 	let i = 1;
 	for (; i < tokens.length; i++) {
 		const token = tokens[i];
-		if (token === "-C") {
-			const directory = tokens[++i];
-			if (directory === undefined) return undefined;
-			cwd = path.resolve(cwd, directory);
-		} else if (token.startsWith("-C")) {
-			cwd = path.resolve(cwd, token.slice(2));
-		} else if (token === "--no-pager" || token === "--paginate") {
-			continue;
-		} else {
-			break;
-		}
+		if (token === "-C") cwd = path.resolve(cwd, tokens[++i] ?? "");
+		else if (token.startsWith("-C")) cwd = path.resolve(cwd, token.slice(2));
+		else if (token !== "--no-pager" && token !== "--paginate") break;
 	}
-	if (tokens[i++] !== "push") return undefined;
-	let remote: string | undefined;
-	for (; i < tokens.length; i++) {
+	if (tokens[i] !== "push") return undefined;
+	let positional: string | undefined;
+	let repoFlag: string | undefined;
+	for (i++; i < tokens.length && !REDIRECT.test(tokens[i]); i++) {
 		const token = tokens[i];
 		if (token === "--dry-run" || /^-[^-]*n/.test(token)) return undefined;
-		if (token === "--repo") {
-			remote = tokens[++i];
-		} else if (token.startsWith("--repo=")) {
-			remote = token.slice("--repo=".length);
-		} else if (["--receive-pack", "--exec", "-o", "--push-option"].includes(token)) {
-			i++;
-		} else if (token === "--") {
-			remote ??= tokens[++i];
+		if (token === "--repo") repoFlag = tokens[++i];
+		else if (token.startsWith("--repo=")) repoFlag = token.slice("--repo=".length);
+		else if (PUSH_VALUE_FLAGS[token]) i++;
+		else if (token === "--") {
+			positional ??= tokens[i + 1];
 			break;
-		} else if (!token.startsWith("-")) {
-			remote ??= token;
-		}
+		} else if (!token.startsWith("-")) positional ??= token;
 	}
+	// Git's precedence: the positional repository wins over `--repo`.
+	let remote = positional ?? repoFlag;
 	const repository = vcs.git(cwd);
-	if (!remote && repository) {
+	if (!remote) {
+		if (!repository) return undefined;
 		const branch = await repository.currentBranch();
 		remote =
-			(branch ? await repository.configGet(`branch.${branch}.pushRemote`) : null) ??
-			(await repository.configGet("remote.pushDefault")) ??
-			(branch ? await repository.configGet(`branch.${branch}.remote`) : null) ??
+			(branch && (await repository.configGet(`branch.${branch}.pushRemote`))) ||
+			(await repository.configGet("remote.pushDefault")) ||
+			(branch && (await repository.configGet(`branch.${branch}.remote`))) ||
 			undefined;
 		if (!remote) {
 			const remotes = await repository.remoteList();
 			remote = remotes.length === 1 ? remotes[0] : "origin";
 		}
 	}
-	if (!remote) return undefined;
 	const url =
-		(repository && (await repository.configGet(`remote.${remote}.pushurl`))) ??
-		(repository && (await repository.remoteUrl(remote))) ??
-		remote;
+		(await repository?.configGet(`remote.${remote}.pushurl`)) ?? (await repository?.remoteUrl(remote)) ?? remote;
 	const source = parseGitUrl(url);
 	return source ? formatRepoRef(source.host, source.path) : undefined;
 }
 
 /**
- * Invalidate only live PR metadata/diffs for a successful plain git push.
- * A failed/dry-run push keeps its cache. Ambiguous shell control flow is not
- * evidence of success, and an unresolved destination never clears all repos.
+ * After a bash command exits 0, drop live PR metadata/diff rows for every
+ * repository a `git push` in it sent to. Like the `gh` detector this
+ * over-invalidates (a push hidden behind `|| true` still clears): a spurious
+ * clear costs one refetch, a missed one serves the old head until the TTL.
  */
 export async function invalidateGithubCacheForBashResult(
 	command: string,
 	cwd: string,
-	result: { exitCode?: number; cancelled?: boolean; timedOut?: boolean },
+	result: { exitCode?: number },
 ): Promise<void> {
-	if (result.exitCode !== 0 || result.cancelled || result.timedOut || !command.includes("push")) return;
-	for (const tokens of successfulCommandArgv(command)) {
+	if (result.exitCode !== 0 || !command.includes("push")) return;
+	for (const tokens of tokenizeShellSegments(command)) {
 		try {
 			const repo = await pushedRepo(tokens, cwd);
 			if (repo) invalidatePullRequestsForRepo(repo);

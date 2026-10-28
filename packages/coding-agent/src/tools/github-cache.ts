@@ -66,24 +66,13 @@ interface Row {
 let cachedDb: Database | null = null;
 let openAttempted = false;
 
-interface PendingFetch {
-	authKey: string;
-	repo: string;
-	kind: CacheKind;
-	number: number;
-	includeComments: boolean;
-	invalidated: boolean;
-}
-
-// Track only active fetches: invalidation fences older writes without retaining
-// an ever-growing map of repository/row epochs.
-const pendingFetches = new Set<PendingFetch>();
-
-function invalidatePendingFetches(matches: (fetch: PendingFetch) => boolean): void {
-	for (const fetch of pendingFetches) {
-		if (matches(fetch)) fetch.invalidated = true;
-	}
-}
+/**
+ * Bumped by every invalidation. A fetch that started before a bump returns its
+ * result but does not cache it, so a pre-mutation response cannot repopulate a
+ * row the mutation just dropped. Fencing every in-flight fetch, not only the
+ * matching rows, is deliberate: a skipped store costs one refetch.
+ */
+let invalidationEpoch = 0;
 
 function ensureParentDir(filePath: string): void {
 	try {
@@ -614,15 +603,7 @@ export function invalidate(
 	includeComments?: boolean,
 	authKey: string = DEFAULT_CACHE_AUTH_KEY,
 ): void {
-	const normalized = normalizeRepo(repo);
-	invalidatePendingFetches(
-		fetch =>
-			fetch.authKey === authKey &&
-			fetch.repo === normalized &&
-			fetch.kind === kind &&
-			fetch.number === number &&
-			(includeComments === undefined || fetch.includeComments === includeComments),
-	);
+	invalidationEpoch++;
 	const db = openDb();
 	if (!db) return;
 	try {
@@ -655,10 +636,7 @@ export function invalidate(
  * be far more expensive than a write-amplified DELETE.
  */
 export function invalidateAllForNumber(number: number, repo?: string): void {
-	const normalized = repo === undefined ? undefined : normalizeRepo(repo);
-	invalidatePendingFetches(
-		fetch => fetch.number === number && (normalized === undefined || fetch.repo === normalized),
-	);
+	invalidationEpoch++;
 	const db = openDb();
 	if (!db) return;
 	try {
@@ -674,7 +652,7 @@ export function invalidateAllForNumber(number: number, repo?: string): void {
 
 /** Drop every cached row. Test helper. */
 export function clearAll(): void {
-	invalidatePendingFetches(() => true);
+	invalidationEpoch++;
 	const db = openDb();
 	if (!db) return;
 	try {
@@ -692,8 +670,7 @@ export function clearAll(): void {
  * be identified. Over-invalidation is deliberate (see module header).
  */
 export function invalidateAllForRepo(repo?: string): void {
-	const normalized = repo === undefined ? undefined : normalizeRepo(repo);
-	invalidatePendingFetches(fetch => normalized === undefined || fetch.repo === normalized);
+	invalidationEpoch++;
 	const db = openDb();
 	if (!db) return;
 	try {
@@ -709,8 +686,8 @@ export function invalidateAllForRepo(repo?: string): void {
 
 /** Drop live PR rows after a push, leaving issues and retained snapshots alone. */
 export function invalidatePullRequestsForRepo(repo: string): void {
+	invalidationEpoch++;
 	const normalized = normalizeRepo(repo);
-	invalidatePendingFetches(fetch => fetch.repo === normalized && (fetch.kind === "pr" || fetch.kind === "pr-diff"));
 	const db = openDb();
 	if (!db) return;
 	try {
@@ -725,7 +702,7 @@ export function invalidatePullRequestsForRepo(repo: string): void {
  * next access reopens against (possibly) a different DB path.
  */
 export function resetForTests(): void {
-	invalidatePendingFetches(() => true);
+	invalidationEpoch++;
 	if (cachedDb) {
 		try {
 			cachedDb.close();
@@ -827,24 +804,11 @@ async function fetchAndStore<T>(
 	fetchFresh: () => Promise<FreshResult<T>>,
 	status: "miss" | "refreshed",
 ): Promise<CacheLookupResult<T>> {
-	const pending: PendingFetch = {
-		authKey,
-		repo: normalizeRepo(repo),
-		kind,
-		number,
-		includeComments,
-		invalidated: false,
-	};
-	pendingFetches.add(pending);
-	try {
-		const fresh = await fetchFresh();
-		const fetchedAt = Date.now();
-		// Invalidated mid-flight: the result predates the change, so do not cache it.
-		if (!pending.invalidated) storeResult(authKey, repo, kind, number, includeComments, fresh, fetchedAt);
-		return { ...fresh, status, fetchedAt };
-	} finally {
-		pendingFetches.delete(pending);
-	}
+	const epoch = invalidationEpoch;
+	const fresh = await fetchFresh();
+	const fetchedAt = Date.now();
+	if (epoch === invalidationEpoch) storeResult(authKey, repo, kind, number, includeComments, fresh, fetchedAt);
+	return { ...fresh, status, fetchedAt };
 }
 
 /**

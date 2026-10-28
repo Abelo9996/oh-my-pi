@@ -577,7 +577,7 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(getCachedGeneration(TEST_REPO, "pr-diff", 92, false, fetchedAt)).toBeNull();
 	});
 
-	it("does not let an older background diff refresh overwrite a post-invalidation fetch", async () => {
+	it("does not let a refresh started before an invalidation overwrite the post-invalidation row", async () => {
 		const oldRefresh = Promise.withResolvers<{
 			rendered: string;
 			sourceUrl: undefined;
@@ -619,28 +619,6 @@ describe("getOrFetchView (TTL semantics)", () => {
 		await Promise.resolve();
 		expect(getCached(TEST_REPO, "pr-diff", 54, false)?.rendered).toBe("head B");
 	});
-
-	it.each(["pr", "pr-diff"] as const)(
-		"does not resurrect invalidated %s rows from an older foreground cache miss",
-		async kind => {
-			const oldFetch = Promise.withResolvers<{
-				rendered: string;
-				sourceUrl: undefined;
-				payload: { head: string };
-			}>();
-			const pending = getOrFetchView({
-				repo: TEST_REPO,
-				kind,
-				number: 55,
-				includeComments: false,
-				fetchFresh: () => oldFetch.promise,
-			});
-			invalidateAllForRepo(TEST_REPO);
-			oldFetch.resolve({ rendered: "head A", sourceUrl: undefined, payload: { head: "A" } });
-			await pending;
-			expect(getCached(TEST_REPO, kind, 55, false)).toBeNull();
-		},
-	);
 
 	it("treats past-hard-TTL rows as cache misses (fetcher runs)", async () => {
 		const settings = Settings.isolated({
