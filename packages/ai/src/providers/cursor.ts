@@ -1196,6 +1196,9 @@ function streamCursorWithWireMode(
 		// no later request can address; its cache entries are released at the end.
 		const ephemeralConversation =
 			!retryContext && options?.conversationId === undefined && options?.sessionId === undefined;
+		// Whether an earlier request already opened this conversation. A session
+		// id minted per call (e.g. by `streamSimple`) never has one.
+		let knownConversation = retryContext !== undefined;
 		// The turn's server records stand for the opening user message and tool
 		// results as the server saw them; they are captured only while what the
 		// host keeps still matches. Hashed now, before anything awaits, since a
@@ -1244,6 +1247,7 @@ function streamCursorWithWireMode(
 			// the last user message.
 			const rotatedFresh = retryContext ? false : freshRotatedConversationIds.has(conversationId);
 			const cachedConversation = cursorConversations.get(conversationId);
+			if (cachedConversation) knownConversation = true;
 			activeBlobStore = retryContext?.blobStore ?? cachedConversation?.blobs ?? new Map<string, Uint8Array>();
 			const blobStore = activeBlobStore;
 			const conversationEntry: CursorConversationEntry = { state: cachedConversation?.state, blobs: blobStore };
@@ -1857,9 +1861,10 @@ function streamCursorWithWireMode(
 					from: conversationId,
 					to: rotated,
 				});
-				// Ephemeral calls discard the rotation in `finally`, so keep
-				// Cursor's non-retryable verdict there.
-				rotatedRejection = !ephemeralConversation;
+				// Only a conversation an earlier request opened can be poisoned. A
+				// first request's rejection is real, and a caller retrying without a
+				// stable id would never reach the rotated one; keep Cursor's verdict.
+				rotatedRejection = knownConversation;
 			}
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;

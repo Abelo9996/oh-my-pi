@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -482,5 +483,18 @@ describe("Cursor conversationId rotation (issue #8345)", () => {
 		expect(seen[0]?.conversationId).toBe("sess-cut-rotate");
 		expect(seen[1]?.conversationId).toBe("sess-cut-rotate");
 		expect(seen[2]?.conversationId).not.toBe("sess-cut-rotate");
+	});
+
+	it("keeps Cursor's verdict when the session id is minted for this one call", async () => {
+		// `streamSimple` mints a session id when the caller passes none, so a
+		// caller's retry would open yet another conversation, never the rotated one.
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["checkpointProviderError"]);
+
+		const result = await streamSimple(makeModel(baseUrl), resumeContext(), { apiKey: "test-token" }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(400);
+		expect(AIError.retriable(result.errorId)).toBe(false);
+		expect(seen).toHaveLength(1);
 	});
 });
