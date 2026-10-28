@@ -510,13 +510,13 @@ export class HindsightSessionState {
 		]);
 	}
 
-	async recallForCompaction(messages: HindsightMessage[]): Promise<string | undefined> {
+	async recallForCompaction(messages: HindsightMessage[], signal?: AbortSignal): Promise<string | undefined> {
 		const lastUser = messages.findLast(m => m.role === "user");
 		if (!lastUser) return undefined;
 
 		const query = composeRecallQuery(lastUser.content, messages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
-		const { context } = await this.recallForContext(truncated);
+		const { context } = await this.recallForContext(truncated, signal);
 		return context ?? undefined;
 	}
 
