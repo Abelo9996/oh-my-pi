@@ -4,7 +4,18 @@
 
 ### Changed
 
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.2] - 2026-10-27
+
+### Added
+
+- Added opt-in, cycle-safe descendant-link traversal to native `glob` through `followLinks`, leaving default traversal unchanged ([#17180](https://github.com/can1357/oh-my-pi/pull/17180) by [@alphastorm](https://github.com/alphastorm))
+
+### Changed
+
 - Faster native line, word, and structured patch diffs on large edits ([#17015](https://github.com/can1357/oh-my-pi/pull/17015) by [@GTanger](https://github.com/GTanger))
+
 ### Fixed
 
 - Fixed the built-in `sort` using many times its `-S` buffer size, or more memory than its container allows or the machine has available, on inputs of short lines, and ignoring `timeout` or a cancel while it sorts ([#17155](https://github.com/can1357/oh-my-pi/pull/17155) by [@sjawhar](https://github.com/sjawhar))
@@ -12,15 +23,7 @@
 - Fixed the built-in `sort -S N%` using the wrong buffer size: `-S 50%` gave 0 bytes and `-S 100%` a thousand times the machine's memory; it is now N percent of physical memory as in GNU sort ([#17155](https://github.com/can1357/oh-my-pi/pull/17155) by [@sjawhar](https://github.com/sjawhar))
 - Exited bash-tool `&` jobs are reaped without another command; `wait` still reports their status, and `$!` works inside pipelines, subshells, and command substitutions ([#17144](https://github.com/can1357/oh-my-pi/issues/17144)).
 - On macOS, the bash tool's built-in `ps` includes other users' processes and unreaped zombies when selecting a PID ([#17144](https://github.com/can1357/oh-my-pi/issues/17144)).
-### Added
-
-- Added opt-in, cycle-safe descendant-link traversal to native `glob` through `followLinks`, leaving default traversal unchanged ([#17180](https://github.com/can1357/oh-my-pi/pull/17180) by [@alphastorm](https://github.com/alphastorm))
-
-### Fixed
-
 - Fixed native `glob` file-type filters discarding target size and modification time for linked files ([#17180](https://github.com/can1357/oh-my-pi/pull/17180) by [@alphastorm](https://github.com/alphastorm))
-### Fixed
-
 - Fixed leading UTF-8 BOMs causing embedded `jq` JSON input parse errors while preserving raw-input bytes ([#17179](https://github.com/can1357/oh-my-pi/pull/17179) by [@alphastorm](https://github.com/alphastorm))
 - Fixed the shell's `timeout` and tool aborts not stopping built-in commands that were still reading (`cat /dev/zero`, huge files, FIFOs with no writer) ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a tool abort leaving a background in-process command, such as `cat /dev/zero > /dev/null &`, running and keeping a core busy after its shell session was gone ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))

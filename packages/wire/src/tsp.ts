@@ -28,7 +28,7 @@ export const TSP_DEFAULT_APC_LIMIT = 65_536;
 export const TSP_DEFAULT_CREDITS = 2;
 
 /** One-letter message verb. */
-export type TspVerb = "q" | "o" | "f" | "b" | "t" | "x" | "r" | "e";
+export type TspVerb = "q" | "o" | "f" | "b" | "x" | "r" | "e";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Vocabulary
@@ -967,21 +967,6 @@ export interface TspClose {
 	id: string;
 	/** Keep `main` in scrollback (true) or remove the surface (false). */
 	keep: boolean;
-}
-
-/**
- * Verb `t`: the program's resolved theme for a surface, sent after `o` and
- * before its first `f`, and again whenever the theme or variant changes.
- * Each variant maps token names to `#rrggbb`; tokens left at the terminal
- * default are omitted. A program with one variant sends only that one.
- */
-export interface TspPalette {
-	/** Surface id. */
-	sf: string;
-	dark?: Readonly<Record<string, string>>;
-	light?: Readonly<Record<string, string>>;
-	/** Theme names behind each variant. */
-	name?: { dark?: string; light?: string };
 }
 
 /** Verb `q`. */

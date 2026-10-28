@@ -17,7 +17,9 @@ import * as loopCondition from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
 import { cfgCompletionNotify, cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex, listSessionRecaps } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -86,6 +88,9 @@ describe("InteractiveMode idle recap", () => {
 		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 		closeSessionIndex();
 		restoreSettingsTestState(settingsState);
+		// The mode opens process-wide history.db/agent.db under the temp agent dir; Windows can't unlink open files.
+		HistoryStorage.close();
+		AgentStorage.close();
 		dir.removeSync();
 	});
 

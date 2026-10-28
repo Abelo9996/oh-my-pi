@@ -180,6 +180,12 @@ function formatAsyncWaitLabel(jobIds: readonly string[]): string {
 	return `Waiting for ${jobIds.length} background jobs: ${listed}${more}`;
 }
 
+/** Render args for a live card: the harness strips `i` from executed args, but the stored block keeps it. */
+function renderArgsWithIntent(args: unknown, intent: string | undefined): unknown {
+	if (intent === undefined || !isRecord(args) || INTENT_FIELD in args) return args;
+	return { ...args, [INTENT_FIELD]: intent };
+}
+
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	/** Timestamp of the current turn's user prompt; drives the usage row's prompt→yield delta. */
@@ -444,11 +450,13 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
-			// The TUI already refreshes the pending-messages bar at every queue
-			// mutation call site (`updatePendingMessagesDisplay()` in ui-helpers.ts);
-			// this event exists for RPC/ACP clients that have no equivalent local
-			// call site to hook, so there is nothing additional to do here.
-			queue_update: async () => {},
+			// The pending-messages bar mirrors the queue snapshot this event carries.
+			// Refreshing only at the TUI's own call sites left pills of messages the
+			// agent drained by itself (live steering, a queued batch it delivered)
+			// standing above the prompt after they were sent.
+			queue_update: async () => {
+				this.ctx.updatePendingMessagesDisplay();
+			},
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -1914,7 +1922,7 @@ export class EventController {
 			this.#resetReadGroup();
 			const component = new ToolExecutionComponent(
 				renderToolName,
-				event.args,
+				renderArgsWithIntent(event.args, event.intent),
 				{
 					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 					showImages: cfgTerminalShowImages.get(settings),
@@ -1952,7 +1960,7 @@ export class EventController {
 			this.#toolArgsReveal.finish(event.toolCallId);
 			const component = this.ctx.pendingTools.get(event.toolCallId);
 			if (component && typeof component.updateArgs === "function") {
-				component.updateArgs(event.args, event.toolCallId);
+				component.updateArgs(renderArgsWithIntent(event.args, event.intent), event.toolCallId);
 				if (typeof component.setArgsComplete === "function") {
 					component.setArgsComplete(event.toolCallId);
 				}
@@ -2421,6 +2429,9 @@ export class EventController {
 		this.#settleWatchEpoch = undefined;
 		const session = this.ctx.session;
 		try {
+			// Ending this wait means "stay quiet until I prompt"; latch before awaiting the
+			// abort so a job finishing in between cannot start a turn.
+			session.suppressAutoResumeUntilPrompt();
 			await session.abort({ reason: USER_INTERRUPT_LABEL });
 			await this.#runSerialized(async () => {
 				if (this.ctx.session !== session || session.isStreaming) return;

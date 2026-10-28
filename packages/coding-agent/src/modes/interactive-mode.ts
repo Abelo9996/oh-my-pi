@@ -54,6 +54,7 @@ import {
 	jobWidgetSummary,
 	latestJobWidget,
 } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { AsyncJobManager } from "../async/job-manager";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -99,9 +100,13 @@ import type {
 } from "../extensibility/extensions";
 import type {
 	CompactOptions,
+	ExtensionSessionModes,
 	PlanReviewChoice,
 	PlanReviewOption,
 	PlanReviewRequestedEvent,
+	SessionModeRequest,
+	SessionModeResult,
+	SessionModeState,
 } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
@@ -217,7 +222,7 @@ import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
-import { getEditorCommand, openInEditor } from "../utils/external-editor";
+import { getEditorCommand, getEditorName, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
 import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
@@ -309,6 +314,7 @@ import {
 	isLoopDurationExpired,
 	isLoopLimitExhausted,
 	parseLoopArgs,
+	type LoopLimitConfig,
 } from "./loop-limit";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import { OAuthManualInputManager } from "./oauth-manual-input";
@@ -316,6 +322,7 @@ import { formatPersistenceNotice } from "./persistence-failure";
 import { resolveComposerHint } from "@oh-my-pi/pi-tui/prompt/composer-hints";
 import { hintUsage } from "../utils/usage-counter";
 import {
+	getInspectableSubagentCount,
 	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
 } from "@oh-my-pi/pi-tui/overlays/running-subagent-badge";
@@ -364,6 +371,7 @@ import {
 	cfgComposerPredictions,
 	cfgComposerShape,
 	cfgComposerTokenRate,
+	cfgDisplayAdvisorCollapsedLines,
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
 	cfgDisplayHideToolActivity,
@@ -417,6 +425,7 @@ import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
+import { cfgExtensionHandlersModeControl } from "../extensibility/settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
 import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
@@ -466,6 +475,7 @@ const cfgLiveUiSettings = combine({
 	hideThinkingBlock: cfgHideThinkingBlock,
 	proseOnlyThinking: cfgProseOnlyThinking,
 	expandThinkingBlocks: cfgExpandThinkingBlocks,
+	"display.advisorCollapsedLines": cfgDisplayAdvisorCollapsedLines,
 	"display.cacheMissMarker": cfgDisplayCacheMissMarker,
 	"display.collapseCompacted": cfgDisplayCollapseCompacted,
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
@@ -750,14 +760,47 @@ interface RunningSegmentSpec {
 	readonly act: string;
 }
 
-/** `prev` while it still shows `running`, else a fresh segment for `spec`; undefined when nothing runs. */
-function runningSegment(
-	prev: RunningSegment | undefined,
+/** The agents segment with the session's inspectable agent count it was described from. */
+interface AgentsSegment extends RunningSegment {
+	readonly inSession: number;
+}
+
+/**
+ * The running count while subagents run; once none do, a muted icon while the
+ * session still has agents the hub can inspect (finished, parked, killed), so
+ * the click into the hub outlives the last running subagent. Undefined when
+ * the session has none.
+ */
+function agentsSegment(
+	prev: AgentsSegment | undefined,
 	running: number,
+	inSession: number,
 	spec: RunningSegmentSpec,
-): RunningSegment | undefined {
-	if (running === 0) return undefined;
-	return prev?.running === running ? prev : { running, node: describeRunningSegment(spec, running) };
+): AgentsSegment | undefined {
+	if (running > 0) {
+		return prev?.running === running ? prev : { running, inSession, node: describeRunningSegment(spec, running) };
+	}
+	if (inSession === 0) return undefined;
+	if (prev?.running === 0 && prev.inSession === inSession) return prev;
+	return { running: 0, inSession, node: describeIdleAgentsSegment(spec, inSession) };
+}
+
+/** The idle agents segment: a muted icon, no count; the hover label says how many agents the hub holds. */
+function describeIdleAgentsSegment(spec: RunningSegmentSpec, inSession: number): NativeNode {
+	const label = `No ${spec.noun}s running · ${inSession} in this session`;
+	return node(
+		"row",
+		{
+			role: "omp.hud.seg",
+			gap: "xs",
+			align: "center",
+			title: `${label}  ${spec.shortcut}`,
+			aria: label,
+			actions: { click: spec.act },
+		},
+		[node("icon", { name: spec.icon, tone: "muted" }, undefined, "icon")],
+		spec.key,
+	);
 }
 
 /** The background-jobs segment of the running-work counter. */
@@ -1338,6 +1381,26 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopPrompt: string | undefined = undefined;
 	loopLimit: LoopLimitRuntime | undefined = undefined;
 	loopCondition: LoopConditionConfig | undefined = undefined;
+	/** Last state reported through `mode_changed`; starts inactive so a restored session's modes are reported too. */
+	#reportedModeState: SessionModeState = {
+		plan: { status: "inactive" },
+		vibe: { status: "inactive" },
+		goal: { status: "inactive" },
+		loop: { status: "inactive" },
+	};
+	#reportedModeKey = JSON.stringify(this.#reportedModeState);
+	/** A `ctx.sessionModes.set()` transition is running: concurrent calls are refused. */
+	#modeSetInFlight = false;
+	/** Open mode transitions; `mode_changed` waits until the outermost one settles. */
+	#modeChangeHolds = 0;
+	/** A `mode_changed` report is waiting for the running session switch to settle. */
+	#modeChangeAwaitsSessionTransition = false;
+	/** False until init() has restored the journaled modes; before that the state is not yet the session's. */
+	#modesRestored = false;
+	readonly sessionModes: ExtensionSessionModes = {
+		getState: () => this.#getSessionModeState(),
+		set: request => this.#setSessionMode(request),
+	};
 	/**
 	 * Aborts the in-flight `--while` / `--until` evaluation. Esc between
 	 * iterations lands while the condition command is still running, and
@@ -1468,21 +1531,34 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#todoHudNative: { checklist: NativeNode; fallback: NativeNode } | undefined;
 	#hudPillsNative: { children: readonly NativeChild[]; node: NativeNode } | undefined;
-	#agentsSegment: RunningSegment | undefined;
+	#agentsSegment: AgentsSegment | undefined;
 	#jobsSegment: JobsSegment | undefined;
 	/** The job widget registry this mode repaints on, and how to stop listening to it. */
 	#jobWidgetsListener: { registry: JobWidgetRegistry; unsubscribe: () => void } | undefined;
+	/** The job manager whose settled jobs repaint the running counts, and how to stop listening to it. */
+	#jobSettleListener: { manager: AsyncJobManager; unsubscribe: () => void } | undefined;
 	/**
 	 * Repaint whenever a shown job widget changes (the HUD jobs segment, the
 	 * status line's glance), following the root job manager's current registry.
 	 */
 	#syncJobWidgetsListener(): void {
-		const registry = this.session.asyncJobManager?.widgets;
-		if (this.#jobWidgetsListener?.registry === registry) return;
-		this.#jobWidgetsListener?.unsubscribe();
-		this.#jobWidgetsListener = registry
-			? { registry, unsubscribe: registry.subscribe(() => this.ui.requestRender()) }
-			: undefined;
+		const manager = this.session.asyncJobManager;
+		const registry = manager?.widgets;
+		if (this.#jobWidgetsListener?.registry !== registry) {
+			this.#jobWidgetsListener?.unsubscribe();
+			this.#jobWidgetsListener = registry
+				? { registry, unsubscribe: registry.subscribe(() => this.ui.requestRender()) }
+				: undefined;
+		}
+		// The HUD's and status line's job counts are read at render: a job that
+		// settles without a result delivery (cancelled, a watched task job) would
+		// otherwise stay counted as running until something else repaints.
+		if (this.#jobSettleListener?.manager !== manager) {
+			this.#jobSettleListener?.unsubscribe();
+			this.#jobSettleListener = manager
+				? { manager, unsubscribe: manager.onJobSettled(() => this.ui.requestRender()) }
+				: undefined;
+		}
 	}
 	/** Gen tok/s for the native composer bar, one decimal (a steadier `rate` target): live while running, else the last reading. */
 	#nativeTokenRate(): number | undefined {
@@ -1512,21 +1588,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * The native HUD pills row: one running-work counter (`omp.hud.pill`) with
 	 * an agents segment, then a jobs segment, each present only while its
-	 * count is non-zero; the row is hidden while both are absent.
+	 * count is non-zero (the agents segment stays as a muted icon while the
+	 * session holds finished subagents); the row is hidden while both are absent.
 	 */
 	describeHudPills(): NativeNode {
 		// Agents count as the status-line badge counts them, from the agent
 		// registry: the observer registry only hears task-executor lifecycles,
 		// so an agent a peer message woke or revived would run without a segment.
-		const agents = cfgDisplayPinnedAgents.get(settings) === "off" ? 0 : this.#runningSubagentCount;
-		this.#agentsSegment = runningSegment(this.#agentsSegment, agents, {
-			key: "agents",
-			icon: "users",
-			tone: "accent",
-			noun: "agent",
-			shortcut: formatDoubleTap("left"),
-			act: "agents.open",
-		});
+		const showAgents = cfgDisplayPinnedAgents.get(settings) !== "off";
+		this.#agentsSegment = agentsSegment(
+			this.#agentsSegment,
+			showAgents ? this.#runningSubagentCount : 0,
+			showAgents ? this.#inspectableSubagentCount : 0,
+			{
+				key: "agents",
+				icon: "users",
+				tone: "accent",
+				noun: "agent",
+				shortcut: formatDoubleTap("left"),
+				act: "agents.open",
+			},
+		);
 		this.#syncJobWidgetsListener();
 		// A subagent's task job draws a widget too, though it counts as no
 		// background job: its widget alone keeps the segment and hover card up.
@@ -1889,6 +1971,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
 	#todoHudSubagentKey: string | undefined;
 	#runningSubagentCount = 0;
+	/** Agents the hub can show, running or not: keeps the HUD agents segment up after the last one finishes. */
+	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
 	#subagentHudKey = "";
@@ -2622,6 +2706,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
 		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
+		this.#modesRestored = true;
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
 		// the startup default. "Brand-new" means the resolved branch carries no
@@ -2660,6 +2745,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(() => {
 			this.#jobWidgetsListener?.unsubscribe();
 			this.#jobWidgetsListener = undefined;
+			this.#jobSettleListener?.unsubscribe();
+			this.#jobSettleListener = undefined;
 		});
 
 		this.#eventBusUnsubscribers.push(
@@ -2671,6 +2758,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (event.type === "config_warnings_changed") {
 					this.#syncConfigWarningHeader();
 				}
+				// A turn the TUI did not submit (an extension message, a background job) leaves
+				// getUserInput pending, so arm the loop's next iteration here instead.
+				if (event.type === "agent_end" && this.onInputCallback) this.#scheduleLoopAutoSubmit();
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
@@ -3326,6 +3416,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.loopModeEnabled ? { state, limit: this.loopLimit, condition: this.loopCondition } : undefined,
 		);
 		this.ui.requestRender();
+		this.#notifyModeChanged();
 	}
 
 	disableLoopMode(message = "Loop mode disabled."): void {
@@ -3389,26 +3480,260 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showError(parsed);
 			return undefined;
 		}
-		this.loopModeEnabled = true;
-		this.loopModePaused = false;
-		this.loopPrompt = undefined;
-		this.loopLimit = createLoopLimitRuntime(parsed.limit);
-		this.loopCondition = parsed.condition;
-		this.#syncLoopModeStatus();
-		const limitSuffix = parsed.limit ? ` Limited to ${describeLoopLimit(parsed.limit)}.` : "";
-		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
-		// The condition is a *continuation* signal: the first iteration always
-		// runs, and it is re-evaluated before each subsequent one.
-		const conditionSuffix = parsed.condition ? ` Continuing ${describeLoopCondition(parsed.condition)}.` : "";
-		const tail = parsed.prompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
-		this.showStatus(
-			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} ${appKey(this.keybindings, "app.interrupt")} suspends the ongoing loop; /loop again to disable.`,
-		);
+		this.#enableLoopMode(parsed.limit, parsed.condition, Boolean(parsed.prompt));
 		// Hand any inline prompt back to the dispatcher so the normal submit flow
 		// runs the first iteration — it records the text as the loop prompt and
 		// auto-resubmits it after each yield, identical to typing the prompt right
 		// after enabling loop mode.
 		return parsed.prompt;
+	}
+
+	#enableLoopMode(
+		limit: LoopLimitConfig | undefined,
+		condition: LoopConditionConfig | undefined,
+		hasPrompt: boolean,
+	): void {
+		this.loopModeEnabled = true;
+		this.loopModePaused = false;
+		this.loopPrompt = undefined;
+		this.loopLimit = createLoopLimitRuntime(limit);
+		this.loopCondition = condition;
+		this.#syncLoopModeStatus();
+		const limitSuffix = limit ? ` Limited to ${describeLoopLimit(limit)}.` : "";
+		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
+		// The condition is a *continuation* signal: the first iteration always
+		// runs, and it is re-evaluated before each subsequent one.
+		const conditionSuffix = condition ? ` Continuing ${describeLoopCondition(condition)}.` : "";
+		const tail = hasPrompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
+		this.showStatus(
+			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} ${appKey(this.keybindings, "app.interrupt")} suspends the ongoing loop; /loop again to disable.`,
+		);
+	}
+
+	#getSessionModeState(): SessionModeState {
+		const goalState = this.session.getGoalModeState();
+		// A completed goal keeps its tool until the turn ends; it stays active until #exitGoalMode tears it down.
+		const goalActive = this.goalModeEnabled || goalState?.mode === "exiting";
+		return {
+			plan: this.planModeEnabled
+				? { status: "active", planFilePath: this.session.getPlanModeState()?.planFilePath }
+				: { status: this.planModePaused ? "paused" : "inactive" },
+			vibe: { status: this.vibeModeEnabled ? "active" : "inactive" },
+			goal:
+				goalActive || this.goalModePaused
+					? {
+							status: goalActive ? "active" : "paused",
+							objective: goalState?.goal.objective,
+							tokenBudget: goalState?.goal.tokenBudget,
+						}
+					: { status: "inactive" },
+			loop: { status: !this.loopModeEnabled ? "inactive" : this.loopModePaused ? "paused" : "active" },
+		};
+	}
+
+	/**
+	 * Report a committed mode change. Every mode status refresh calls this, so slash commands, the
+	 * goal tool, and session restore report alongside `ctx.sessionModes.set()`. Goal accounting is
+	 * not part of the state, so usage ticks never fire it. During a session switch the report waits
+	 * until the switch settles, so handlers see the destination's restored modes, never the cleared
+	 * intermediate state, and may call `set()` from the handler.
+	 */
+	#notifyModeChanged(): void {
+		if (this.#modeChangeHolds > 0) return;
+		if (this.session.isSessionTransitioning) {
+			if (this.#modeChangeAwaitsSessionTransition) return;
+			this.#modeChangeAwaitsSessionTransition = true;
+			void this.session.waitForSessionTransition().then(() => {
+				this.#modeChangeAwaitsSessionTransition = false;
+				this.#notifyModeChanged();
+			});
+			return;
+		}
+		const state = this.#getSessionModeState();
+		const key = JSON.stringify(state);
+		if (key === this.#reportedModeKey) return;
+		const previous = this.#reportedModeState;
+		this.#reportedModeState = state;
+		this.#reportedModeKey = key;
+		void this.session.extensionRunner?.emit({ type: "mode_changed", previous, state: structuredClone(state) });
+	}
+
+	/**
+	 * Defer `mode_changed` until a multi-step transition settles: goal entry/exit flips mode flags
+	 * from `goal_updated` before the goal tool is activated or the prior tools are restored, and
+	 * session restore clears every mode before re-entering the saved one.
+	 */
+	#holdModeChanges(): Disposable {
+		this.#modeChangeHolds++;
+		return {
+			[Symbol.dispose]: () => {
+				this.#modeChangeHolds--;
+				this.#notifyModeChanged();
+			},
+		};
+	}
+
+	async #setSessionMode(request: SessionModeRequest): Promise<SessionModeResult> {
+		const refuse = (code: Extract<SessionModeResult, { ok: false }>["code"], message: string): SessionModeResult => ({
+			ok: false,
+			code,
+			message,
+			state: this.#getSessionModeState(),
+		});
+		if (!cfgExtensionHandlersModeControl.get(this.session.settings)) {
+			return refuse("disabled", "Extension mode control is disabled in settings (extensionHandlers.modeControl).");
+		}
+		// Refuse rather than queue: a call from a handler of this transition's own events would deadlock.
+		if (this.#modeSetInFlight || this.#modeChangeHolds > 0) {
+			return refuse("busy", "Another mode transition is running; retry after it settles.");
+		}
+		if (!this.#modesRestored || this.session.isSessionTransitioning) {
+			return refuse("busy", "The session's saved modes are still being restored; retry after the switch settles.");
+		}
+		if (this.session.getGoalModeState()?.mode === "exiting") {
+			return refuse("busy", "The completed goal is still being torn down; retry after its `mode_changed`.");
+		}
+		const transition = this.#planSessionModeTransition(request);
+		if (transition === undefined) return { ok: true, changed: false, state: this.#getSessionModeState() };
+		if (typeof transition !== "function") return refuse(transition.code, transition.message);
+		if (this.session.isBusyForSnapshot) {
+			return refuse("busy", "The session is busy with a turn or compaction; retry once it is idle.");
+		}
+		const before = JSON.stringify(this.#getSessionModeState());
+		this.#modeSetInFlight = true;
+		const hold = this.#holdModeChanges();
+		try {
+			await transition();
+		} finally {
+			this.#modeSetInFlight = false;
+			hold[Symbol.dispose]();
+		}
+		const state = this.#getSessionModeState();
+		return { ok: true, changed: JSON.stringify(state) !== before, state };
+	}
+
+	/**
+	 * Resolve a request against the slash commands' gates: `undefined` when the requested state
+	 * already holds, a refusal, or the transition to run. Runs the same enter/exit helpers as the
+	 * slash commands, minus their confirmations and prompt submission.
+	 */
+	#planSessionModeTransition(
+		request: SessionModeRequest,
+	): { code: "conflict" | "disabled" | "invalid_request"; message: string } | (() => Promise<void>) | undefined {
+		const invalid = (message: string) => ({ code: "invalid_request" as const, message });
+		const conflict = (mode: string) => ({ code: "conflict" as const, message: `Exit ${mode} mode first.` });
+		const planBlocks = this.planModeEnabled || this.planModePaused;
+		const goalBlocks = this.goalModeEnabled || this.goalModePaused;
+		switch (request?.mode) {
+			case "plan":
+				if (request.action === "exit") {
+					if (this.planModeEnabled) {
+						return async () => {
+							this.#hidePlanReview();
+							await this.#exitPlanMode();
+							this.#planModeHasEntered = false;
+						};
+					}
+					return this.planModePaused ? async () => this.#disablePausedPlanMode() : undefined;
+				}
+				if (request.action !== "enter") break;
+				if (this.planModeEnabled) return undefined;
+				if (!cfgPlanEnabled.get(this.session.settings)) {
+					return { code: "disabled", message: "Plan mode is disabled in settings (plan.enabled)." };
+				}
+				if (goalBlocks) return conflict("goal");
+				if (this.vibeModeEnabled) return conflict("vibe");
+				return () => this.#enterPlanMode();
+			case "vibe":
+				if (request.action === "exit") return this.vibeModeEnabled ? () => this.#exitVibeMode() : undefined;
+				if (request.action !== "enter") break;
+				if (this.vibeModeEnabled) return undefined;
+				if (planBlocks) return conflict("plan");
+				if (goalBlocks) return conflict("goal");
+				return () => this.#enterVibeMode();
+			case "goal":
+				switch (request.action) {
+					case "enter": {
+						const objective = typeof request.objective === "string" ? request.objective.trim() : "";
+						if (!objective) return invalid("Goal objective must be a non-empty string.");
+						const budget = request.tokenBudget;
+						if (budget !== undefined && !(Number.isInteger(budget) && budget > 0)) {
+							return invalid("Goal tokenBudget must be a positive integer.");
+						}
+						if (this.goalModeEnabled) {
+							const current = this.session.getGoalModeState()?.goal;
+							if (current?.objective === objective && current.tokenBudget === budget) return undefined;
+							return invalid("A goal is already active; drop it before setting a new objective.");
+						}
+						if (this.goalModePaused) return invalid("Resume or drop the paused goal first.");
+						if (!cfgGoalEnabled.get(this.session.settings)) {
+							return { code: "disabled", message: "Goal mode is disabled in settings (goal.enabled)." };
+						}
+						if (planBlocks) return conflict("plan");
+						if (this.vibeModeEnabled) return conflict("vibe");
+						return () => this.#enterGoalMode({ objective, tokenBudget: budget });
+					}
+					case "pause":
+						if (this.goalModeEnabled) return () => this.#pauseGoalAction();
+						return this.goalModePaused ? undefined : invalid("There is no active goal to pause.");
+					case "resume":
+						if (this.goalModeEnabled) return undefined;
+						if (!this.#getPausedGoalState()) return invalid("There is no paused goal to resume.");
+						if (!cfgGoalEnabled.get(this.session.settings)) {
+							return { code: "disabled", message: "Goal mode is disabled in settings (goal.enabled)." };
+						}
+						return () => this.#enterGoalMode({ resume: true });
+					case "drop":
+						if (!goalBlocks) return undefined;
+						return async () => {
+							await this.session.goalRuntime.dropGoal();
+							await this.#exitGoalMode({ reason: "dropped" });
+						};
+				}
+				break;
+			case "loop": {
+				if (request.action === "exit") return this.loopModeEnabled ? async () => this.disableLoopMode() : undefined;
+				if (request.action !== "enter") break;
+				const { limit, condition } = request;
+				const prompt = typeof request.prompt === "string" ? request.prompt.trim() : request.prompt;
+				if (prompt !== undefined && (typeof prompt !== "string" || !prompt)) {
+					return invalid("Loop prompt must be a non-empty string.");
+				}
+				const validLimit =
+					limit === undefined ||
+					(limit?.kind === "iterations" && Number.isSafeInteger(limit.iterations) && limit.iterations > 0) ||
+					(limit?.kind === "duration" && Number.isFinite(limit.durationMs) && limit.durationMs > 0);
+				if (!validLimit)
+					return invalid("Loop limit needs a positive integer `iterations` or positive `durationMs`.");
+				if (
+					condition !== undefined &&
+					(typeof condition?.command !== "string" ||
+						!condition.command.trim() ||
+						typeof condition.until !== "boolean")
+				) {
+					return invalid("Loop condition needs a non-empty `command` and a boolean `until`.");
+				}
+				if (this.loopModeEnabled) {
+					if (limit !== undefined || condition !== undefined) {
+						return invalid("Loop mode is already active; exit it before changing its bounds.");
+					}
+					if (prompt !== undefined && (prompt !== this.loopPrompt || this.loopModePaused)) {
+						return async () => this.setLoopPrompt(prompt);
+					}
+					if (!this.loopModePaused) return undefined;
+					// A paused loop resumes waiting: the next prompt becomes its body again.
+					return async () => {
+						this.loopModePaused = false;
+						this.#syncLoopModeStatus();
+					};
+				}
+				return async () => {
+					this.#enableLoopMode(limit, condition, prompt !== undefined);
+					if (prompt !== undefined) this.setLoopPrompt(prompt);
+				};
+			}
+		}
+		return invalid("Unknown mode or action.");
 	}
 
 	recordLocalSubmission(text: string, imageCount = 0): () => void {
@@ -3844,7 +4169,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// options are baked in at build time: rebuild, then retire rows already
 		// committed to native scrollback.
 		if (
-			any("display.cacheMissMarker", "display.collapseCompacted", "display.showTokenUsage", "display.showTurnTime")
+			any(
+				"display.advisorCollapsedLines",
+				"display.cacheMissMarker",
+				"display.collapseCompacted",
+				"display.showTokenUsage",
+				"display.showTurnTime",
+			)
 		) {
 			rebuildChat = true;
 		}
@@ -4046,6 +4377,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.#runningSubagentCount = agentIds.length;
+		const inspectable = getInspectableSubagentCount(registry);
+		const inspectableChanged = inspectable !== this.#inspectableSubagentCount;
+		this.#inspectableSubagentCount = inspectable;
 		const agentsChanged = this.statusLine.setRunningSubagents(agentIds);
 		let treeCost = 0;
 		if (!this.collabGuest) {
@@ -4059,7 +4393,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 		}
 		const costChanged = this.statusLine.setSubagentTreeCost(treeCost);
-		const changed = agentsChanged || costChanged;
+		const changed = agentsChanged || costChanged || inspectableChanged;
 		if (changed && options.requestRender !== false) this.ui.requestRender();
 		return changed;
 	}
@@ -4810,11 +5144,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				: undefined;
 		this.statusLine.setPlanModeStatus(status);
 		this.ui.requestRender();
+		this.#notifyModeChanged();
 	}
 
 	#updateVibeModeStatus(): void {
 		this.statusLine.setVibeModeStatus(this.vibeModeEnabled ? { enabled: true } : undefined);
 		this.ui.requestRender();
+		this.#notifyModeChanged();
 	}
 
 	/**
@@ -4918,6 +5254,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				: undefined;
 		this.statusLine.setGoalModeStatus(status);
 		this.ui.requestRender();
+		this.#notifyModeChanged();
 	}
 
 	#resetGoalContinuationSuppression(): void {
@@ -5147,6 +5484,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+		// Report only the restored result, not the cleared state in between.
+		using _hold = this.#holdModeChanges();
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		this.#guidedGoalInterviewActive = false;
@@ -5498,7 +5837,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 	}
 
-	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
+	async #enterGoalMode(options: {
+		objective?: string;
+		tokenBudget?: number;
+		resume?: boolean;
+		silent?: boolean;
+	}): Promise<void> {
+		using _hold = this.#holdModeChanges();
 		if (this.goalModeEnabled) {
 			return;
 		}
@@ -5513,13 +5858,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
+		let state: GoalModeState | undefined;
+		try {
+			state = options.resume
+				? await this.session.goalRuntime.resumeGoal()
+				: await this.session.goalRuntime.createGoal({
+						objective: options.objective ?? "",
+						tokenBudget: options.tokenBudget,
+					});
+			await this.session.setActiveToolsByName(goalTools);
+		} catch (error) {
+			this.#goalModePreviousTools = undefined;
+			// The runtime already journaled the goal; without its tool it must not
+			// stay active, or every later entry is refused against a stuck goal.
+			if (state) {
+				const runtime = this.session.goalRuntime;
+				await (options.resume ? runtime.pauseGoal() : runtime.dropGoal()).catch((rollbackError: unknown) =>
+					logger.warn("Failed to roll back goal after tool activation failed", { error: String(rollbackError) }),
+				);
+			}
+			throw error;
+		}
 		this.goalModePaused = false;
-		const state = options.resume
-			? await this.session.goalRuntime.resumeGoal()
-			: await this.session.goalRuntime.createGoal({
-					objective: options.objective ?? "",
-				});
-		await this.session.setActiveToolsByName(goalTools);
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
 		this.#resetGoalContinuationSuppression();
@@ -5537,8 +5897,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		paused?: boolean;
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
+		using _hold = this.#holdModeChanges();
 		const previousTools = this.#goalModePreviousTools;
-		if (this.goalModeEnabled && previousTools) {
+		// Not gated on goalModeEnabled: a pause's goal_updated clears that flag
+		// before this runs, which used to leave the goal tool active.
+		if (previousTools) {
 			await this.session.setActiveToolsByName(previousTools);
 		}
 		const currentState = this.session.getGoalModeState();
@@ -5666,6 +6029,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				initialIndex: dialogOptions?.initialIndex,
 				slider: extra?.slider,
 				externalEditorLabel: appKey(this.keybindings, "app.editor.external") || undefined,
+				externalEditorName: getEditorName(),
 				annotationState: dialogOptions?.annotationState,
 			},
 			{
@@ -6203,6 +6567,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/**
+	 * Paused plan → off. Tools, model, and plan state were already restored by the
+	 * prior #exitPlanMode({ paused: true }); only the paused flag, the reentry
+	 * marker, and the session mode entry remain. The draft file is kept.
+	 */
+	#disablePausedPlanMode(): void {
+		this.planModePaused = false;
+		this.#planModeHasEntered = false;
+		this.#updatePlanModeStatus();
+		this.sessionManager.appendModeChange("none");
+		this.showStatus("Plan mode disabled.");
+	}
+
 	async handlePlanModeCommand(
 		initialPrompt?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
@@ -6228,16 +6605,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		if (this.planModePaused && !initialPrompt) {
-			// No-arg third toggle: paused → off. Tools, model, and plan state were
-			// already restored by the prior #exitPlanMode({ paused: true }); only the
-			// paused flag, the reentry marker, and the session mode entry remain.
-			// Prompted /plan invocations fall through to #enterPlanMode below so the
-			// supplied prompt is still submitted as the first plan-mode turn.
-			this.planModePaused = false;
-			this.#planModeHasEntered = false;
-			this.#updatePlanModeStatus();
-			this.sessionManager.appendModeChange("none");
-			this.showStatus("Plan mode disabled.");
+			// No-arg third toggle. Prompted /plan invocations fall through to
+			// #enterPlanMode below so the supplied prompt is still submitted as the
+			// first plan-mode turn.
+			this.#disablePausedPlanMode();
 			return false;
 		}
 		if (!cfgPlanEnabled.get(this.session.settings)) {
@@ -6722,6 +7093,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #pauseGoalAction(): Promise<void> {
+		using _hold = this.#holdModeChanges();
 		if (!this.goalModeEnabled) {
 			this.showWarning("No active goal to pause.");
 			return;
@@ -6954,6 +7326,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (planState?.enabled && planState.planFilePath !== planFilePath) {
 			this.session.setPlanModeState({ ...planState, planFilePath });
 			this.sessionManager.appendModeChange("plan", { planFilePath });
+			// Reported only once committed: the next planning turn reads this state.
+			this.#notifyModeChanged();
 		}
 
 		const contextUsage = this.#getPlanApprovalContextUsage();
@@ -7374,6 +7748,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = false;
 	}
 
+	async #quitHostOwned(code: number): Promise<void> {
+		try {
+			await postmortem.quit(code);
+		} catch {
+			// Extension loading guards process.exit; cleanup already ran before
+			// the guarded exit throws, so host shutdown can use the native exit.
+			postmortem.exitProcess(code);
+		}
+	}
+
 	async shutdown(): Promise<void> {
 		if (this.#isShuttingDown) return;
 		// The previous graceful teardown failed AT the memoized session.dispose()
@@ -7383,13 +7767,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// escape hatch: quit without writing the session log. 130 = 128 + SIGINT,
 		// matching the Ctrl+C hard-abort exit code in input-controller.
 		if (this.#teardownFailed) {
-			try {
-				await postmortem.quit(130);
-			} catch {
-				// Extension/hook loading temporarily guards process.exit. Cleanup
-				// has already run; bypass that guard for this host-owned escape.
-				postmortem.exitProcess(130);
-			}
+			await this.#quitHostOwned(130);
 			return;
 		}
 		this.#beginClose();
@@ -7413,7 +7791,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			process.stderr.write(`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`);
 		}
 
-		await postmortem.quit(0);
+		await this.#quitHostOwned(0);
 	}
 
 	#handleTeardownError(action: "close" | "restart", error: unknown): void {
