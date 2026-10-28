@@ -6,6 +6,10 @@
 
 - Updated Bun engine requirement to ≥1.4.4
 
+### Fixed
+
+- Failed JSON queries on large values now show the error reason and key instead of pages of the rejected value ([#17269](https://github.com/can1357/oh-my-pi/issues/17269)).
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
