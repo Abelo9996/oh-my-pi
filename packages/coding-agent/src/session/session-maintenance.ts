@@ -547,6 +547,8 @@ export class SessionMaintenance {
 	 * persisted turn, but a new agent loop still gets its own live-array guard.
 	 */
 	#midTurnDeadEndPendingPrePrompt: string | null | undefined = undefined;
+	/** Suppress repeated fixed-context notices only within the transcript that received one. */
+	#fixedContextDeadEndNotifiedSessionId: string | undefined;
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
 	/**
@@ -1741,12 +1743,29 @@ export class SessionMaintenance {
 			suppressContinuation?: boolean;
 			terminalTextAnswer?: boolean;
 			triggerContextTokens?: number;
+			explicitNewContextRequest?: boolean;
 			detachPostCommit?: boolean;
 		},
 	): Promise<CompactionCheckResult> {
 		const model = this.#model;
 		if (!model || this.isCompacting) return COMPACTION_CHECK_NONE;
 		const settings = this.#compactionSettings;
+		if (reason === "threshold" && !options.explicitNewContextRequest) {
+			const fixedContextExceedsBand = this.#fixedContextExceedsRecoveryBand();
+			if (fixedContextExceedsBand) {
+				const sessionId = this.#host.sessionManager.getSessionId();
+				if (this.#fixedContextDeadEndNotifiedSessionId !== sessionId) {
+					this.#host.emitNotice(
+						"warning",
+						this.#compactionDeadEndWarning("clear large tool output"),
+						"compaction",
+					);
+					this.#fixedContextDeadEndNotifiedSessionId = sessionId;
+				}
+				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+			}
+			this.#fixedContextDeadEndNotifiedSessionId = undefined;
+		}
 		const branch = this.#host.sessionManager.getBranch();
 		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);
 		if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
@@ -4152,24 +4171,25 @@ export class SessionMaintenance {
 		});
 	}
 
-	#compactionDeadEndWarning(remedies: string): string {
+	#fixedContextExceedsRecoveryBand(): boolean {
 		const contextWindow = this.#model?.contextWindow ?? 0;
-		if (contextWindow > 0) {
-			const recoveryBand = Math.floor(
-				resolveThresholdTokens(contextWindow, this.#compactionSettings) * COMPACTION_RECOVERY_BAND,
+		if (contextWindow <= 0) return false;
+		const recoveryBand = Math.floor(
+			resolveThresholdTokens(contextWindow, this.#compactionSettings) * COMPACTION_RECOVERY_BAND,
+		);
+		return (
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) >
+			recoveryBand
+		);
+	}
+
+	#compactionDeadEndWarning(remedies: string): string {
+		if (this.#fixedContextExceedsRecoveryBand()) {
+			return (
+				"Compaction cannot create headroom — pausing automatic maintenance. " +
+				"The system prompt and always-sent tool schemas alone exceed the recovery band; " +
+				"reduce fixed context or adjust compaction.modelThresholds."
 			);
-			const overhead = computeNonMessageTokens(
-				this.#host.nonMessageTokenSource(),
-				this.#tokenizer,
-				this.#host.settings.revision,
-			);
-			if (overhead > recoveryBand) {
-				return (
-					"Compaction cannot create headroom — pausing automatic maintenance. " +
-					"The system prompt and always-sent tool schemas alone exceed the recovery band; " +
-					"reduce fixed context or adjust compaction.modelThresholds."
-				);
-			}
 		}
 		return (
 			"Compaction freed too little context to make progress — pausing automatic maintenance to avoid a compaction loop. " +
