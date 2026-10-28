@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `untilAborted` leaving a promise passed to it unobserved when the signal was already aborted, so its later rejection crashed the process as unhandled ([#17277](https://github.com/can1357/oh-my-pi/issues/17277))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

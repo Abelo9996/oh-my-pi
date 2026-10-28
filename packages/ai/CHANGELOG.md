@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a cancelled request whose OAuth credential was mid-refresh killing the whole session with `[Unhandled Rejection] AbortError: OAuth refresh ownership aborted by caller` ([#17277](https://github.com/can1357/oh-my-pi/issues/17277))
+- Fixed requests that joined an OAuth refresh started by an already-cancelled request failing with that request's cancellation instead of getting the refreshed credential ([#17277](https://github.com/can1357/oh-my-pi/issues/17277))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed
