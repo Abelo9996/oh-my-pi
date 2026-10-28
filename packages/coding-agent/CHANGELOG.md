@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omp config list --scope global|project` lists only the keys that layer sets, with the values as written: path-scoped `enabledModels`, `enabledProviders` and `disabledProviders` entries (`{ path, … }`) stay unresolved, so a host can edit the global value without dropping them
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
