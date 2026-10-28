@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Pin and unpin sessions from the resume picker with `Alt+K` / `Alt+Shift+K` (remappable as `app.session.pin` / `app.session.unpin`); pinned sessions move to the top at once and also lead search results ([#9837](https://github.com/can1357/oh-my-pi/pull/9837) by [@zhang17-24](https://github.com/zhang17-24))
+
 ### Fixed
 
 - Fixed `read` rejecting artifact URLs from truncation hints when cached approvals or restricted folders are configured ([#17282](https://github.com/can1357/oh-my-pi/pull/17282) by [@iliaal](https://github.com/iliaal)).
