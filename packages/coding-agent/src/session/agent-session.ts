@@ -995,15 +995,9 @@ export class AgentSession implements SettingsScope {
 	 *  (`clearQueue({ forInterrupt: true })`). The abort that follows takes them out of the
 	 *  queues and records them in the transcript without starting a turn. */
 	#interruptWithdrawnMessages = new WeakSet<AgentMessage>();
-	/** Whether a turn has run and ended on its own since the last user interrupt that
-	 *  stopped one. The interrupt's own `agent_end` does not count. Read only together with
-	 *  {@link SessionAdvisors.autoResumeSuppressed}, and only by the yield queue's idle
-	 *  injection: a background completion that lands once a later turn has already come and
-	 *  gone is not what the user stopped, so it may wake the session. The user's own queued
-	 *  follow-up stays suppressed until they resume deliberately, which is why this is a
-	 *  separate flag rather than an early clear of the suppression latch. Ending a
-	 *  background-job wait on purpose clears it too — see
-	 *  {@link AgentSession.suppressAutoResumeUntilPrompt}. */
+	/** A turn ended on its own since the last run-stopping user interrupt, so background
+	 *  completions may wake the session again. Separate from the suppression latch, which
+	 *  still holds the user's own queued follow-up until they resume deliberately. */
 	#turnSettledSinceUserInterrupt = false;
 	#queuedMessageDrainScheduled = false;
 	/** A single model-only notebook reminder queued for the current prompt generation. */
@@ -2291,9 +2285,8 @@ export class AgentSession implements SettingsScope {
 				// A user interrupt is still in effect: background completions (async job
 				// results, launch completions, MCP/LSP/advisor asides) must not restart
 				// the run the user stopped. Fold them into context so the next deliberate
-				// prompt sees them — same policy as #resumeStrandedIrcAsides. Once a later
-				// turn has run and ended on its own, that run is over and a completion is
-				// no longer a restart of it, so the session wakes again.
+				// prompt sees them — same policy as #resumeStrandedIrcAsides — until a later
+				// turn has ended on its own.
 				if (this.#advisors.autoResumeSuppressed && !this.#turnSettledSinceUserInterrupt) {
 					logger.debug("Background delivery folded into context without a turn", {
 						count: messages.length,
@@ -4850,12 +4843,7 @@ export class AgentSession implements SettingsScope {
 				await emitAgentEndNotification();
 				return;
 			}
-			// This turn reached its own end — a typed prompt, an IRC/peer wake, an extension
-			// turn or a continuation alike. Whatever a user interrupt stopped is over, so a
-			// background completion arriving from here on is not a restart of it. An
-			// `agent_end` that carries the interrupt's own aborted assistant message is not
-			// such an end; one that settles a turn the interrupt did not reach is, even when
-			// the interrupt lands while this settle is still running.
+			// A turn that ended on its own (not the interrupt's aborted message) closes the stopped run.
 			if (!isUserInterruptAbort(msg)) this.#turnSettledSinceUserInterrupt = true;
 
 			const yieldOnThisMessage = this.#assistantEndedWithSuccessfulYield(msg);
@@ -6820,14 +6808,9 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * End a user-driven wait on background work without letting it resume by
-	 * itself: the jobs keep running, and their results land in context for the
-	 * next deliberate prompt instead of starting a turn. The interactive Esc on
-	 * the background-job wait row is the one gesture that means this
-	 * (the interactive event controller's `stopAwaitingAsyncWork`); a plain `abort` — the RPC
-	 * `abort` command, an ACP cancel, an extension's `ctx.abort()` — does not,
-	 * because it stops a run, not a wait, and an unattended session must still
-	 * wake on its own jobs afterwards.
+	 * Fold background results into context until the next deliberate prompt instead of
+	 * waking on them. Used when the user ends a background-job wait; a plain `abort` stops
+	 * a run, not a wait, so unattended sessions still wake on their own jobs.
 	 */
 	suppressAutoResumeUntilPrompt(): void {
 		this.#advisors.autoResumeSuppressed = true;
@@ -11118,20 +11101,11 @@ export class AgentSession implements SettingsScope {
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
-		// The latch exists so the run the user stopped cannot resume by itself — through a
-		// queued steer/follow-up, a reclaimed advisor concern, or a background completion.
-		// An interrupt that arrives with nothing streaming and nothing queued to resume into
-		// a run stops nothing, so it has nothing to suppress; latching there would silently
-		// fold every later background completion for the rest of a session that never takes
-		// another typed prompt (an unattended agent woken by its own jobs).
+		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
+		// every later background completion for the rest of the session.
 		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
 			this.#advisors.autoResumeSuppressed = true;
-			// Only a live agent-core loop — or queued work that would start one — is a run a
-			// background completion could restart. `isStreaming` above also counts the
-			// post-turn unwind, where this turn's own `agent_end` has already settled: that
-			// turn stays settled, because no later `agent_end` would mark one again and the
-			// session would never wake on its own jobs again. Same distinction as
-			// SessionAdvisors' advisor-delivery routing.
+			// The post-turn unwind (`isStreaming` without a live loop) already settled its turn.
 			if (this.agent.state.isStreaming || this.agent.hasQueuedMessages()) {
 				this.#turnSettledSinceUserInterrupt = false;
 			}

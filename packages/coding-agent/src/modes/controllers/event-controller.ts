@@ -2429,13 +2429,8 @@ export class EventController {
 		this.#settleWatchEpoch = undefined;
 		const session = this.ctx.session;
 		try {
-			// The abort alone no longer means "stay quiet": an interrupt that stops no
-			// run leaves the session free to wake on its own jobs, which is the point of
-			// that rule. Ending this wait is the one gesture that does mean it, so say so
-			// explicitly — the results of the jobs this row was waiting for land in
-			// context, and the next deliberate prompt releases the session again. Said
-			// before the abort is awaited: a job that finishes inside that window would
-			// otherwise still start a turn.
+			// Ending this wait means "stay quiet until I prompt"; latch before awaiting the
+			// abort so a job finishing in between cannot start a turn.
 			session.suppressAutoResumeUntilPrompt();
 			await session.abort({ reason: USER_INTERRUPT_LABEL });
 			await this.#runSerialized(async () => {
