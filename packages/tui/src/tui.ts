@@ -52,6 +52,7 @@ import {
 } from "./terminal-capabilities";
 import { onTerminalBackgroundFallbackChange } from "./theme/theme";
 import { compositeLineAt } from "./render/composite";
+import { stripExtensionLinkMarkers } from "./render/extension-links";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import {
 	Ellipsis,
@@ -4103,45 +4104,48 @@ export class TUI extends Container {
 			LINE_FIT_MAX_SOURCE_CODE_UNITS,
 			Math.max(LINE_FIT_MIN_SOURCE_CODE_UNITS, safeWidth * LINE_FIT_SOURCE_WIDTH_MULTIPLIER),
 		);
+		// Extension link markers exist only for hit-testing; the terminal must never get an openable
+		// hyperlink. Strip before fitting (so a cut cannot split one) and before classifying.
+		const output = stripExtensionLinkMarkers(raw);
 
 		let source: string;
 		let classification: LineClassification;
-		if (raw.length <= maxSourceLength) {
+		if (output.length <= maxSourceLength) {
 			// The overwhelmingly common path classifies image markers, OSC 8,
 			// ANSI validity, OSC 66, non-ASCII, and exact ASCII width together.
-			classification = this.#classifyLine(raw, safeWidth);
+			classification = this.#classifyLine(output, safeWidth);
 			if (classification.isImage) {
 				return {
 					raw,
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: output,
+					terminalContent: output,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
 				};
 			}
-			source = raw;
+			source = output;
 		} else {
 			// Fitting a giant source can discard everything after the visible
 			// prefix. Preserve image rows verbatim first, but do not scan the
 			// entire source for width/OSC metadata that will immediately vanish.
-			if (TERMINAL.isImageLine(raw)) {
+			if (TERMINAL.isImageLine(output)) {
 				return {
 					raw,
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: output,
+					terminalContent: output,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
 				};
 			}
-			source = this.#lineFitSource(raw, safeWidth, maxSourceLength);
+			source = this.#lineFitSource(output, safeWidth, maxSourceLength);
 			// Preserve the former lineRewriteSequence classification: fitting can
 			// move a marker from outside the raw scan window into the prepared
 			// line's window, at which point terminal image dispatch owns it.
