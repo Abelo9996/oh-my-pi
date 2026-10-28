@@ -13,6 +13,9 @@
 - JSON trees elsewhere are more compact: objects and arrays that fit about 60 characters show on one row (`0: [[3, "vt"], 98]`), and array indices show as dim, right-aligned numbers instead of `[0]`
 - In Tern, `omp setup` is a native page: a step bar over searchable Sign in and default model sheets (the highlighted model stays in view as you arrow), and it skips the glyph, composer shape and theme steps, which Tern draws itself
 - Signing in during `omp setup` uses the same sign-in dialog as `/login`
+### Fixed
+
+- Fixed the LSP diagnostics view showing "No issues" for files whose language server had not reported yet; they now show as unverified ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ## [18.13.3] - 2026-10-28
 

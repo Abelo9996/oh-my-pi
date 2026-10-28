@@ -27,6 +27,14 @@
 - Fixed cancelling an MCP OAuth login or `/mcp` auth lookup at the wrong moment crashing the session with an unhandled rejection ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 - Large Python dicts and lists printed or left as a cell's last expression in eval now show as a collapsible JSON tree instead of a line cut off at 768 bytes
 - Fixed a spurious `failed: worker connection closed` row in the progress HUD when an unused local tiny model's worker exited after 15 idle minutes ([#17305](https://github.com/can1357/oh-my-pi/pull/17305) by [@H4vC](https://github.com/H4vC))
+- Fixed `lsp diagnostics` with clangd and other push-diagnostics servers timing out on repeated calls and waiting up to 15s for project load on the first call; a timed-out call now says it timed out instead of reporting an abort ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed post-edit diagnostics stalling for up to 15s while a push-diagnostics server starts, and being dropped when the server answered before the edit reached disk ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed `lsp diagnostics` and post-edit diagnostics timing out after a rust-analyzer cold start, or whenever a server asks for a diagnostics request to be retried ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed `lsp diagnostics` reporting "OK" or "no issues" for a file whose language server had not answered yet (it is now marked unverified), and post-edit diagnostics counting such a server as clean ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed `lsp diagnostics` on clangd reopening the file on every call: it now rebuilds the open file in place, about 3× faster on repeat calls, and still catches changed headers ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
+- Fixed post-edit diagnostics showing "OK" or "no issues" when one of several language servers, or one file of a batched edit, had not reported yet ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
+- Fixed `lsp code_actions` passing diagnostics from an earlier version of a reopened file to quick-fix providers ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
+- Fixed `lsp diagnostics` getting no report from language servers that check files only on save ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 
 ## [18.13.3] - 2026-10-28
 
