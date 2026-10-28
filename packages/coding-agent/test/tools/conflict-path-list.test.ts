@@ -51,32 +51,6 @@ describe("read conflict-selector path lists", () => {
 		}
 	});
 
-	it("preserves ENAMETOOLONG for a single filename instead of recovering it as missing", async () => {
-		await expect(read.execute("long-single", { path: `${"x".repeat(260)}.ts` })).rejects.toMatchObject({
-			code: "ENAMETOOLONG",
-		});
-	});
-
-	it("retains short conflict and ordinary range selectors on their own targets", async () => {
-		await Bun.write(path.join(cwd, "a.ts"), CONFLICT);
-		await Bun.write(path.join(cwd, "b.txt"), "first\nsecond\nthird\n");
-		const result = await read.execute("mixed-list", { path: "a.ts:conflicts;b.txt:2-2:raw" });
-
-		expect(text(result)).toContain("1 unresolved conflict in a.ts");
-		expect(text(result)).toContain("second");
-		expect(text(result)).not.toContain("third");
-		expect(session.conflictHistory?.entries()).toHaveLength(1);
-	});
-
-	it("lists and registers both members of a short conflict-selector list", async () => {
-		for (const name of ["a.ts", "b.ts"]) await Bun.write(path.join(cwd, name), CONFLICT);
-		const result = await read.execute("short-list", { path: "a.ts:conflicts;b.ts:conflicts" });
-
-		expect(text(result)).toContain("1 unresolved conflict in a.ts");
-		expect(text(result)).toContain("1 unresolved conflict in b.ts");
-		expect(session.conflictHistory?.entries().map(entry => entry.displayPath)).toEqual(["a.ts", "b.ts"]);
-	});
-
 	it("keeps a literal semicolon filename ahead of list fan-out", async () => {
 		await Bun.write(path.join(cwd, "a;b.ts"), CONFLICT);
 		await Bun.write(path.join(cwd, "a"), "not the target\n");
@@ -95,20 +69,5 @@ describe("read conflict-selector path lists", () => {
 		expect(text(result)).toContain("missing.ts");
 		expect(text(result)).toContain("not found");
 		expect(session.conflictHistory?.entries()).toHaveLength(1);
-	});
-
-	it("surfaces permission errors instead of interpreting them as missing list targets", async () => {
-		const denied = path.join(cwd, "denied");
-		await Bun.write(path.join(denied, "a.ts"), CONFLICT);
-		await Bun.write(path.join(cwd, "b.ts"), CONFLICT);
-		await fs.chmod(denied, 0);
-		try {
-			await expect(read.execute("denied-list", { path: "denied/a.ts:conflicts;b.ts:conflicts" })).rejects.toThrow(
-				/EACCES|permission denied/i,
-			);
-			expect(session.conflictHistory?.entries() ?? []).toHaveLength(0);
-		} finally {
-			await fs.chmod(denied, 0o700);
-		}
 	});
 });

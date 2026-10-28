@@ -48,7 +48,9 @@ function parseTarget(raw: string): ParsedConflictUri {
 
 async function requireEntry(session: ToolSession, id: number): Promise<ConflictEntry> {
 	const history = getConflictHistory(session);
-	await reconcileRegisteredConflicts(history);
+	// Only the addressed block's file needs re-checking; other files keep their ids until touched.
+	const registered = history.get(id);
+	if (registered) await reconcileRegisteredConflicts(history, registered.absolutePath);
 	const entry = history.get(id);
 	if (!entry) {
 		const byPath = new Map<string, number[]>();
@@ -408,6 +410,7 @@ async function resolveAllConflicts(
 		session.bumpFileMutationVersion?.(absolutePath);
 		getEditStore(session).invalidate(absolutePath);
 		for (const entry of resolvedEntries) history.invalidate(entry.id);
+		history.reconcilePath(absolutePath, { blocks: scanConflictLines(text.split("\n"), 1) });
 		const header = maybeWriteSnapshotHeader(session, absolutePath, text);
 		succeededFiles.push({ displayPath: sample.displayPath, count: resolvedEntries.length, header });
 		totalResolvedIds += resolvedEntries.length;
@@ -424,7 +427,6 @@ async function resolveAllConflicts(
 			summaryLines.push(`  ${file.displayPath}: ${file.count} ${conflictWord(file.count)}`);
 		}
 	}
-	await reconcileRegisteredConflicts(history);
 	if (directives) {
 		const remaining = history
 			.entries()

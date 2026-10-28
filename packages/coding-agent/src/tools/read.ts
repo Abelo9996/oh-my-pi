@@ -73,7 +73,6 @@ import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { isSampleProfilePath, renderSampleProfile } from "../utils/sample-profile";
 import { buildDirectoryTree, type DirectoryTree } from "../workspace-tree";
 import {
-	type ConflictFileScan,
 	formatConflictSummary,
 	formatConflictWarning,
 	formatScanCapNote,
@@ -2825,13 +2824,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						details.displayContent = capturedDisplayContent;
 					}
 
-					// Refresh known ids even when this read shows clean text after an external
-					// edit/reset. Discovery's cap never prunes unscanned registered regions.
-					let conflictScan: ConflictFileScan | undefined;
-					if (!immutable && this.session.conflictHistory?.hasPath(absolutePath)) {
-						conflictScan = await scanFileForConflicts(absolutePath);
-						this.session.conflictHistory.reconcilePath(absolutePath, conflictScan);
-					}
 					// Immutable sources have no edit path, so their markers are content, not conflicts.
 					if (!immutable && !firstLineExceedsLimit && collectedLines.length > 0) {
 						const blocks = scanConflictLines(collectedLines, startLineDisplay);
@@ -2851,7 +2843,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							let totalInFile = entries.length;
 							let truncatedAtLine: number | undefined;
 							try {
-								const fileScan = conflictScan ?? (await scanFileForConflicts(absolutePath));
+								const fileScan = await scanFileForConflicts(absolutePath);
 								totalInFile = Math.max(entries.length, fileScan.blocks.length);
 								truncatedAtLine = fileScan.truncatedAtLine;
 							} catch {

@@ -19,7 +19,6 @@ import type { ConflictBlock, ConflictEntry, ConflictScope } from "@oh-my-pi/pi-t
  * merely start with `<` or `=` never match.
  */
 
-import * as fs from "node:fs";
 import type { ToolSession } from "./index";
 import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -204,13 +203,6 @@ export class ConflictHistory {
 		return entry;
 	}
 
-	hasPath(absolutePath: string): boolean {
-		for (const entry of this.#entries.values()) {
-			if (entry.absolutePath === absolutePath) return true;
-		}
-		return false;
-	}
-
 	/**
 	 * Refresh only already-registered blocks, without registering unseen ones.
 	 * Match unchanged positions before relocations so identical distinct blocks
@@ -280,143 +272,97 @@ export class ConflictHistory {
 }
 
 /**
- * Find only registered marker blocks in fixed-size chunks. Candidate lines
- * cannot exceed the widest registered line, so unrelated oversized lines and
- * blocks never become whole-file or whole-block buffers. Retain at most one
- * match per registered id, preferring the closest occurrences for identical
- * blocks. Unchanged recorded positions let validation stop before EOF.
+ * Stream `absolutePath` for marker blocks equal to a registered entry. Unlike
+ * discovery this has no byte cap, so memory is bounded instead: only one
+ * candidate block is held, and it is dropped once it outgrows the largest
+ * registered block (in lines or line bytes). Stops early once every entry is
+ * found at its recorded line.
  */
-async function scanRegisteredConflictBlocks(
-	absolutePath: string,
-	entries: readonly ConflictEntry[],
-): Promise<ConflictBlock[]> {
-	const groups = new Map<
-		string,
-		{
-			entries: ConflictEntry[];
-			lines: string[];
-			matchedLines: number;
-			startLine: number;
-			matches: { block: ConflictBlock; distance: number }[];
-		}
-	>();
+async function findRegisteredBlocks(absolutePath: string, entries: readonly ConflictEntry[]): Promise<ConflictBlock[]> {
+	const regions = new Set<string>();
+	const unconfirmed = new Map<number, string>();
+	let maxLines = 0;
 	let maxLineBytes = 0;
 	for (const entry of entries) {
-		const lines = buildRecordedRegion(entry);
-		const key = lines.join("\n");
-		const existing = groups.get(key);
-		if (existing) existing.entries.push(entry);
-		else {
-			groups.set(key, { entries: [entry], lines, matchedLines: 0, startLine: 0, matches: [] });
-			for (const line of lines) maxLineBytes = Math.max(maxLineBytes, Buffer.byteLength(line, "utf-8"));
-		}
+		const region = buildRecordedRegion(entry);
+		const key = region.join("\n");
+		regions.add(key);
+		unconfirmed.set(entry.startLine, key);
+		maxLines = Math.max(maxLines, region.length);
+		for (const line of region) maxLineBytes = Math.max(maxLineBytes, Buffer.byteLength(line));
 	}
-	// Permit CRLF and a UTF-8 BOM on the file's first line.
-	maxLineBytes += 4;
-	const patterns = [...groups.values()];
-	let lineNumber = 1;
+	maxLineBytes += 1; // trailing CR
+
+	const found: ConflictBlock[] = [];
+	let candidate: string[] = [];
+	let candidateStart = 0;
+	/** Feed one line (`null` when over the byte bound); returns true once every entry is confirmed. */
+	const feed = (raw: string | null, lineNumber: number): boolean => {
+		const line = raw === null ? null : stripTrailingCr(raw);
+		if (line !== null && matchMarker(line, OURS_PREFIX) !== null) {
+			candidate = [line];
+			candidateStart = lineNumber;
+			return false;
+		}
+		if (candidate.length === 0) return false;
+		if (line === null || candidate.length === maxLines) {
+			candidate = [];
+			return false;
+		}
+		candidate.push(line);
+		if (matchMarker(line, THEIRS_PREFIX) === null) return false;
+		const block = scanConflictLines(candidate, candidateStart)[0];
+		candidate = [];
+		if (!block) return false;
+		const key = buildRecordedRegion(block).join("\n");
+		if (!regions.has(key)) return false;
+		found.push(block);
+		if (unconfirmed.get(block.startLine) === key) unconfirmed.delete(block.startLine);
+		return unconfirmed.size === 0;
+	};
+
+	// The decoder drops a leading BOM, as discovery's whole-file decode does.
+	const decoder = new TextDecoder();
+	let parts: Uint8Array[] = [];
 	let lineBytes = 0;
-	const parts: Buffer[] = [];
-	const append = (segment: Uint8Array): void => {
-		if (segment.length === 0) return;
-		lineBytes += segment.length;
-		if (lineBytes <= maxLineBytes) parts.push(Buffer.from(segment));
-		else parts.length = 0;
-	};
-	const finishLine = (): void => {
-		let line =
-			lineBytes > maxLineBytes
-				? null
-				: lineBytes === 0
-					? ""
-					: parts.length === 1
-						? parts[0]!.toString("utf-8")
-						: Buffer.concat(parts, lineBytes).toString("utf-8");
-		if (line !== null) {
-			line = stripTrailingCr(line);
-			if (lineNumber === 1 && line.startsWith("\uFEFF")) line = line.slice(1);
-		}
-		const opener = line !== null && matchMarker(line, OURS_PREFIX) !== null;
-		for (const group of patterns) {
-			if (opener) {
-				group.matchedLines = line === group.lines[0] ? 1 : 0;
-				group.startLine = lineNumber;
-				continue;
-			}
-			if (group.matchedLines === 0) continue;
-			if (line !== group.lines[group.matchedLines]) {
-				group.matchedLines = 0;
-				continue;
-			}
-			if (++group.matchedLines !== group.lines.length) continue;
-			group.matchedLines = 0;
-			const sample = group.entries[0]!;
-			const delta = group.startLine - sample.startLine;
-			const block: ConflictBlock = {
-				startLine: group.startLine,
-				separatorLine: sample.separatorLine + delta,
-				endLine: sample.endLine + delta,
-				baseLine: sample.baseLine === undefined ? undefined : sample.baseLine + delta,
-				oursLabel: sample.oursLabel,
-				baseLabel: sample.baseLabel,
-				theirsLabel: sample.theirsLabel,
-				oursLines: sample.oursLines,
-				baseLines: sample.baseLines,
-				theirsLines: sample.theirsLines,
-			};
-			const distance = group.entries.reduce(
-				(nearest, entry) => Math.min(nearest, Math.abs(entry.startLine - block.startLine)),
-				Number.POSITIVE_INFINITY,
-			);
-			if (group.matches.length < group.entries.length) group.matches.push({ block, distance });
-			else {
-				let furthest = 0;
-				for (let i = 1; i < group.matches.length; i++) {
-					if (group.matches[i]!.distance > group.matches[furthest]!.distance) furthest = i;
-				}
-				if (distance < group.matches[furthest]!.distance) group.matches[furthest] = { block, distance };
-			}
-		}
-		lineNumber++;
+	let lineNumber = 1;
+	const takeLine = (): string | null => {
+		const line = lineBytes > maxLineBytes ? null : decoder.decode(Buffer.concat(parts, lineBytes));
+		parts = [];
 		lineBytes = 0;
-		parts.length = 0;
+		return line;
 	};
-	let reachedEof = true;
-	for await (const chunk of fs.createReadStream(absolutePath, { highWaterMark: 64 * 1024 })) {
+	for await (const chunk of Bun.file(absolutePath).stream()) {
 		let start = 0;
-		for (let end = chunk.indexOf(10); end !== -1; end = chunk.indexOf(10, start)) {
-			append(chunk.subarray(start, end));
-			finishLine();
+		for (let end = chunk.indexOf(10); ; end = chunk.indexOf(10, start)) {
+			const segment = chunk.subarray(start, end === -1 ? chunk.length : end);
+			lineBytes += segment.length;
+			if (lineBytes <= maxLineBytes) parts.push(segment);
+			if (end === -1) break;
+			if (feed(takeLine(), lineNumber++)) return found;
 			start = end + 1;
 		}
-		if (start < chunk.length) append(chunk.subarray(start));
-		if (
-			patterns.every(group =>
-				group.entries.every(entry => group.matches.some(match => match.block.startLine === entry.startLine)),
-			)
-		) {
-			reachedEof = false;
-			break;
-		}
 	}
-	if (reachedEof && lineBytes > 0) finishLine();
-	return patterns.flatMap(group => group.matches.map(match => match.block));
+	if (lineBytes > 0) feed(takeLine(), lineNumber);
+	return found;
 }
 
-/** Validate cached ids without lifting the discovery scan cap or registering unseen blocks. */
-export async function reconcileRegisteredConflicts(history: ConflictHistory): Promise<void> {
-	const byPath = new Map<string, ConflictEntry[]>();
-	for (const entry of history.entries()) {
-		const entries = byPath.get(entry.absolutePath) ?? [];
-		entries.push(entry);
-		byPath.set(entry.absolutePath, entries);
-	}
-	for (const [absolutePath, entries] of byPath) {
+/**
+ * Re-check registered ids against the live file contents (all files, or only
+ * `absolutePath`): unchanged blocks follow line shifts, changed or vanished
+ * ones are retired, and a deleted file retires all of its ids.
+ */
+export async function reconcileRegisteredConflicts(history: ConflictHistory, absolutePath?: string): Promise<void> {
+	const byPath = Map.groupBy(
+		history.entries().filter(entry => absolutePath === undefined || entry.absolutePath === absolutePath),
+		entry => entry.absolutePath,
+	);
+	for (const [file, entries] of byPath) {
 		try {
-			history.reconcilePath(absolutePath, { blocks: await scanRegisteredConflictBlocks(absolutePath, entries) });
+			history.reconcilePath(file, { blocks: await findRegisteredBlocks(file, entries) });
 		} catch (error) {
 			if (!isEnoent(error) && !hasFsCode(error, "ENOTDIR")) throw error;
-			history.invalidatePath(absolutePath);
+			history.invalidatePath(file);
 		}
 	}
 }
