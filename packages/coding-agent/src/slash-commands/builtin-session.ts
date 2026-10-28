@@ -604,8 +604,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "hub",
+		aliases: ["subagents"],
 		icon: "agents",
-		description: "Open the live Agent Hub",
+		description: "Open the live Agent Hub (subagents, including finished ones)",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showAgentHub({ initialSection: "activity" });
 			clearSubmittedText(runtime);

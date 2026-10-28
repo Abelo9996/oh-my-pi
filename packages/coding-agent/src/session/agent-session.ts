@@ -137,7 +137,7 @@ import {
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
-import type { Settings } from "../config/settings";
+import { type Settings, withActiveSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
@@ -9137,7 +9137,9 @@ export class AgentSession implements SettingsScope {
 
 		try {
 			const args = parseCommandArgs(argsString);
-			const result = await loaded.command.execute(args, ctx, argsString);
+			// Commands that consult findScopedSettings, including /review, must see this
+			// session's cache kill switch instead of the default enabled cache.
+			const result = await withActiveSettings(this.settings, () => loaded.command.execute(args, ctx, argsString));
 			// If result is a string, it's a prompt to send to LLM
 			// If void/undefined, command handled everything
 			return result ?? "";
@@ -10323,14 +10325,20 @@ export class AgentSession implements SettingsScope {
 		return { steering, followUp };
 	}
 
-	/** Number of pending displayable messages (includes steering, follow-up, and next-turn messages).
-	 *  Reflects actual queued work (advisor cards included) — feeds hasPendingMessages()/RPC and the
-	 *  empty-submit abort gate. The user-restorable subset is surfaced by getQueuedMessages()/clearQueue(). */
+	/** Number of messages that can wake a session, plus advisor cards parked for abort replay.
+	 *  Untriggered hidden next-turn context rides with the next prompt, so it is not queued work for
+	 *  hasPendingMessages()/RPC or the empty-submit abort gate. */
 	get queuedMessageCount(): number {
+		// A scheduled hidden turn runs every pending message; otherwise only advisor cards count.
+		let pendingNextTurnCount = this.#pendingNextTurnMessages.length;
+		if (this.#scheduledHiddenNextTurnGeneration === undefined) {
+			pendingNextTurnCount = 0;
+			for (const message of this.#pendingNextTurnMessages) if (isAdvisorCard(message)) pendingNextTurnCount++;
+		}
 		return (
 			this.agent.peekSteeringQueue().filter(isDisplayableQueuedMessage).length +
 			this.agent.peekFollowUpQueue().filter(isDisplayableQueuedMessage).length +
-			this.#pendingNextTurnMessages.length
+			pendingNextTurnCount
 		);
 	}
 

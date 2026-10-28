@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.2] - 2026-10-27
+
 ### Added
 
 - Added LM Studio decision models to discovery: models LM Studio reports as `type: "decision"` are listed as `judge` models served over its `/v1/decisions` endpoint, alongside its chat models ([#17169](https://github.com/can1357/oh-my-pi/pull/17169) by [@richiestanaway](https://github.com/richiestanaway))
