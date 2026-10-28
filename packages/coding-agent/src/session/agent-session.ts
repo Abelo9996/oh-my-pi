@@ -1001,7 +1001,9 @@ export class AgentSession implements SettingsScope {
 	 *  injection: a background completion that lands once a later turn has already come and
 	 *  gone is not what the user stopped, so it may wake the session. The user's own queued
 	 *  follow-up stays suppressed until they resume deliberately, which is why this is a
-	 *  separate flag rather than an early clear of the suppression latch. */
+	 *  separate flag rather than an early clear of the suppression latch. Ending a
+	 *  background-job wait on purpose clears it too — see
+	 *  {@link AgentSession.suppressAutoResumeUntilPrompt}. */
 	#turnSettledSinceUserInterrupt = false;
 	#queuedMessageDrainScheduled = false;
 	/** A single model-only notebook reminder queued for the current prompt generation. */
@@ -6815,6 +6817,21 @@ export class AgentSession implements SettingsScope {
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
+	}
+
+	/**
+	 * End a user-driven wait on background work without letting it resume by
+	 * itself: the jobs keep running, and their results land in context for the
+	 * next deliberate prompt instead of starting a turn. The interactive Esc on
+	 * the background-job wait row is the one gesture that means this
+	 * (the interactive event controller's `stopAwaitingAsyncWork`); a plain `abort` — the RPC
+	 * `abort` command, an ACP cancel, an extension's `ctx.abort()` — does not,
+	 * because it stops a run, not a wait, and an unattended session must still
+	 * wake on its own jobs afterwards.
+	 */
+	suppressAutoResumeUntilPrompt(): void {
+		this.#advisors.autoResumeSuppressed = true;
+		this.#turnSettledSinceUserInterrupt = false;
 	}
 
 	/**
