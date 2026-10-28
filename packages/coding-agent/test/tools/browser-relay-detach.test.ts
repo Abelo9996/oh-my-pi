@@ -38,8 +38,8 @@ class ChromeBackedExtension {
 	readonly #inFlight = new Map<number, number>();
 	/** Resolved by the next forwarded command each one matches. */
 	readonly #sendWaiters = new Set<{ method: string; match: (params: unknown) => boolean; resolve: () => void }>();
-	/** Resolved by the relay's next `detach`, which ends the tab's "chrome.debugger" attachment. */
-	readonly #detachWaiters = new Set<() => void>();
+	/** Settled by the relay's next `detach` once Chrome has ended the tab's "chrome.debugger" attachment. */
+	readonly #detachWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
 	/** Answer attaches with Chrome's refusal, as while a foreign extension frame is in the tab. */
 	refuseAttach = false;
 	/** Commands answered with Chrome's refusal, as a foreign extension frame in the tab makes some of them fail. */
@@ -152,9 +152,16 @@ class ChromeBackedExtension {
 			case "detach": {
 				const root = this.#root;
 				this.#root = undefined;
-				for (const resolve of this.#detachWaiters) resolve();
+				const detached = root
+					? await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise
+					: { result: {} };
+				// Waiters learn of the detach only once Chrome has ended the attachment.
+				const failure = isRecord(detached.error) ? new Error(String(detached.error.message)) : undefined;
+				for (const waiter of this.#detachWaiters) {
+					if (failure) waiter.reject(failure);
+					else waiter.resolve();
+				}
 				this.#detachWaiters.clear();
-				if (root) await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise;
 				this.#relay.send(
 					JSON.stringify({ t: "detached", tabId: TAB_ID, reason: "target_closed", relayInitiated: true }),
 				);
@@ -194,10 +201,10 @@ class ChromeBackedExtension {
 		return promise;
 	}
 
-	/** Resolves once the relay detaches "chrome.debugger" from the tab, which ends Chrome's debugging bar. */
+	/** Resolves once the relay has detached "chrome.debugger" and Chrome confirmed it, which ends the debugging bar. */
 	nextDetach(): Promise<void> {
-		const { promise, resolve } = Promise.withResolvers<void>();
-		this.#detachWaiters.add(resolve);
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		this.#detachWaiters.add({ resolve, reject });
 		return promise;
 	}
 
@@ -339,36 +346,28 @@ describe("relay tabs Chrome detaches omp from", () => {
 		return promise;
 	}
 
-	/** Resolves once no CDP client is connected to the relay; a test awaiting it times out while one stays. */
-	function cdpClientsGone(): Promise<void> {
-		if (!relay) throw new Error("relay not started");
-		const bridge = relay.bridge;
-		if (bridge.cdpClientCount === 0) return Promise.resolve();
-		const cdpClosed = bridge.cdpClosed.bind(bridge);
-		const { promise, resolve } = Promise.withResolvers<void>();
-		const spy = spyOn(bridge, "cdpClosed").mockImplementation(connId => {
-			cdpClosed(connId);
-			if (bridge.cdpClientCount !== 0) return;
-			spy.mockRestore();
-			resolve();
-		});
-		return promise;
-	}
-
 	/**
 	 * {@link openRelayTab} on an inline tab worker, which runs in this process. Worker threads failing to start is what
 	 * puts a tab on one; it cannot be re-adopted, so a detach releases the tab.
 	 */
 	async function openInlineRelayTab(): Promise<ChromeBackedExtension> {
+		try {
+			return await withoutWorkerThreads(openRelayTab);
+		} finally {
+			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
+		}
+	}
+
+	/** Runs `fn` while worker threads cannot start, so every tab worker it spawns falls back to an inline one. */
+	async function withoutWorkerThreads<T>(fn: () => Promise<T>): Promise<T> {
 		// `Worker` is typed as a constructor, which a throwing mock implementation does not satisfy.
 		const unavailable = spyOn(globalThis, "Worker").mockImplementation((() => {
 			throw new Error("Worker threads unavailable");
 		}) as never);
 		try {
-			return await openRelayTab();
+			return await fn();
 		} finally {
 			unavailable.mockRestore();
-			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
 		}
 	}
 
@@ -527,16 +526,27 @@ describe("relay tabs Chrome detaches omp from", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"drops an inline worker's relay connection when it releases the tab it cannot re-adopt",
+		"closes an inline worker before releasing the tab it cannot re-adopt",
 		async () => {
 			const ext = await openInlineRelayTab();
-			const evaluating = ext.hanging();
-			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
-			await evaluating;
-			await ext.chromeDetach("target_closed");
-			expect(String(await stalled)).toContain("could not reattach");
-			// A core left connected keeps its claim, and could take the tab again when the relay re-announces it.
-			await cdpClientsGone();
+			const tab = getTab(name);
+			if (tab?.backend !== "worker") throw new Error("expected a worker tab");
+			// The inline core reports `closed` once it has disconnected from the relay; a core left running keeps its
+			// connection and claim, and could take the tab again when the relay re-announces it.
+			let closed = false;
+			const unsubscribe = tab.worker.onMessage(msg => {
+				if (msg.type === "closed") closed = true;
+			});
+			try {
+				const evaluating = ext.hanging();
+				const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+				await evaluating;
+				await ext.chromeDetach("target_closed");
+				expect(String(await stalled)).toContain("could not reattach");
+				expect(closed).toBe(true);
+			} finally {
+				unsubscribe();
+			}
 		},
 		60_000,
 	);
@@ -565,17 +575,12 @@ describe("relay tabs Chrome detaches omp from", () => {
 			// The recycle's worker thread cannot start, and the inline fallback's init then fails the way it does
 			// while another extension's frame is in the tab.
 			ext.refuseMethods.add("Network.enable");
-			const unavailable = spyOn(globalThis, "Worker").mockImplementation((() => {
-				throw new Error("Worker threads unavailable");
-			}) as never);
-			try {
-				const failure = String(
-					await invoke({ action: "run", ...HANG, timeout: 1 }).catch((error: unknown) => error),
-				);
-				expect(failure).toContain("timed out");
-			} finally {
-				unavailable.mockRestore();
-			}
+			const failure = String(
+				await withoutWorkerThreads(() => invoke({ action: "run", ...HANG, timeout: 1 })).catch(
+					(error: unknown) => error,
+				),
+			);
+			expect(failure).toContain("timed out");
 			expect(getTab(name)).toBeUndefined();
 			// The failed inline core connected to the relay before its init failed; left connected, it holds its
 			// session on the tab and the relay never detaches.
