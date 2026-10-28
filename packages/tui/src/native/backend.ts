@@ -39,11 +39,7 @@ import {
 	type TspOp,
 } from "@oh-my-pi/pi-wire";
 import type { Terminal } from "../terminal";
-import {
-	getCurrentThemeName,
-	isLightTheme,
-	setNativeSymbolPreset,
-} from "../theme/theme";
+import { getCurrentThemeName, isLightTheme, setNativeSymbolPreset } from "../theme/theme";
 import type { Component, OverlayOptions, RenderScheduler, RenderTimer } from "../tui";
 import { TspDocument } from "./apply";
 import { getNativeBlob, type NativeBlob } from "./blobs";
