@@ -40,10 +40,16 @@ interface FileUriOptions {
 
 let fileLinkTarget: { scheme: string; host: string } | undefined;
 
+/** URI scheme syntax (RFC 3986 §3.1), matched after lowercasing. */
+const FILE_LINK_SCHEME = /^[a-z][a-z0-9+.-]*$/;
+/** A bare host name with an optional port: no userinfo, path, query, or whitespace that would reshape the URI. */
+const FILE_LINK_HOST = /^[A-Za-z0-9._-]+(?::\d{1,5})?$/;
+
 /**
  * Resolve the remote file-link configuration once at host startup. Passing an
  * explicit object lets SDK hosts and tests configure links without changing the
- * process environment; an empty object restores ordinary file links.
+ * process environment; an empty object restores ordinary file links. An invalid
+ * scheme or host logs a warning and keeps ordinary links.
  */
 export function applyFileLinkSetting(
 	config: FileLinkConfig = {
@@ -53,11 +59,17 @@ export function applyFileLinkSetting(
 ): void {
 	fileLinkTarget = undefined;
 	if (!config.scheme) return;
-	if (!/^[a-z][a-z0-9+.-]*$/.test(config.scheme)) {
+	const scheme = config.scheme.toLowerCase();
+	if (!FILE_LINK_SCHEME.test(scheme)) {
 		logger.warn("Invalid PI_LINK_SCHEME; using ordinary file links", { scheme: config.scheme });
 		return;
 	}
-	fileLinkTarget = { scheme: config.scheme, host: config.host || os.hostname() };
+	const host = config.host || os.hostname();
+	if (!FILE_LINK_HOST.test(host)) {
+		logger.warn("Invalid PI_LINK_HOST; using ordinary file links", { host });
+		return;
+	}
+	fileLinkTarget = { scheme, host };
 }
 
 /** Stable 8-char hex ID derived from a URI — hints terminals to coalesce identical adjacent links. */

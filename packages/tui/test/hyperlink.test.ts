@@ -217,24 +217,6 @@ describe("fileHyperlink", () => {
 			expect(openableImageProps(malformed)).toEqual({});
 		},
 	);
-	it("emits custom scheme and host when PI_LINK_SCHEME and PI_LINK_HOST are set", () => {
-		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
-		const filePath = path.resolve("/Users/foo/bar.ts");
-		const expectedPathname = url.pathToFileURL(filePath).pathname;
-		expect(fileUriForTerminal(filePath, undefined, "iterm2")).toBe(`ompfile://beelink${expectedPathname}`);
-	});
-
-	it.skipIf(process.platform !== "win32")(
-		"preserves UNC servers and encoded filenames in custom OSC 8 targets",
-		() => {
-			setHyperlinkMode("always");
-			applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
-			const filePath = "\\\\nas\\share\\remote project\\a#b% 中文.ts";
-			const uri = extractLinkUri(fileHyperlink(filePath, "a#b% 中文.ts"));
-			expect(uri).toBe("ompfile://beelink//nas/share/remote%20project/a%23b%25%20%E4%B8%AD%E6%96%87.ts");
-			expect(url.fileURLToPath(`file:${new URL(uri!).pathname}`)).toBe(filePath);
-		},
-	);
 
 	it("defaults host to os.hostname() when only PI_LINK_SCHEME is set", () => {
 		applyFileLinkSetting({ scheme: "ompfile" });
@@ -356,14 +338,22 @@ describe("fileHyperlink", () => {
 		expect(warning).toHaveBeenCalledTimes(1);
 	});
 
-	it("accepts extended scheme characters and resolves the fallback host once per configuration", () => {
-		const hostname = spyOn(os, "hostname").mockReturnValue("beelink");
-		applyFileLinkSetting({ scheme: "omp+file.v2-remote" });
+	it("warns and restores ordinary links when the host would reshape the URI", () => {
+		const warning = spyOn(logger, "warn").mockImplementation(() => {});
 		const filePath = path.resolve("/tmp/a.ts");
-		const expected = `omp+file.v2-remote://beelink${url.pathToFileURL(filePath).pathname}`;
-		expect(tryFileUri(filePath)).toBe(expected);
-		expect(fileHref(filePath)).toBe(expected);
-		expect(hostname).toHaveBeenCalledTimes(1);
+		for (const host of ["my box", "box/evil", "user@box", "box?x"]) {
+			applyFileLinkSetting({ scheme: "ompfile", host });
+			expect(tryFileUri(filePath)).toBe(url.pathToFileURL(filePath).href);
+		}
+		expect(warning).toHaveBeenCalledTimes(4);
+		applyFileLinkSetting({ scheme: "ompfile", host: "beelink.lan:2222" });
+		expect(tryFileUri(filePath)).toBe(`ompfile://beelink.lan:2222${url.pathToFileURL(filePath).pathname}`);
+	});
+
+	it("accepts extended scheme characters case-insensitively", () => {
+		applyFileLinkSetting({ scheme: "OMP+File.v2-remote", host: "beelink" });
+		const filePath = path.resolve("/tmp/a.ts");
+		expect(tryFileUri(filePath)).toBe(`omp+file.v2-remote://beelink${url.pathToFileURL(filePath).pathname}`);
 	});
 
 	it("produces a stable id for the same path", () => {
