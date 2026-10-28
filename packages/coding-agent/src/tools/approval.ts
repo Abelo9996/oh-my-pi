@@ -26,13 +26,11 @@ import {
 	type ApprovalGrants,
 	approvalCacheKeyForPath,
 	approvalGrantKey,
-	commonApprovalDirectoryKey,
 } from "./approval-cache";
 import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsRestrictedFolders } from "./settings";
 import {
 	approvalFolderListing,
 	type ApprovalFolderListing,
-	approvalTargetDirectory,
 	approvalTargetNamesFile,
 	approvalTreeSearchFolderKey,
 } from "./approval-targets";
@@ -162,16 +160,24 @@ function approvalCacheTargets(tool: ApprovalSubject, args: unknown): string[] {
 }
 
 /**
+ * The folder key whose one-level grant covers `target`: a directory key is its own folder, an
+ * absolute file key its parent's. `undefined` for anything else (internal or web URLs, tree keys).
+ */
+function coveringFolderKey(target: string): string | undefined {
+	if (!path.isAbsolute(target)) return undefined;
+	if (target.endsWith("/") || target.endsWith("\\")) return target;
+	const parent = path.dirname(target);
+	return parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
+}
+
+/**
  * Grant keys any one of which covers `target` for a call at `capability`: grants at that tier or a
  * more privileged one, on the target itself or — for a file key — on the folder holding it. Folder
  * grants cover their own entries only, so a directory or tree key never inherits its parent's.
  */
 function coveringGrantKeys(target: string, capability: ToolTier): string[] {
-	const subjects = [target];
-	if (path.isAbsolute(target) && !target.endsWith("/") && !target.endsWith("\\")) {
-		const parent = path.dirname(target);
-		subjects.push(parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`);
-	}
+	const folder = coveringFolderKey(target);
+	const subjects = folder === undefined || folder === target ? [target] : [target, folder];
 	const tiers = (["read", "write", "exec"] as const).filter(tier => TIER_RANK[tier] >= TIER_RANK[capability]);
 	return tiers.flatMap(tier => subjects.map(subject => approvalGrantKey(tier, subject)));
 }
@@ -205,25 +211,20 @@ function resolveCachedModeApproval(
 }
 
 /**
- * The folder a directory answer would grant: the deepest directory holding every path target — a
- * directory target is that directory itself, a file target its parent. `undefined` when that
- * folder's one-level grant would not cover every target, or the call names no filesystem path.
+ * The folder a directory answer would grant: the one folder whose grant covers every target.
+ * `undefined` when the targets span folders or include one no folder grant covers.
  */
 export function approvalFolderCandidate(
 	tool: ApprovalSubject,
 	args: unknown,
 ): { key: string; label: string } | undefined {
-	const targets = approvalCacheTargets(tool, args);
-	const directories: string[] = [];
-	for (const target of targets) {
-		if (!path.isAbsolute(target)) continue;
-		const directory = approvalTargetDirectory(target);
-		if (directory !== undefined) directories.push(directory);
+	let key: string | undefined;
+	for (const target of approvalCacheTargets(tool, args)) {
+		const folder = coveringFolderKey(target);
+		if (folder === undefined || (key !== undefined && folder !== key)) return undefined;
+		key = folder;
 	}
-	const key = commonApprovalDirectoryKey(directories);
 	if (key === undefined) return undefined;
-	const directoryGrant = approvalGrantKey("read", key);
-	if (!targets.every(target => coveringGrantKeys(target, "read").includes(directoryGrant))) return undefined;
 	// A filesystem root keeps its separator: stripping it would leave POSIX "" or drive-relative "C:".
 	const label = shortenPath(path.parse(key).root === key ? key : key.replace(/[\\/]+$/, ""));
 	return { key, label: sanitizeText(label) };
