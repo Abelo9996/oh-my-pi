@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed one interrupt (Esc) silently stopping a session from ever waking on its own background job results again: an interrupt that arrives with no run in flight and nothing queued no longer suppresses those wakes, and after an interrupt that did stop a run they come back once a later turn has run and ended
+- Fixed one interrupt silently stopping a session from ever waking on its own background job results again: an interrupt (Esc, the RPC `abort` command, an ACP cancel, a collab guest stop, an extension's `ctx.abort()`) that stops no run and no queued work no longer suppresses those wakes, and after an interrupt that did stop a run they come back once a later turn has run and ended
 
 ## [18.13.2] - 2026-10-27
 

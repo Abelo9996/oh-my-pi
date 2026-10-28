@@ -4850,8 +4850,10 @@ export class AgentSession implements SettingsScope {
 			}
 			// This turn reached its own end — a typed prompt, an IRC/peer wake, an extension
 			// turn or a continuation alike. Whatever a user interrupt stopped is over, so a
-			// background completion arriving from here on is not a restart of it. The
-			// interrupt's own settle is excluded: it carries the aborted assistant message.
+			// background completion arriving from here on is not a restart of it. An
+			// `agent_end` that carries the interrupt's own aborted assistant message is not
+			// such an end; one that settles a turn the interrupt did not reach is, even when
+			// the interrupt lands while this settle is still running.
 			if (!isUserInterruptAbort(msg)) this.#turnSettledSinceUserInterrupt = true;
 
 			const yieldOnThisMessage = this.#assistantEndedWithSuccessfulYield(msg);
@@ -11093,13 +11095,21 @@ export class AgentSession implements SettingsScope {
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
 		// The latch exists so the run the user stopped cannot resume by itself — through a
 		// queued steer/follow-up, a reclaimed advisor concern, or a background completion.
-		// An interrupt that arrives with no run in flight and nothing queued to resume into
-		// one stops nothing, so it has nothing to suppress; latching there would silently
+		// An interrupt that arrives with nothing streaming and nothing queued to resume into
+		// a run stops nothing, so it has nothing to suppress; latching there would silently
 		// fold every later background completion for the rest of a session that never takes
 		// another typed prompt (an unattended agent woken by its own jobs).
 		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
 			this.#advisors.autoResumeSuppressed = true;
-			this.#turnSettledSinceUserInterrupt = false;
+			// Only a live agent-core loop — or queued work that would start one — is a run a
+			// background completion could restart. `isStreaming` above also counts the
+			// post-turn unwind, where this turn's own `agent_end` has already settled: that
+			// turn stays settled, because no later `agent_end` would mark one again and the
+			// session would never wake on its own jobs again. Same distinction as
+			// SessionAdvisors' advisor-delivery routing.
+			if (this.agent.state.isStreaming || this.agent.hasQueuedMessages()) {
+				this.#turnSettledSinceUserInterrupt = false;
+			}
 		}
 		// Pull the agent work an editor-restoring interrupt withdrew (clearQueue({ forInterrupt:
 		// true })), and on a user interrupt advisor concerns, out of the steer/follow-up queues

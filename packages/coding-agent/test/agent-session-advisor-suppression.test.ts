@@ -861,16 +861,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const { session, sessionManager, mock, streamStarted } = await createParkedSession([
 			{ content: ["must not auto-resume"] },
 		]);
-		session.yieldQueue.register<string>("test-background", {
-			build: entries => ({
-				role: "custom",
-				customType: "test-background",
-				content: entries.join("\n"),
-				display: true,
-				attribution: "agent",
-				timestamp: Date.now(),
-			}),
-		});
+		registerBackgroundDelivery(session);
 
 		const running = session.prompt("do the thing");
 		await streamStarted;
@@ -878,23 +869,23 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		await session.waitForIdle();
 		await running.catch(() => {});
 
-		await session.yieldQueue.enqueueWithReceipt("test-background", "subagent finished");
+		await session.yieldQueue.enqueueWithReceipt(BACKGROUND_TYPE, "subagent finished");
 		await session.waitForIdle();
 
 		expect(mock.calls.length).toBe(1);
 		expect(
-			session.agent.state.messages.filter(m => "customType" in m && m.customType === "test-background"),
+			session.agent.state.messages.filter(m => "customType" in m && m.customType === BACKGROUND_TYPE),
 		).toHaveLength(1);
 		expect(
 			sessionManager
 				.getEntries()
-				.filter(entry => entry.type === "custom_message" && entry.customType === "test-background"),
+				.filter(entry => entry.type === "custom_message" && entry.customType === BACKGROUND_TYPE),
 		).toHaveLength(1);
 	});
 
 	it("wakes on a background completion when the user interrupt stopped nothing", async () => {
 		// Reported bug: one Esc on an idle session killed every later background wake for
-		// the rest of that session's life. An interrupt with no run in flight and nothing
+		// the rest of that session's life. An interrupt with nothing streaming and nothing
 		// queued stops nothing, so it has no run to protect from a background completion.
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ responses: [{ content: ["reading the background result"] }] });
@@ -960,5 +951,65 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(
 			session.agent.state.messages.filter(m => "customType" in m && m.customType === BACKGROUND_TYPE),
 		).toHaveLength(2);
+	});
+
+	it("keeps background wakes after an interrupt that lands while the finished turn still settles", async () => {
+		// The session reports streaming for the whole post-turn unwind — extension hooks,
+		// compaction, the advisor drain — long after the turn reached its own end. An Esc
+		// there stops nothing a background completion could restart, and no later turn end
+		// would lift the suppression again, so the wake must survive it.
+		const settling = Promise.withResolvers<void>();
+		const releaseSettle = Promise.withResolvers<void>();
+		const extensionRunner: AdvisorTestExtensionRunner = {
+			hasHandlers: () => true,
+			emitBeforeAgentStart: async () => undefined,
+			emit: async event => {
+				if (event.type !== "agent_end") return;
+				settling.resolve();
+				await releaseSettle.promise;
+			},
+		};
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [{ content: ["done"] }, { content: ["reading the background result"] }],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			extensionRunner: extensionRunner as never,
+		});
+		registerBackgroundDelivery(session);
+
+		const running = session.prompt("do the thing");
+		await settling.promise;
+		expect(session.isStreaming).toBe(true);
+		expect(session.agent.state.isStreaming).toBe(false);
+
+		// Arming reads the session synchronously, before abort's first await; the settle it
+		// is waiting on only finishes once the hook is released.
+		const aborting = session.abort({ reason: USER_INTERRUPT_LABEL });
+		releaseSettle.resolve();
+		await aborting;
+		await running.catch(() => {});
+		await session.waitForIdle();
+
+		await session.yieldQueue.enqueueWithReceipt(BACKGROUND_TYPE, "hourly job finished");
+		await session.waitForIdle();
+
+		expect(mock.calls.length).toBe(2);
+		expect(session.agent.state.messages.at(-1)?.role).toBe("assistant");
 	});
 });
