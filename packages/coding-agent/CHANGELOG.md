@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `ask` opening before the assistant writes the findings, diffs, or context a question refers to when `ask` is called alongside `todo` or directly after thinking ([#17242](https://github.com/can1357/oh-my-pi/pull/17242) by [@jasonharrison](https://github.com/jasonharrison))
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
