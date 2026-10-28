@@ -180,14 +180,7 @@ function formatAsyncWaitLabel(jobIds: readonly string[]): string {
 	return `Waiting for ${jobIds.length} background jobs: ${listed}${more}`;
 }
 
-/**
- * The arguments a tool card renders: the executed args plus the model's intent,
- * which the harness strips from `args` before running the tool. A card built
- * from the stored message block still carries `i` (`content.arguments` keeps
- * it), so without this a live card loses the one fact several renderers show —
- * the bash head's target, the native `intent` tooltip — and only a transcript
- * rebuilt from history has it. Renderers read it; nothing executes these args.
- */
+/** Render args for a live card: the harness strips `i` from executed args, but the stored block keeps it. */
 function renderArgsWithIntent(args: unknown, intent: string | undefined): unknown {
 	if (intent === undefined || !isRecord(args) || INTENT_FIELD in args) return args;
 	return { ...args, [INTENT_FIELD]: intent };

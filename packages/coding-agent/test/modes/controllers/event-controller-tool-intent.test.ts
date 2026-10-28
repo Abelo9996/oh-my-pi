@@ -1,18 +1,4 @@
-/**
- * Contracts: a live tool card renders the model's intent, exactly as a card
- * rebuilt from the transcript does.
- *
- * `tool_execution_start` carries the EXECUTION args, from which the harness has
- * already stripped the `i` intent field, while the stored message block keeps
- * it. A component built or refreshed from the event alone therefore lost the
- * intent: in Tern the bash head drew "Bash" with no target though the same call
- * showed one after a resume, because `bashToolRenderer` derives that target
- * from `args.i`.
- *
- * Both event paths must hand the renderer the intent: creating the card
- * (nothing streamed before the call ran) and refreshing it (the message_update
- * card was created with the block's args, which carry `i`).
- */
+// A live tool card renders the model's intent, as a card rebuilt from the transcript does.
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings, resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
