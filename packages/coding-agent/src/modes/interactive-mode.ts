@@ -2764,11 +2764,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Restore unsent editor draft from previous session shutdown (Ctrl+D).
 		// One-shot: consumeDraft removes the sidecar after read so the next
-		// resume does not re-restore the same text.
+		// resume does not re-restore the same text. Text typed while startup
+		// ran stays after it, where the caret lands.
 		try {
 			const draft = await logger.time("InteractiveMode.init:draft", () => this.sessionManager.consumeDraft());
-			if (draft && !this.editor.getText()) {
-				this.editor.setText(draft);
+			if (draft) {
+				this.editor.setText(draft + this.editor.getText());
 				this.updateEditorBorderColor();
 				this.ui.requestRender();
 			}
@@ -2899,13 +2900,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
 		});
 
-		// Keys pressed while a Tern startup loaded were held until hooks ran, the
-		// session mode settled, the draft was restored and every subscription
-		// above was installed. They replay into the restored draft, never over
-		// it, a startup shortcut (Alt+P, Ctrl+G, extension shortcuts) acts on the
-		// final mode, editor contents and observed session, and a held Enter
-		// still meets the bootstrap submit gate lifted just below.
-		this.ui.releaseHeldInput();
+		// Tern kept the typing of a startup and draws it in the composer; plain
+		// typing that reached omp already went into the draft. The first other
+		// key and everything after it were held until hooks ran, the session
+		// mode settled, the draft was restored and every subscription above was
+		// installed. Tern now sends what it kept, a startup shortcut (Alt+P,
+		// Ctrl+G, extension shortcuts) acts on the final mode, editor contents
+		// and observed session, and a held Enter still meets the bootstrap
+		// submit gate lifted just below.
+		this.composer.releaseHeldInput();
 
 		// Everything is wired: subscriptions observe agent events, the session
 		// mode is reconciled, and the submit handler is installed. Lift the

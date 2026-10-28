@@ -26,6 +26,7 @@
 ### Fixed
 
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
+- Fixed text typed in Tern while omp is still starting appearing all at once when startup finishes; it shows as you type, and a draft restored on resume keeps what you typed after it
 - Fixed `pr://` metadata and diffs staying stale after successful `git push` calls through `bash` ([#17183](https://github.com/can1357/oh-my-pi/pull/17183) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `read` rejecting artifact URLs from truncation hints when cached approvals or restricted folders are configured ([#17282](https://github.com/can1357/oh-my-pi/pull/17282) by [@iliaal](https://github.com/iliaal)).
 - Fixed `wait` treating a peer's "on it" acknowledgement as its answer: peers send interim notes to `agent://<id>?progress`, and the requester keeps waiting for the real reply even while the peer idles ([#17176](https://github.com/can1357/oh-my-pi/pull/17176) by [@alphastorm](https://github.com/alphastorm))
