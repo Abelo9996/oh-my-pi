@@ -164,6 +164,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	...agentEventTypes,
 	"auto_compaction_start",
 	"auto_compaction_end",
+	"manual_compaction_start",
+	"manual_compaction_end",
 	"auto_retry_start",
 	"auto_retry_end",
 	"cache_warming_start",

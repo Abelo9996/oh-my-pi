@@ -3902,6 +3902,50 @@
 				"willRetry"
 			]
 		},
+		"ManualCompactionStartEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "manual_compaction_start"
+				},
+				"mode": {
+					"type": "string",
+					"description": "The `/compact <mode>` subcommand, when one was given."
+				}
+			},
+			"required": [
+				"type"
+			],
+			"description": "A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."
+		},
+		"ManualCompactionEndEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "manual_compaction_end"
+				},
+				"aborted": {
+					"type": "boolean",
+					"description": "The compaction was cancelled (abort, or a `session_before_compact` hook)."
+				},
+				"result": {
+					"$ref": "#/$defs/CompactionResult",
+					"description": "Present when the compaction committed."
+				},
+				"skipped": {
+					"type": "boolean",
+					"description": "There was nothing to compact; `errorMessage` says why."
+				},
+				"errorMessage": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"aborted"
+			],
+			"description": "Outcome of the compaction announced by the matching `manual_compaction_start`."
+		},
 		"AutoRetryStartEvent": {
 			"type": "object",
 			"properties": {
@@ -4131,7 +4175,8 @@
 			"required": [
 				"type",
 				"rules"
-			]
+			],
+			"description": "Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`."
 		},
 		"TodoReminderEvent": {
 			"type": "object",
@@ -4327,6 +4372,12 @@
 				},
 				{
 					"$ref": "#/$defs/AutoCompactionEndEvent"
+				},
+				{
+					"$ref": "#/$defs/ManualCompactionStartEvent"
+				},
+				{
+					"$ref": "#/$defs/ManualCompactionEndEvent"
 				},
 				{
 					"$ref": "#/$defs/AutoRetryStartEvent"

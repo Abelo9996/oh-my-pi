@@ -83,7 +83,7 @@ export function formatArgsInline(
 		const pairs: string[] = [];
 		let length = 0;
 		for (const key in args) {
-			if (!Object.hasOwn(args, key)) continue;
+			if (!Object.hasOwn(args, key) || key in HIDDEN_ARG_KEYS) continue;
 			const pair = `${options.sanitizeText?.(key) ?? key}=${formatScalar(args[key], 24, options)}`;
 			const added = pair.length + (pairs.length > 0 ? 2 : 0);
 			if (length + added > maxWidth && pairs.length > 0) {
