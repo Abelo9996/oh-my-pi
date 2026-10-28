@@ -58,9 +58,9 @@ The wire schema is shape-swapped by `task.batch` (default on). One unit of work 
 
 There is no wire label field: the one-line UI label shown in the TUI/registry is generated automatically from the `task` text by the tiny/title model (fire-and-forget), so callers never provide it.
 
-With `task.file=true`, a batch item can be `{ "name": "Implement", "taskFile": "local://implementation-prompt.md", "solutionSpace": "one implementation, design supplied" }`. The internal-URL resolver maps `local://` to its backing file before the file checks. File contents replace inline task text and pass through the same user-prompt formatting, including outer-whitespace trimming. File contents are not passed through JSON escape repair. Recorded tool-call arguments retain the submitted `taskFile` path without expanding its contents into `task`.
+With `task.file=true`, an item may name its instructions by file instead: `{ "name": "Implement", "taskFile": "local://implementation-prompt.md", "solutionSpace": "…" }`. The file is read once at dispatch and formatted exactly like inline `task` text, except that JSON escape repair never touches it. Recorded tool-call arguments keep the submitted path.
 
-Task files use the same path-based approval model as `read`. Approval also covers the working directory because the child executes there, even when its instructions come from another directory. Approval dialogs list every batch file path, and pending task cards show shortened file paths before the contents are loaded.
+Restricted folders cover task files as well as the working directory. `always-ask-cached` never remembers a task approval per file: a grant on the path would cover whatever the file holds later. Approval dialogs list every batch file path, and pending task cards show the shortened path.
 
 Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
 
@@ -74,9 +74,7 @@ There is no legacy per-call `schema` parameter. Use `outputSchema` and optional 
 
 The tool returns one text block plus `details: TaskToolDetails`.
 
-For file-backed spawns, live `details.progress` items and settled `details.results` entries retain the full trimmed file contents in `assignment`, the submitted path in `taskFile`, and the lowercase hex SHA-256 of the exact bytes read in `taskFileSha256`. Trimming and prompt formatting do not affect the hash. Both retain the same dispatch snapshot even if the file changes afterward. Successful synchronous results omit `details.progress` to avoid duplicating the result data; execution errors and async lifecycle snapshots retain their existing progress behavior.
-
-Normal child-session processing still applies, including expansion of recognized `^provider/model` mentions. Returned tool details retain the complete assignment; persisted transcripts use the existing 500,000-character limit per string, as for inline tasks. Use the recorded hash to audit the original file bytes.
+File-backed spawns record the submitted path in `taskFile` and the hex SHA-256 of the exact bytes read in `taskFileSha256`, on both `details.progress` items and `details.results` entries; `assignment` holds the trimmed contents. These are the dispatch-time snapshot, even if the file changes afterward.
 
 When `async.enabled=true`, the Task tool description supplies background-job guidance: results auto-deliver, blocked callers can use `wait` if the tool is active, `read proc://<id>` inspects without consuming delivery, `write proc://<id>/kill` cancels, and `write agent://<id>` coordinates when peer messaging is enabled. Spawn acknowledgments do not repeat these instructions.
 

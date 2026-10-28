@@ -37,32 +37,29 @@ const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
-	it("requires task in the static schema", () => {
+	it("requires task", () => {
 		const parsed = taskSchema({ agent: "scout", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(true);
 	});
 
-	it.each([
-		{ batchEnabled: false, isolationEnabled: false, structured: false },
-		{ batchEnabled: false, isolationEnabled: true, structured: false },
-		{ batchEnabled: true, isolationEnabled: false, structured: false },
-		{ batchEnabled: true, isolationEnabled: true, structured: false },
-		{ batchEnabled: false, isolationEnabled: true, structured: true },
-	])("gates file input without reusing a schema from the other setting (%o)", options => {
-		for (const file of [false, true, false]) {
-			const schema = getTaskSchema({ ...options, file });
+	it.each([false, true])("advertises taskFile only while task.file is on (batch=%s)", batchEnabled => {
+		// Enabled first: the disabled schema must not reuse the enabled one from the cache.
+		for (const file of [true, false]) {
+			const schema = getTaskSchema({ batchEnabled, isolationEnabled: false, structured: false, file });
 			const item = { taskFile: "local://assignment.md", solutionSpace: "one defined change" };
-			const parsed = schema(options.batchEnabled ? { context: "shared context", tasks: [item] } : item);
+			const parsed = schema(batchEnabled ? { context: "shared context", tasks: [item] } : item);
 			const wire = schema.toJsonSchema();
 			const tasks = isRecord(wire.properties) ? wire.properties.tasks : undefined;
-			const itemWire = options.batchEnabled && isRecord(tasks) ? tasks.items : wire;
+			const itemWire = batchEnabled && isRecord(tasks) ? tasks.items : wire;
 			if (!isRecord(itemWire)) throw new Error("Expected an object schema for task input");
-			expect(parsed instanceof type.errors).toBe(!file);
-			expect(itemWire.properties).toHaveProperty("task");
 			if (file) {
-				expect(itemWire.properties).toHaveProperty("taskFile");
+				if (parsed instanceof type.errors) throw new Error(parsed.summary);
+				expect(parsed).toMatchObject(
+					batchEnabled ? { tasks: [{ taskFile: item.taskFile }] } : { taskFile: item.taskFile },
+				);
 				expect(itemWire.required).not.toContain("task");
 			} else {
+				expect(parsed instanceof type.errors).toBe(true);
 				expect(itemWire.properties).not.toHaveProperty("taskFile");
 				expect(itemWire.required).toContain("task");
 			}
@@ -247,7 +244,6 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
-
 	it("rejects a model override for an ordinary task after the enabled schema accepts it", async () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,

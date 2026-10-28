@@ -55,7 +55,10 @@ export interface ResolvedExecuteTimeApproval {
 	userPolicies: Record<string, unknown>;
 }
 
-type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails" | "approvalCacheTargets"> & {
+type ApprovalSubject = Pick<
+	AgentTool,
+	"name" | "approval" | "formatApprovalDetails" | "approvalCacheTargets" | "approvalRestrictionPaths"
+> & {
 	/**
 	 * Previous public name of this tool, when a rename changed how it mints.
 	 * MCP tools minted before digits were kept carry their digit-stripped name
@@ -517,8 +520,9 @@ function isWithinFolder(root: string, candidate: string): boolean {
 /**
  * Absolute filesystem paths a call touches, keyed like grants (symlinks resolved, case-folded on
  * Windows); `recursive` marks a search that reads the whole tree below its path. A call whose tool
- * reports no targets is matched by the directory it runs in: its own `cwd` argument when it names
- * one, else the session's. Non-filesystem targets (internal and web URLs) touch no folder.
+ * reports no targets is matched by the directory it runs in — its own `cwd` argument when it names
+ * one, else the session's — plus any `approvalRestrictionPaths`. Non-filesystem targets (internal
+ * and web URLs) touch no folder.
  */
 function restrictionSubjects(
 	tool: ApprovalSubject,
@@ -538,7 +542,10 @@ function restrictionSubjects(
 		}
 		return subjects;
 	}
-	if (cwd === undefined) return [];
+	const subjects = (tool.approvalRestrictionPaths?.(args) ?? [])
+		.filter(target => path.isAbsolute(target))
+		.map(target => ({ path: approvalCacheKeyForPath(target), recursive: false }));
+	if (cwd === undefined) return subjects;
 	let workingDirectory = cwd;
 	const requested = isRecord(args) ? args.cwd : undefined;
 	if (typeof requested === "string" && requested.trim().length > 0) {
@@ -548,7 +555,8 @@ function restrictionSubjects(
 			// An internal-URL working directory is no local folder; the session's still applies.
 		}
 	}
-	return [{ path: approvalCacheKeyForPath(workingDirectory), recursive: false }];
+	subjects.push({ path: approvalCacheKeyForPath(workingDirectory), recursive: false });
+	return subjects;
 }
 
 /**

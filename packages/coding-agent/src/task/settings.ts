@@ -261,7 +261,7 @@ export const cfgTaskFile = register({
 		group: "Subagents",
 		label: "Task Instructions from Files",
 		description:
-			"Expose taskFile on the task tool to read subagent instructions once at dispatch from an absolute path or local:// file, recording the source path and SHA-256.",
+			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
 	},
 });
 

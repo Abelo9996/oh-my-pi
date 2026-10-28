@@ -37,8 +37,6 @@ import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specializa
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
-import { approvalDirectoryKey } from "../tools/approval-cache";
-import { approvalTargetKey } from "../tools/approval-targets";
 import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
@@ -271,7 +269,6 @@ function validateTaskInput(item: TaskItem | undefined, label: string, fileEnable
 	const hasTask = item?.task !== undefined;
 	const hasTaskFile = item?.taskFile !== undefined;
 	if (!fileEnabled) {
-		if (hasTaskFile) return "task.file is disabled, so the task tool does not accept `taskFile`.";
 		if (typeof item?.task !== "string" || item.task.trim() === "") {
 			return label === "The call"
 				? "Missing `task`. Provide complete, self-contained instructions for the agent."
@@ -372,22 +369,22 @@ interface SpawnParams extends TaskParams {
 	taskFileSha256?: string;
 }
 
-async function resolveTaskFile(session: ToolSession, item: TaskItem, signal?: AbortSignal): Promise<ResolvedTaskItem> {
+/** The filesystem path a `taskFile` names; approval and dispatch share it so both see the same file. */
+function taskFilePath(session: ToolSession, taskFile: string): string | undefined {
+	return taskFile.startsWith("local://")
+		? InternalUrlRouter.instance().locateSync(taskFile, sessionResolveContext(session))
+		: taskFile;
+}
+
+async function resolveTaskFile(session: ToolSession, item: TaskItem): Promise<ResolvedTaskItem> {
 	if (item.taskFile === undefined) return item;
 	try {
-		const filePath = item.taskFile.startsWith("local://")
-			? await InternalUrlRouter.instance().requireLocal(
-					item.taskFile,
-					"read task file",
-					sessionResolveContext(session, { signal }),
-				)
-			: item.taskFile;
-		// Non-blocking open lets fstat reject FIFOs without waiting for a writer.
+		const filePath = taskFilePath(session, item.taskFile);
+		if (filePath === undefined) throw new Error("does not resolve to a local file");
+		// On POSIX, a non-blocking open lets fstat reject a FIFO without waiting for a writer.
 		const file = await fs.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
 		try {
-			const stat = await file.stat({ bigint: true });
-			if (!stat.isFile()) throw new Error("must resolve to a regular file");
-			if (stat.size > MAX_TASK_FILE_BYTES) throw new Error("exceeds the 4 MiB limit");
+			if (!(await file.stat()).isFile()) throw new Error("must resolve to a regular file");
 			const bytes = await Bun.file(file.fd)
 				.slice(0, MAX_TASK_FILE_BYTES + 1)
 				.bytes();
@@ -677,21 +674,14 @@ export async function refreshAgentDiscovery(cwd: string, extensionRoots?: Effect
 export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetails, Theme> {
 	readonly name = "task";
 	readonly approval = "exec" as const;
-	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+	// Restricted folders cover task files, but approvals are never remembered per file: the grant would
+	// cover whatever the path holds later, and inline items in the same batch.
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
 		if (!isRecord(args)) return undefined;
 		const items = Array.isArray(args.tasks) ? args.tasks : [args];
-		const targets: string[] = [];
-		for (const item of items) {
-			if (!isRecord(item) || typeof item.taskFile !== "string") continue;
-			const target = item.taskFile.startsWith("local://")
-				? (InternalUrlRouter.instance().locateSync(item.taskFile, sessionResolveContext(this.session)) ??
-					item.taskFile)
-				: item.taskFile;
-			const key = approvalTargetKey(this.session.cwd, target);
-			if (key !== undefined) targets.push(key);
-		}
-		// The child executes in cwd even when its instructions come from another directory.
-		return targets.length > 0 ? [approvalDirectoryKey(this.session.cwd), ...new Set(targets)] : undefined;
+		return items.flatMap(item =>
+			isRecord(item) && typeof item.taskFile === "string" ? (taskFilePath(this.session, item.taskFile) ?? []) : [],
+		);
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<TaskParams>;
@@ -1098,7 +1088,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const { params } = plan;
 		const spawnItems: ResolvedTaskItem[] = [];
 		try {
-			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this.session, item, signal));
+			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this.session, item));
 		} catch (error) {
 			return createTaskModeError(error instanceof Error ? error.message : String(error));
 		}

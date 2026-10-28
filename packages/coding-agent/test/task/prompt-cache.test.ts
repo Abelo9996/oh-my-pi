@@ -300,7 +300,6 @@ describe("task sibling prompt-cache routing", () => {
 					settings: Settings.isolated({
 						"async.enabled": false,
 						"task.structured": true,
-						"task.file": true,
 						"marketplace.autoUpdate": "off",
 						"compaction.enabled": false,
 					}),
@@ -316,9 +315,10 @@ describe("task sibling prompt-cache routing", () => {
 				});
 				const tool = parent.getToolByName("task") as TaskTool;
 				for (const name of ["SiblingA", "SiblingB"]) {
-					const taskFile = directory.join(`${name}.md`);
-					await Bun.write(taskFile, `Review ${name}.`);
-					const result = await tool.execute(name, { name, taskFile });
+					const result = await tool.execute(name, {
+						name,
+						task: `Review ${name}.`,
+					});
 					expect(result.isError, JSON.stringify(result)).not.toBe(true);
 					expect(result.details?.results[0]?.exitCode, JSON.stringify(result)).toBe(0);
 				}

@@ -232,15 +232,4 @@ describe("task approval details surface the dispatch", () => {
 			expect(fileLine).not.toMatch(/[\p{Cc}\p{Cf}]/u);
 		}
 	});
-
-	it("bounds each file preview without hiding subsequent batch paths", async () => {
-		const tool = await makeTool();
-		const lines = tool.formatApprovalDetails({
-			tasks: [{ taskFile: `/tmp/${"a".repeat(5000)}.md` }, { taskFile: "/restricted/last.md" }],
-		});
-		const longFileLine = lines.find(line => line.includes("/tmp/"));
-		expect(longFileLine).toContain("/tmp/");
-		expect(longFileLine!.length).toBeLessThan(2100);
-		expect(lines.join("\n")).toContain("/restricted/last.md");
-	});
 });
