@@ -654,6 +654,19 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 | `PI_NO_KITTY_PLACEHOLDERS`     | `1` hard-disables Kitty Unicode placeholder placement and takes precedence over `PI_KITTY_PLACEHOLDERS`                                                                                                                                            |
 | `PI_TUI_RESIZE_IN_PLACE`       | `1`/`true` force in-place resize (no alt-screen borrow, no ED3 rewrap); `0`/`false` force the alt-screen fast path. Default-on for Warp, which re-reports its size on alt-screen toggles — except on a ConPTY host (Windows, and WSL through `wslhost`), where conhost owns the grid and repaints its own viewport on resize, so the anchor cannot be recovered |
 
+### Remote file links
+
+| Variable | Behavior |
+| --- | --- |
+| `PI_LINK_SCHEME` | Custom file-link scheme, for example `ompfile`, without `:` or `://`. Matched case-insensitively against `^[a-z][a-z0-9+.-]*$` and emitted lowercase. An invalid value logs a warning and keeps ordinary file/VS Code targets. |
+| `PI_LINK_HOST` | Remote machine name used with `PI_LINK_SCHEME`, optionally with `:port`; defaults to `os.hostname()`. Letters, digits, `.`, `_`, and `-` only; an invalid value logs a warning and keeps ordinary targets. Has no effect without a scheme. |
+
+The interactive TUI reads these variables once at startup. Both OSC 8 links and native TSP file links use the custom scheme, which takes precedence over VS Code targets. SDK hosts can call `applyFileLinkSetting` with an explicit configuration. Native image context-menu open actions keep local `file://` URLs because the action runs locally.
+
+For example, start a remote session with `PI_LINK_SCHEME=ompfile PI_LINK_HOST=beelink omp`. A file link to `/work/a b.ts` at line 42, column 7 targets `ompfile://beelink/work/a%20b.ts?line=42&col=7`. The optional `line` and `col` query parameters preserve the supplied position; absent values are omitted. Plain `file:` links never carry these parameters.
+
+The desktop protocol handler must route the host to the remote machine, percent-decode the pathname, and read the optional position parameters. Windows drive paths use `/C:/...`. UNC paths retain the file server in a double-slash pathname, for example `ompfile://beelink//nas/share/a.ts`. Malformed filesystem paths render without a link. File links the model writes in Markdown keep their own query or fragment (for example `#L10`), so handlers must ignore parameters they do not recognize. The handler itself is registered separately on the desktop.
+
 ### Browser launch/proxy controls
 
 | Variable                               | Behavior                                                                                 |
