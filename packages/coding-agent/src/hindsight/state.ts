@@ -21,6 +21,14 @@ import {
 } from "./mental-models";
 import { countUserTurns, extractMessages } from "./transcript";
 
+/** `notice` source of Hindsight recall/retain failures; print mode writes these to stderr. */
+export const HINDSIGHT_NOTICE_SOURCE = "Hindsight";
+
+/** Error text for a failure notice: it can carry server response text, so strip terminal controls and bound it. */
+function noticeErrorText(errorText: string): string {
+	return truncate(sanitizeText(errorText).replace(/\s+/g, " ").trim(), 200);
+}
+
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const RETAIN_FLUSH_INTERVAL_MS = 5_000;
 const MENTAL_MODEL_LOAD_TIMED_OUT = Symbol("mental-model-load-timed-out");
@@ -183,8 +191,8 @@ export class HindsightRetainQueue {
 		const noun = count === 1 ? "memory" : "memories";
 		this.#state.session.emitNotice(
 			"warning",
-			`Memory retention failed for ${count} ${noun}: ${errorText}`,
-			"Hindsight",
+			`Memory retention failed for ${count} ${noun}: ${noticeErrorText(errorText)}`,
+			HINDSIGHT_NOTICE_SOURCE,
 		);
 	}
 }
@@ -316,9 +324,11 @@ export class HindsightSessionState {
 			logger.warn("Hindsight: recall failed", { bankId: this.bankId, error: errorText });
 			// A conversation reset or session switch since the request makes its failure stale.
 			if (this.#recallGeneration === generation) {
-				// The error can carry server response text: strip terminal controls and bound it.
-				const shown = truncate(sanitizeText(errorText).replace(/\s+/g, " ").trim(), 200);
-				this.session.emitNotice("warning", `Memory recall failed: ${shown}`, "Hindsight");
+				this.session.emitNotice(
+					"warning",
+					`Memory recall failed: ${noticeErrorText(errorText)}`,
+					HINDSIGHT_NOTICE_SOURCE,
+				);
 			}
 			return { context: null, ok: false };
 		}
