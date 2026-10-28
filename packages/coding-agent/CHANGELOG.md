@@ -2,12 +2,13 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Updated Bun engine requirement to ≥1.4.4
 ### Added
 
 - `tools.xdevNotices: false` hides the `xd://: mounted …` notices shown as MCP servers connect, without turning on `startup.quiet` ([#17263](https://github.com/can1357/oh-my-pi/pull/17263) by [@MaisonnatM](https://github.com/MaisonnatM))
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
 
 ## [18.13.2] - 2026-10-27
 
