@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed extension `ui.select` dialogs treating unconfigured `j`/`k` keys as navigation, which could turn a default No into Yes when typing `ok` then Enter ([#17211](https://github.com/can1357/oh-my-pi/issues/17211)).
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
