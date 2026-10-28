@@ -2381,6 +2381,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (typeof command.sdpOffer !== "string" || !command.sdpOffer.trim()) {
 					return error(id, "live_connect", "live_connect requires a non-empty sdpOffer");
 				}
+				if (dictationBridge.active) return error(id, "live_connect", "End dictation before starting live voice");
+				if (sessionChangesInProgress > 0 || shutdownState.requested)
+					return error(id, "live_connect", "Session is changing or shutting down");
 				try {
 					return success(
 						id,

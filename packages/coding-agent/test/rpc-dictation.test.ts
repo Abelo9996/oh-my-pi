@@ -389,6 +389,10 @@ describe("dictation over RPC", () => {
 			await h.command("live-stop", { type: "live_stop" });
 			expect(await h.command("start", { type: "dictation_start", captureId: "a" })).toMatchObject({ success: true });
 			expect(await h.command("live-blocked", { type: "live_start" })).toMatchObject({ success: false });
+			expect(await h.command("connect-blocked", { type: "live_connect", sdpOffer: "v=0 offer" })).toMatchObject({
+				success: false,
+				error: "End dictation before starting live voice",
+			});
 			expect(await h.command("stop", { type: "dictation_stop" })).toMatchObject({
 				success: true,
 				data: { text: "hello world" },
@@ -611,6 +615,10 @@ describe("dictation over RPC", () => {
 				error: "Session is changing or shutting down",
 			});
 			expect(await h.command("blocked-live", { type: "live_start" })).toMatchObject({
+				success: false,
+				error: "Session is changing or shutting down",
+			});
+			expect(await h.command("blocked-connect", { type: "live_connect", sdpOffer: "v=0 offer" })).toMatchObject({
 				success: false,
 				error: "Session is changing or shutting down",
 			});
