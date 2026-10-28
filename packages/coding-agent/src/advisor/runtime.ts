@@ -1188,7 +1188,11 @@ export class AdvisorRuntime {
 						pending: this.#pending.length,
 						backlog: this.#backlog,
 					});
+					// A maintenance re-prime is not a recovery: keep the batch's strikes, or a batch that keeps
+					// failing and keeps triggering maintenance is retried without end instead of being dropped.
+					const strikes = this.#consecutiveFailures;
 					this.#clearAdvisorContextAtCurrentCursor();
+					this.#consecutiveFailures = strikes;
 					const preparedMessages = this.#prepareBatch(rawMessages);
 					return {
 						batchText,

@@ -7,6 +7,7 @@
 - Fixed `read` rejecting artifact URLs from truncation hints when cached approvals or restricted folders are configured ([#17282](https://github.com/can1357/oh-my-pi/pull/17282) by [@iliaal](https://github.com/iliaal)).
 - A failed Hindsight memory recall (for example `recall request timed out after 30s`) now shows a warning instead of silently sending the prompt without memories; `omp -p` writes it, and Hindsight retain failures, to stderr ([#17278](https://github.com/can1357/oh-my-pi/pull/17278) by [@enieuwy](https://github.com/enieuwy))
 - Fixed cancelling an MCP OAuth login or `/mcp` auth lookup at the wrong moment crashing the session with an unhandled rejection ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
+- Fixed an advisor batch that fails repeatedly (for example on a proxy rate limit) being retried without end when context maintenance re-primes the advisor before every attempt: the re-prime reset the three-strike counter, so the batch was never dropped; the strikes now survive the re-prime ([#17281](https://github.com/can1357/oh-my-pi/issues/17281))
 
 ## [18.13.3] - 2026-10-28
 
