@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved retry timing from Codex WebSocket and SSE errors so capacity retries honor the provider wait.
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed
