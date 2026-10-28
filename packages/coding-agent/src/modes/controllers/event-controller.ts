@@ -369,7 +369,7 @@ export class EventController {
 			// frame are coalesced), never a partly revealed prefix from the typing reveal.
 			getSmoothStreaming: () =>
 				cfgDisplaySmoothStreaming.get(this.ctx.settings) &&
-				!this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers().length,
+				!this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.().length,
 			getHideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			getProseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			requestRender: component => this.ctx.ui.requestComponentRender(component),
@@ -559,7 +559,7 @@ export class EventController {
 	 */
 	applyAssistantTextRenderers(): void {
 		this.#streamingReveal.resyncSmoothStreaming();
-		const renderers = this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers() ?? [];
+		const renderers = this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [];
 		this.ctx.streamingComponent?.setTextRenderers(renderers);
 		for (const segment of this.liveAssistantSegments()) segment.setTextRenderers(renderers);
 	}
