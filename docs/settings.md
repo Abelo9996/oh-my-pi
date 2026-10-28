@@ -629,6 +629,7 @@ tools:
 | `tools.xdev` | boolean | `true` | Mount discoverable tools under `xd://` device URLs instead of exposing every schema directly. Disabling it exposes enabled tools top-level. |
 | `tools.xdevDocs` | enum | `catalog` | `inline` includes all mounted docs/schemas, `builtins` inlines built-ins only, `catalog` lists devices with docs fetched on demand. |
 | `tools.xdevInlineDevices` | array | `[]` | Dynamic-device name globs to inline in `builtins` mode; ignored in `catalog` mode. |
+| `tools.xdevNotices` | boolean | `true` | Show the `xd://: mounted …` / `unmounted …` notice when MCP or extension tools mount or unmount. Off hides only the notice; the model still learns of the change with its next prompt. `startup.quiet: true` also hides it. |
 | `async.enabled` | boolean | `true` | Enable async bash commands and background task execution. |
 | `async.maxJobs` | number | `100` | Running background-job cap, floored to at least 1; parked/queued jobs do not consume execution slots. |
 | `async.printWake` | boolean | `false` | Print mode (`-p`, `--mode json`) waits for the run's background jobs instead of cancelling them at exit, and starts another turn in the same session with each result; same as `--wait-async`. |
