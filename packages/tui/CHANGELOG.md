@@ -5,6 +5,9 @@
 ### Changed
 
 - Updated Bun engine requirement to ≥1.4.4
+### Added
+
+- The resume picker renames the selected session in place: F2 opens a dialog prefilled with the current title, Enter commits, Esc cancels ([#17262](https://github.com/can1357/oh-my-pi/pull/17262) by [@Twilight0](https://github.com/Twilight0))
 
 ## [18.13.2] - 2026-10-27
 

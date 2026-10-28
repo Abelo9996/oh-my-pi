@@ -5,6 +5,9 @@
 ### Changed
 
 - Updated Bun engine requirement to ≥1.4.4
+### Added
+
+- Sessions can be renamed from the resume picker: the new title persists as a user title without loading the session, and renames of live sessions are refused instead of forking the transcript ([#17262](https://github.com/can1357/oh-my-pi/pull/17262) by [@Twilight0](https://github.com/Twilight0))
 
 ## [18.13.2] - 2026-10-27
 
