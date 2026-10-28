@@ -9,6 +9,8 @@ import {
 	setTerminalSessionSource,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
+	popTerminalTitle,
+	pushTerminalTitle,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
@@ -357,6 +359,31 @@ describe("disposeTerminalTitleState", () => {
 		vi.advanceTimersByTime(400);
 		expect(observedTitles(writes, windowsTitleMock).length).toBeGreaterThan(0);
 	});
+	it("restores the initial Windows console title on teardown and does not overwrite it on pop", () => {
+		const originalPlatform = process.platform;
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			native.current = "original-shell-title";
+
+			initTerminalTitleState();
+			setSessionTerminalTitle("running-session");
+			expect(native.titles).toContain("π > running-session");
+
+			resetObserved(writes, native);
+			// Full shutdown sequence: dispose, then pop
+			disposeTerminalTitleState();
+			expect(native.titles.at(-1)).toBe("original-shell-title");
+
+			popTerminalTitle();
+			// popTerminalTitle must not emit an OSC 0 that would overwrite the restored native title
+			expect(writes).toEqual([]);
+			expect(native.titles.at(-1)).toBe("original-shell-title");
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
 });
 
 // Tern names omp's directory in its composer bar from the OSC 7 omp writes, as
@@ -411,5 +438,40 @@ describe("reporting the session to Tern", () => {
 		setTerminalSessionSource({ file: () => undefined, cwd: () => "/work/other" });
 		setSessionTerminalTitle("my-project");
 		expect(writes).not.toContain("\x1b]7;");
+	});
+});
+
+describe("pushTerminalTitle and popTerminalTitle", () => {
+	let writes: string[] = [];
+	let stdoutSpy: { mockRestore(): void } | undefined;
+	let prevHeadless = false;
+	let ttyDescriptor: PropertyDescriptor | undefined;
+
+	beforeEach(() => {
+		prevHeadless = setTerminalHeadless(false);
+		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		writes = [];
+		stdoutSpy = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array));
+			return true;
+		});
+	});
+
+	afterEach(() => {
+		stdoutSpy?.mockRestore();
+		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+		setTerminalHeadless(prevHeadless);
+	});
+
+	it("pushes window title with CSI 22;2t", () => {
+		pushTerminalTitle();
+		expect(writes).toEqual(["\x1b[22;2t"]);
+	});
+
+	it("emits OSC 0 clear followed by CSI 23;2t pop on teardown", () => {
+		popTerminalTitle();
+		expect(writes).toEqual(["\x1b]0;\x07\x1b[23;2t"]);
 	});
 });

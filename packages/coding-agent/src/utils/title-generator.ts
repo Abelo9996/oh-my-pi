@@ -851,6 +851,8 @@ const terminalTitleRuntime: {
 	 *  While latched the working separator stays `:` and no interval is
 	 *  scheduled. */
 	nativeTitleFailed: boolean;
+	nativeTitleRestored: boolean;
+	initialWindowsConsoleTitle: string | undefined;
 } = {
 	label: undefined,
 	sessionName: undefined,
@@ -864,6 +866,8 @@ const terminalTitleRuntime: {
 	extensionOverride: undefined,
 	disposed: false,
 	nativeTitleFailed: false,
+	nativeTitleRestored: false,
+	initialWindowsConsoleTitle: undefined,
 };
 
 /**
@@ -1026,7 +1030,14 @@ export function initTerminalTitleState(): void {
 	// stale failure-shaped binding would otherwise survive the reset.
 	disposeWindowsConsoleTitleApi();
 	terminalTitleRuntime.nativeTitleFailed = false;
-	// A fresh claim starts from the shell's title, not whatever the previous
+	terminalTitleRuntime.nativeTitleRestored = false;
+	if (process.platform === "win32") {
+		try {
+			terminalTitleRuntime.initialWindowsConsoleTitle ??= getWindowsConsoleTitleApi()?.get();
+		} catch {
+			terminalTitleRuntime.initialWindowsConsoleTitle = undefined;
+		}
+	}
 	// session last emitted: the dedupe cache must not swallow the first write.
 	// Releasing the latch alone would leave a stopped timer behind a `working`
 	// state — a frozen spinner frame. Mirror the enable path and re-arm.
@@ -1058,6 +1069,12 @@ export function disposeTerminalTitleState(): void {
 	// longer knows what is on screen: the stale dedupe cache (`lastTerminalTitle`,
 	// cleared below) must not swallow the first write after the latch releases.
 	stopTerminalTitleSpinner();
+	if (process.platform === "win32" && terminalTitleRuntime.initialWindowsConsoleTitle !== undefined) {
+		terminalTitleRuntime.nativeTitleRestored = setWindowsConsoleTitle(
+			terminalTitleRuntime.initialWindowsConsoleTitle,
+		);
+		terminalTitleRuntime.initialWindowsConsoleTitle = undefined;
+	}
 	disposeWindowsConsoleTitleApi();
 	lastTerminalTitle = undefined;
 }
@@ -1071,9 +1088,17 @@ export function pushTerminalTitle(): void {
 }
 
 /**
- * Restore the previously saved terminal title on terminals that support xterm window ops.
+ * Restore or clear the terminal title on session teardown.
+ *
+ * Emits the OSC 0 clear before the CSI 23;2t pop sequence: terminals with title
+ * stack support (xterm, iTerm2, VTE-based terminals, mintty) restore the saved title
+ * over the clear, while terminals ignoring the title stack keep the clear.
  */
 export function popTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	writeTerminalSequence("\x1b[23;2t");
+	if (process.platform === "win32" && terminalTitleRuntime.nativeTitleRestored) {
+		terminalTitleRuntime.nativeTitleRestored = false;
+		return;
+	}
+	writeTerminalSequence("\x1b]0;\x07\x1b[23;2t");
 }
