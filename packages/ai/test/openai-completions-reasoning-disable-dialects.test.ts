@@ -159,7 +159,7 @@ describe("Chat Completions reasoning-disable conflict policy (per dialect)", () 
 	});
 
 	it("returns a terminal error when reasoning policy resolution fails", async () => {
-		const model = {
+		const model: Model<"openai-completions"> = {
 			...reasoningDialectModel("openai"),
 			thinking: { mode: "effort", efforts: [] },
 		};
