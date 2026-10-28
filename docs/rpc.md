@@ -1445,6 +1445,7 @@ session runs per RPC server.
 ### Commands
 
 - `{ id?, type: "live_start", voice?: string, instructions?: string }` → `data: { voice: string }`
+- `{ id?, type: "live_connect", sdpOffer: string, voice?: string, instructions?: string }` → `data: { voice: string, sdpAnswer: string }`
 - `{ id?, type: "live_stop" }`
 - `{ id?, type: "live_mute", muted?: boolean }` → `data: { muted: boolean }`
 
@@ -1455,6 +1456,19 @@ connection and the pending `live_start` then fails. `voice` defaults to the
 replaces the bundled live prompt; it is rendered as a Handlebars template with
 `{{username}}` and `{{firstName}}` of the local OS account. Starting while a
 session is connecting, active, or closing, or while dictation is active, fails.
+
+`live_connect` starts the same session with the audio on the client's own
+WebRTC peer instead of the host's microphone and speakers. `sdpOffer` is that
+peer's offer: one sendrecv Opus audio track plus an `oai-events` data channel.
+Apply the returned `sdpAnswer` to the peer right away; the response comes once
+the call is signaled and its control socket is open. A missing or empty
+`sdpOffer` fails without starting anything. The peer handles echo cancellation
+and mute: `live_mute` only moves the phase to `muted`, so silence the peer's
+microphone track while that phase lasts. The server sends no `live_levels` and
+no `speaking` phase for these sessions. `voice`, `instructions`, `live_stop` and
+the frames work as for `live_start`. The server cannot see the client's peer, so
+send `live_stop` when that peer disconnects (`connectionstatechange` to `failed`
+or `closed`); otherwise the session stays open.
 
 `live_stop` responds after the session has stopped and succeeds when none is
 active. `live_mute` sets the microphone mute, or toggles it when `muted` is
@@ -1470,9 +1484,9 @@ omitted, and fails when no session is active.
 Live frames are not session events: `set_event_filter` never drops them.
 
 - `{ type: "live_phase", phase }` on every phase change; `phase` is one of `connecting`, `listening`, `working`, `speaking`, `muted`, `error`.
-- `{ type: "live_levels", input: number, output: number }` — microphone and speaker RMS in `[0, 1]`, at most one frame per 100 ms. Intermediate values are dropped; the latest values are always delivered.
+- `{ type: "live_levels", input: number, output: number }` — microphone and speaker RMS in `[0, 1]`, at most one frame per 100 ms. Intermediate values are dropped; the latest values are always delivered. Not sent for `live_connect` sessions.
 - `{ type: "live_transcript", role: "user" | "assistant", turn: number, text: string, final: boolean }` — the accumulated text of one turn; later frames for the same `role` and `turn` replace earlier ones until `final: true`.
-- `{ type: "live_end", error?: string }` — exactly once per session when it ends, carrying the failure when it ended on one (including a failed `live_start`).
+- `{ type: "live_end", error?: string }` — exactly once per session when it ends, carrying the failure when it ended on one (including a failed `live_start` or `live_connect`).
 
 Closing stdin, or `pi.shutdown()`, stops an active live session before the
 process exits.
