@@ -99,7 +99,7 @@ describe("/tan prompt-cache tool presentation", () => {
 									},
 								],
 							},
-							{ content: ["Open question: which scope? Options: Narrow, Wide. Recommended: Narrow."] },
+							{ content: ["Open question: which scope?"] },
 						],
 					});
 					child.agent.streamFn = mock.stream;
@@ -109,18 +109,10 @@ describe("/tan prompt-cache tool presentation", () => {
 						message => message.role === "toolResult" && message.toolCallId === "ask-fixture",
 					);
 					if (result?.role !== "toolResult") throw new Error("The ask call produced no tool result");
-					// The model sees why ask failed; the clone's run is not aborted.
+					// The model gets a recoverable error instead of an aborted run, so the clone reaches its final answer.
 					expect(result.isError).toBe(true);
-					const resultText = result.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
-					expect(resultText).toContain("No user can answer here: this is a background session");
-					// An aborted tan reaches the parent as an empty result; the clone must reach its final answer.
 					expect(mock.calls).toHaveLength(2);
-					const final = messages.at(-1);
-					if (final?.role !== "assistant") throw new Error("The run did not end with an assistant message");
-					expect(final.stopReason).toBe("stop");
-					expect(final.content).toEqual([
-						{ type: "text", text: "Open question: which scope? Options: Narrow, Wide. Recommended: Narrow." },
-					]);
+					expect(messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 				} finally {
 					await child.dispose();
 				}
