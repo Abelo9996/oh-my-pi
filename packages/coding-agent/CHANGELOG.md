@@ -6,6 +6,12 @@
 
 - Updated Bun engine requirement to ≥1.4.4
 
+### Fixed
+
+- Pasting in a terminal with enhanced paste (Tern, kitty) now lands in the open dialog's field — the agents hub's New agent description, an /annotate note — instead of the hidden prompt
+- Pasting or dropping an image file into the prompt in a terminal with enhanced paste (Tern, kitty) now attaches the image instead of typing its path
+- The plan review's edit button in Tern names your editor ("Edit in Notepad", "Edit in nvim") instead of "Edit in $EDITOR"
+
 ## [18.13.2] - 2026-10-27
 
 ### Added
