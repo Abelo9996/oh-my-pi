@@ -23,6 +23,8 @@ export interface AnnotationDraft {
 type DraftSession = Pick<ReadonlySessionManager, "getArtifactsDir" | "getSessionId" | "ensureOnDisk">;
 
 const DRAFT_FILE = /^draft-([0-9a-f]{64})\.json$/;
+/** Draft directories with an overlay open in this process; their session is kept until the draft is saved. */
+const OPEN_DRAFTS = new Set<string>();
 
 function hash(value: string): string {
 	return new Bun.CryptoHasher("sha256").update(value).digest("hex");
@@ -62,6 +64,9 @@ export async function loadAnnotationDrafts(session: DraftSession): Promise<Annot
 		try {
 			const draft = JSON.parse(await fs.promises.readFile(path.join(directory, name), "utf8")) as AnnotationDraft;
 			if (draft.key !== key || annotationDraftKey(draft.source) !== key) throw new Error("key mismatch");
+			if (draft.state?.kind !== draft.source.kind || !Array.isArray(draft.state.annotations)) {
+				throw new Error("malformed state");
+			}
 			// The parsed diff is not stored; it is derived from the raw patch exactly as the review target was.
 			if (draft.source.kind === "diff") {
 				draft.source.target.snapshot = parseReviewDiffSnapshot(draft.source.target.rawDiff);
@@ -96,10 +101,12 @@ export async function removeAnnotationDraft(session: DraftSession, key: string):
 	});
 }
 
-/** Whether the session holds a draft file; empty-session cleanup must keep such a session. */
+/** Whether the session holds a draft file or an open overlay; empty-session cleanup must keep such a session. */
 export function hasAnnotationDraftsSync(artifactsDir: string, sessionId: string): boolean {
+	const directory = draftDirectory(artifactsDir, sessionId);
+	if (OPEN_DRAFTS.has(directory)) return true;
 	try {
-		return fs.readdirSync(draftDirectory(artifactsDir, sessionId)).some(name => DRAFT_FILE.test(name));
+		return fs.readdirSync(directory).some(name => DRAFT_FILE.test(name));
 	} catch (error) {
 		if (isEnoent(error)) return false;
 		throw error;
@@ -123,6 +130,10 @@ export async function openAnnotationDraft(
 }> {
 	const key = annotationDraftKey(source);
 	const saved = resumed ?? (await loadAnnotationDrafts(session)).find(draft => draft.key === key);
+	// An open overlay holds the session: a close-time cleanup (or shutdown) racing the save must not delete it.
+	const artifactsDir = session.getArtifactsDir();
+	const openDirectory = artifactsDir ? draftDirectory(artifactsDir, session.getSessionId()) : undefined;
+	if (openDirectory) OPEN_DRAFTS.add(openDirectory);
 	let overlay: AnnotationOverlay | undefined;
 	const persist = async (sent: boolean) => {
 		const state = overlay?.getDraft();
@@ -140,7 +151,11 @@ export async function openAnnotationDraft(
 		},
 		async close(result) {
 			unregister();
-			await persist(result?.action === "review");
+			try {
+				await persist(result?.action === "review");
+			} finally {
+				if (openDirectory) OPEN_DRAFTS.delete(openDirectory);
+			}
 		},
 	};
 }

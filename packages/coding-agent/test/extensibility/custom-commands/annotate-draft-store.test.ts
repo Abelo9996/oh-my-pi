@@ -5,6 +5,7 @@ import type { AnnotationOverlay } from "@oh-my-pi/pi-tui/overlays/annotation-ove
 import type { AnnotationOverlayDraft } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
+	annotationDraftKey,
 	loadAnnotationDrafts,
 	openAnnotationDraft,
 } from "../../../src/extensibility/custom-commands/bundled/annotate/draft-store";
@@ -45,6 +46,16 @@ describe("annotation drafts", () => {
 		second.restore(overlay(restoreDraft));
 		expect(restoreDraft).toHaveBeenCalledWith(state);
 		await second.close({ action: "review" });
+		expect(await loadAnnotationDrafts(session)).toEqual([]);
+	});
+
+	it("skips a draft whose state cannot be replayed", async () => {
+		using tempDir = TempDir.createSync("@pi-annotation-drafts-");
+		const session = { getArtifactsDir: () => tempDir.path(), getSessionId: () => "s1", ensureOnDisk: vi.fn() };
+		const source = { kind: "text", source: { id: "p", kind: "prompt", label: "P", text: "x" } } as const;
+		const key = annotationDraftKey(source);
+		const file = path.join(tempDir.path(), "annotation-drafts", "s1", `draft-${key}.json`);
+		await Bun.write(file, JSON.stringify({ key, updatedAt: 1, source, state: null }));
 		expect(await loadAnnotationDrafts(session)).toEqual([]);
 	});
 });
