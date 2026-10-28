@@ -11,6 +11,10 @@
 - Fixed post-edit diagnostics stalling for up to 15s while a push-diagnostics server starts, and being dropped when the server answered before the edit reached disk ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed `lsp diagnostics` and post-edit diagnostics timing out after a rust-analyzer cold start, or whenever a server asks for a diagnostics request to be retried ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed `lsp diagnostics` reporting "OK" or "no issues" for a file whose language server had not answered yet (it is now marked unverified), and post-edit diagnostics counting such a server as clean ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed `lsp diagnostics` on clangd reopening the file on every call: it now rebuilds the open file in place, about 3× faster on repeat calls, and still catches changed headers ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
+- Fixed post-edit diagnostics showing "OK" or "no issues" when one of several language servers, or one file of a batched edit, had not reported yet ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
+- Fixed `lsp code_actions` passing diagnostics from an earlier version of a reopened file to quick-fix providers ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
+- Fixed `lsp diagnostics` getting no report from language servers that check files only on save ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 
 ## [18.13.3] - 2026-10-28
 

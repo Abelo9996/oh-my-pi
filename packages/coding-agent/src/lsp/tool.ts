@@ -27,6 +27,7 @@ import {
 	reconcileFileFromDisk,
 	reconcileIdleChecker,
 	reconcileOpenFilesFromDisk,
+	rebuildFile,
 	refreshFile,
 	reopenFile,
 	sendNotification,
@@ -51,6 +52,7 @@ import {
 	SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	WORKSPACE_SYMBOL_LIMIT,
 	waitForDiagnostics,
+	waitForRebuiltDiagnostics,
 } from "./diagnostics";
 import {
 	applyEditsThenRename,
@@ -343,7 +345,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const results: string[] = [];
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
-			let totalServerSuccesses = 0;
+			let totalServerFailures = 0;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -378,7 +380,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							const diagnostics = await linterClient.lint(resolved, signal);
 							allDiagnostics.push(...diagnostics);
 							succeededServers++;
-							totalServerSuccesses++;
 							continue;
 						}
 						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
@@ -387,10 +388,18 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						// call cannot be trusted: a dependency OMP never opened may have changed.
 						await reconcileOpenFilesFromDisk(client, signal, uri);
 						const minVersion = client.diagnosticsVersion;
+						// Set when clangd was asked to rebuild: its report is final only once its
+						// build status settles.
+						let rebuildStatusSeq: number | undefined;
 						if (supportsDocumentDiagnostics(client)) {
 							// The wait pulls a fresh report; drop the cached one so it cannot answer first.
 							client.diagnostics.delete(uri);
 							await reconcileFileFromDisk(client, resolved, signal);
+						} else if (client.buildStatus) {
+							// clangd with build status: rebuild the main file in place, keeping the
+							// headers it can reuse, rather than paying a full rebuild on reopen.
+							const sinceSeq = client.buildStatusSeq ?? 0;
+							if (await rebuildFile(client, resolved, signal)) rebuildStatusSeq = sinceSeq;
 						} else if (client.publishesDocumentVersions) {
 							// A push server need not republish unchanged text (clangd does not), but
 							// it does on open, and the echoed version identifies that report at once.
@@ -411,25 +420,34 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							: isProjectAwareLspServer(serverConfig)
 								? waitMs
 								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
-						const diagnostics = await waitForDiagnostics(client, uri, {
-							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
-							signal,
-							minVersion,
-							expectedDocumentVersion,
-							// Decided per pull, not above: a server can register pulls after this call began.
-							afterProjectLoad: isProjectAwareLspServer(serverConfig),
-						});
+						const timeoutMs = Math.min(waitCapMs, timeoutSec * 1000);
+						const diagnostics =
+							rebuildStatusSeq !== undefined && expectedDocumentVersion !== undefined
+								? await waitForRebuiltDiagnostics(client, uri, {
+										version: expectedDocumentVersion,
+										sinceSeq: rebuildStatusSeq,
+										timeoutMs,
+										signal,
+									})
+								: await waitForDiagnostics(client, uri, {
+										timeoutMs,
+										signal,
+										minVersion,
+										expectedDocumentVersion,
+										// Decided per pull, not above: a server can register pulls after this call began.
+										afterProjectLoad: isProjectAwareLspServer(serverConfig),
+									});
 						if (diagnostics === undefined) {
 							unreportedServers.push(serverName);
 							continue;
 						}
 						allDiagnostics.push(...diagnostics);
 						succeededServers++;
-						totalServerSuccesses++;
 					} catch (err) {
 						rethrowAbort(err, serverName);
 						// Server failed; record it so a total failure is not reported as clean.
 						failedServers.push(serverName);
+						totalServerFailures++;
 						logger.debug("LSP diagnostics server failed", {
 							server: serverName,
 							file: relPath,
@@ -478,13 +496,18 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				if (!detailed) {
 					return {
 						content: [{ type: "text", text: lines.join("\n") }],
-						details: { action, serverName: Array.from(allServerNames).join(", "), success: succeededServers > 0 },
+						// Unverified is not failed: success unless every server errored.
+						details: {
+							action,
+							serverName: Array.from(allServerNames).join(", "),
+							success: succeededServers > 0 || unreportedServers.length > 0,
+						},
 					};
 				}
 				results.push(...lines);
 			}
 
-			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
+			const allServersFailed = totalServerAttempts > 0 && totalServerFailures === totalServerAttempts;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
 				details: { action, serverName: Array.from(allServerNames).join(", "), success: !allServersFailed },
@@ -1394,7 +1417,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								signal,
 								expectedDocumentVersion: client.openFiles.get(uri)?.version,
 							});
-							diagnostics = reported ?? client.diagnostics.get(uri)?.diagnostics ?? [];
+							// No fresh report: the cached one belongs to an older document version.
+							diagnostics = reported ?? [];
 						} catch (err) {
 							if (err instanceof ToolAbortError || signal?.aborted) throw err;
 							diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];

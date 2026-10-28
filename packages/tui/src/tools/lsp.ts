@@ -83,6 +83,8 @@ export interface FileDiagnosticsResult {
 	summary: string;
 	/** Whether there are any errors (severity 1) */
 	errored: boolean;
+	/** Servers that sent no fresh report in time: the file is unverified for them, not clean. */
+	unreported?: string[];
 	/** Whether the file was formatted */
 	formatter?: FileFormatResult;
 }

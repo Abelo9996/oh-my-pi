@@ -430,6 +430,12 @@ export interface LspServerCapabilities {
 	[key: string]: unknown;
 }
 
+/** Last busy and idle build-status notifications for a document, as client-wide sequence numbers. */
+export interface DocumentBuildStatus {
+	busySeq: number;
+	idleSeq: number;
+}
+
 export interface LspClient {
 	name: string;
 	cwd: string;
@@ -440,6 +446,13 @@ export interface LspClient {
 	diagnosticsVersion: number;
 	/** Set once a publish echoes a document version, so a wait can identify the report for a reopen. */
 	publishesDocumentVersions?: boolean;
+	/**
+	 * Build state per document from clangd's `textDocument/clangd.fileStatus`, present once the
+	 * server sent one. Lets a diagnostics wait tell a finished rebuild from one still running.
+	 */
+	buildStatus?: Map<string, DocumentBuildStatus>;
+	/** Orders build-status notifications across documents. */
+	buildStatusSeq?: number;
 	/** Dynamic capability registrations keyed by the server-provided registration ID. */
 	dynamicCapabilityRegistrations?: Map<string, string>;
 	openFiles: Map<string, OpenFile>;

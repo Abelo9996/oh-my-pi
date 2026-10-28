@@ -7,6 +7,7 @@ import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
 import type {
+	DocumentBuildStatus,
 	LspClient,
 	LspJsonRpcId,
 	LspJsonRpcNotification,
@@ -509,6 +510,15 @@ async function startMessageReader(client: LspClient): Promise<void> {
 										client.resolveProjectLoaded();
 									}
 								}
+							} else if (message.method === "textDocument/clangd.fileStatus" && message.params) {
+								const params = message.params as { uri: string; state?: string };
+								const buildStatus = (client.buildStatus ??= new EquivalentUriMap<DocumentBuildStatus>());
+								const status = buildStatus.get(params.uri) ?? { busySeq: 0, idleSeq: 0 };
+								const seq = (client.buildStatusSeq ?? 0) + 1;
+								client.buildStatusSeq = seq;
+								if (params.state === "idle") status.idleSeq = seq;
+								else status.busySeq = seq;
+								buildStatus.set(params.uri, status);
 							}
 						}
 					} else if ("id" in message && message.id !== undefined) {
@@ -893,6 +903,15 @@ export function isRustAnalyzerClient(client: LspClient): boolean {
 	);
 }
 
+const CLANGD_BASENAME_RE = /^clangd(?:-\d+)?(?:\.exe)?$/i;
+
+/** True when the configured or resolved binary is clangd (`clangd`, `clangd-18`, `clangd.exe`). */
+function isClangdConfig(config: ServerConfig): boolean {
+	return [config.command, config.resolvedCommand].some(
+		command => command !== undefined && CLANGD_BASENAME_RE.test(commandBasename(command)),
+	);
+}
+
 async function waitForRustAnalyzerWorkspace(client: LspClient, signal?: AbortSignal): Promise<void> {
 	if (rustAnalyzerReadyClients.has(client)) {
 		return;
@@ -1106,7 +1125,11 @@ export async function getOrCreateClient(
 		const baseArgs = config.args ?? [];
 		// Sent in both the mux handshake and `initialize`: a reused shared server
 		// answers `initialize` from cache, so the mux keys servers on these options.
-		const initializationOptions = config.initOptions ?? {};
+		// clangd reports per-document build status only when asked; diagnostics waits use it
+		// to tell a finished rebuild from one still running. User options take precedence.
+		const initializationOptions = isClangdConfig(config)
+			? { clangdFileStatus: true, ...config.initOptions }
+			: (config.initOptions ?? {});
 
 		// Wrap with lspmux if available and supported
 		const { command, args, env } = isLspmuxSupported(baseCommand)
@@ -1726,15 +1749,15 @@ export async function notifyWorkspaceWatchedFiles(
 				.filter(change => isPathInsideWorkspace(change.filePath, workspace))
 				.map(change => {
 					const uri = fileToUri(change.filePath);
-					// Keep a report echoing the open document's version: after a writethrough,
-					// which syncs the overlay before writing, it already answers the new disk
-					// text, and a publish that beat this notification must not be lost. The
-					// check does not prove that sync happened (the ACP write bridge writes
-					// without one); such a report stays stale until reconcileFileFromDisk sees
-					// the disk change and drops it.
+					// Keep a report echoing the open document's version only while OMP's own
+					// write is in flight: the writethrough synced the overlay before writing, so
+					// the report already answers the new disk text, and a publish that beat this
+					// notification must not be lost. Any other write (the ACP bridge, for one)
+					// leaves the overlay on the old text, so its report is stale.
 					const published = client.diagnostics.get(uri);
 					const current =
 						change.type === FileChangeType.Changed &&
+						pendingDiskWrites.has(uri) &&
 						published !== undefined &&
 						published.version === client.openFiles.get(uri)?.version;
 					if (!current) client.diagnostics.delete(uri);
@@ -1766,10 +1789,21 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 /**
  * Close and reopen a document from disk. A push server need not republish diagnostics
  * for an identical-text didChange (clangd does not), but recomputes them on open, picking
- * up changed dependencies whether or not OMP has them open.
+ * up changed dependencies whether or not OMP has them open. A save follows the open for
+ * servers that validate on save.
  */
 export async function reopenFile(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
 	await refreshDocument(client, filePath, "reopen", signal);
+}
+
+/**
+ * Make clangd rebuild an open document from disk and publish its diagnostics. Resolves
+ * `true` when it sent the rebuild, so the report for the document's current version is
+ * final only once clangd's build status settles (see `waitForRebuiltDiagnostics`); `false`
+ * when it opened the document instead, or left it to an in-flight OMP write.
+ */
+export async function rebuildFile(client: LspClient, filePath: string, signal?: AbortSignal): Promise<boolean> {
+	return await refreshDocument(client, filePath, "rebuild", signal);
 }
 
 /**
@@ -1782,12 +1816,13 @@ export async function refreshOpenFiles(client: LspClient, signal?: AbortSignal):
 	);
 }
 
+/** Resolves whether a `rebuild` sent its changes. */
 async function refreshDocument(
 	client: LspClient,
 	filePath: string,
-	purpose: "use" | "resync" | "reopen",
+	purpose: "use" | "resync" | "reopen" | "rebuild",
 	signal?: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
 	throwIfAborted(signal);
 	const uri = fileToUri(filePath);
 	const lockKey = `${client.name}:${uri}`;
@@ -1797,10 +1832,12 @@ async function refreshDocument(
 		await untilAborted(signal, () => existingLock);
 	}
 
+	let rebuilt = false;
 	const refreshPromise = (async () => {
 		throwIfAborted(signal);
-		// A pending OMP write's overlay leads disk; reopening from disk would revert it.
-		if (purpose === "reopen" && pendingDiskWrites.has(uri)) return;
+		// A pending OMP write's overlay leads disk; reopening or rebuilding from disk would revert it.
+		const fromDisk = purpose === "reopen" || purpose === "rebuild";
+		if (fromDisk && pendingDiskWrites.has(uri)) return;
 		// Drop cached diagnostics for this URI before asking the server to recompute.
 		// Otherwise an unrelated publishDiagnostics notification can advance the global
 		// diagnostics version and cause waiters to accept stale unversioned diagnostics.
@@ -1823,7 +1860,7 @@ async function refreshDocument(
 			if (!pendingDiskWrites.has(uri)) await closeDocument(client, uri, signal);
 			return;
 		}
-		if (purpose === "reopen" && pendingDiskWrites.has(uri)) return;
+		if (fromDisk && pendingDiskWrites.has(uri)) return;
 		const version = ++info.version;
 		throwIfAborted(signal);
 
@@ -1840,6 +1877,39 @@ async function refreshDocument(
 				signal,
 			);
 			trackOpenedFile(client, uri, info.languageId, version, content);
+			await sendNotification(
+				client,
+				"textDocument/didSave",
+				saveIncludesText(client) ? { textDocument: { uri }, text: content } : { textDocument: { uri } },
+				signal,
+			);
+			return;
+		}
+
+		if (purpose === "rebuild") {
+			// clangd neither rebuilds nor republishes for a didChange carrying the text it
+			// already has. A detour through one more trailing newline makes it rebuild the
+			// main file, re-checking its headers on disk, and publish for the restored text.
+			// Both changes must ask for diagnostics, or clangd drops the detour as superseded
+			// and the restored text then matches what it already has.
+			const detour = `${content}\n`;
+			await sendNotification(
+				client,
+				"textDocument/didChange",
+				{ textDocument: { uri, version }, contentChanges: [{ text: detour }], wantDiagnostics: true },
+				signal,
+			);
+			info.syncedHash = documentSignature(detour);
+			const restored = ++info.version;
+			await sendNotification(
+				client,
+				"textDocument/didChange",
+				{ textDocument: { uri, version: restored }, contentChanges: [{ text: content }], wantDiagnostics: true },
+				signal,
+			);
+			info.syncedHash = documentSignature(content);
+			client.lastActivity = Date.now();
+			rebuilt = true;
 			return;
 		}
 
@@ -1871,6 +1941,7 @@ async function refreshDocument(
 	} finally {
 		fileOperationLocks.delete(lockKey);
 	}
+	return rebuilt;
 }
 
 /**

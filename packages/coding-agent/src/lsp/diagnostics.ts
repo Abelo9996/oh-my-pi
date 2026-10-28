@@ -41,6 +41,8 @@ const DIAGNOSTIC_MESSAGE_LIMIT = 50;
 export const SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;
 export const BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS = 400;
 const DIAGNOSTICS_POLL_MS = 100;
+/** Build-status notifications for a document that did not change arrive ~10–90 ms apart. */
+const BUILD_STATUS_POLL_MS = 20;
 const DIAGNOSTICS_SETTLE_MS = 250;
 /**
  * How long the edit/write writethrough blocks inline waiting for fresh
@@ -81,6 +83,16 @@ export function deferredDiagnosticsWaitMs(requestTimeoutSec: number | undefined)
 }
 export const MAX_GLOB_DIAGNOSTIC_TARGETS = 20;
 export const WORKSPACE_SYMBOL_LIMIT = 200;
+
+/**
+ * Summary for a file some servers sent no fresh report on, appended to the summary of
+ * the reports that did arrive, so the file never reads as clean.
+ */
+export function unreportedSummary(servers: readonly string[], reported?: string): string {
+	const unverified = `no diagnostics report yet from ${servers.join(", ")}`;
+	return reported ? `${reported}; ${unverified}` : unverified;
+}
+
 export const PROJECT_INDEXED_ACTIONS: ReadonlySet<string> = new Set([
 	"definition",
 	"type_definition",
@@ -431,6 +443,56 @@ export async function waitForDiagnostics(
 	return pulled;
 }
 
+interface WaitForRebuiltDiagnosticsOptions {
+	/** Document version `rebuildFile` left the server on. */
+	version: number;
+	/** `client.buildStatusSeq` read before the rebuild was sent. */
+	sinceSeq: number;
+	timeoutMs: number;
+	signal?: AbortSignal;
+}
+
+/**
+ * Wait for clangd's report on a document `rebuildFile` rebuilt. clangd can publish the
+ * rebuilt version twice: first against its cached headers, then again once it has rebuilt a
+ * header that changed on disk, so the first matching publish is not final. The report is
+ * final once the document's build status went busy and back to idle after the rebuild, and
+ * a request queued behind that build has answered. Resolves `undefined` when that does not
+ * happen within the budget, which callers MUST NOT read as a clean file.
+ */
+export async function waitForRebuiltDiagnostics(
+	client: LspClient,
+	uri: string,
+	options: WaitForRebuiltDiagnosticsOptions,
+): Promise<Diagnostic[] | undefined> {
+	const { version, sinceSeq, timeoutMs, signal } = options;
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		throwIfAborted(signal);
+		const status = client.buildStatus?.get(uri);
+		if (status && status.busySeq > sinceSeq && status.idleSeq > status.busySeq) break;
+		const left = deadline - Date.now();
+		if (left <= 0) return undefined;
+		await Bun.sleep(Math.min(BUILD_STATUS_POLL_MS, left));
+	}
+	// clangd turns idle once its header check ends, which can precede the publish of the AST
+	// built against rebuilt headers; a document request queues behind that build.
+	try {
+		await sendRequest(
+			client,
+			"textDocument/documentSymbol",
+			{ textDocument: { uri } },
+			signal,
+			Math.max(1, deadline - Date.now()),
+		);
+	} catch {
+		throwIfAborted(signal);
+		return undefined;
+	}
+	const published = client.diagnostics.get(uri);
+	return published?.version === version ? published.diagnostics : undefined;
+}
+
 export type ServerVersionMap = Map<string, number>;
 
 interface GetDiagnosticsForFileOptions {
@@ -554,10 +616,15 @@ export async function getDiagnosticsForFile(
 		}),
 	);
 
+	const unreported: string[] = [];
 	for (const result of results) {
-		// A server that sent no fresh report is skipped, like one that overran its
-		// budget: counting it would report its file as clean.
-		if (result.status !== "fulfilled" || result.value.diagnostics === undefined) continue;
+		if (result.status !== "fulfilled") continue;
+		// A server that sent no fresh report leaves the file unverified: counting it
+		// as a server that answered would report the file as clean.
+		if (result.value.diagnostics === undefined) {
+			unreported.push(result.value.serverName);
+			continue;
+		}
 		serverNames.push(result.value.serverName);
 		allDiagnostics.push(
 			...filterOrphanProjectDiagnostics(
@@ -569,16 +636,19 @@ export async function getDiagnosticsForFile(
 		);
 	}
 
-	if (serverNames.length === 0) {
+	if (serverNames.length === 0 && unreported.length === 0) {
 		return undefined;
 	}
+	const server = [...serverNames, ...unreported].join(", ");
+	const unreportedField = unreported.length > 0 ? unreported : undefined;
 
 	if (allDiagnostics.length === 0) {
 		return {
-			server: serverNames.join(", "),
+			server,
 			messages: [],
-			summary: "OK",
+			summary: unreportedField ? unreportedSummary(unreportedField) : "OK",
 			errored: false,
+			unreported: unreportedField,
 		};
 	}
 
@@ -600,10 +670,11 @@ export async function getDiagnosticsForFile(
 	const hasErrors = uniqueDiagnostics.some(d => d.severity === 1);
 
 	return {
-		server: serverNames.join(", "),
+		server,
 		messages: limited,
-		summary,
+		summary: unreportedField ? unreportedSummary(unreportedField, summary) : summary,
 		errored: hasErrors,
+		unreported: unreportedField,
 	};
 }
 
