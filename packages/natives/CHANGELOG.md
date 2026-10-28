@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native audio playback clicking when its queue runs dry mid-waveform; output fades to silence and back in over 5 ms ([#17295](https://github.com/can1357/oh-my-pi/issues/17295))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed
