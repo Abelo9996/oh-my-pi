@@ -6,6 +6,10 @@
 
 - Updated Bun engine requirement to ≥1.4.4
 
+### Removed
+
+- Removed support for the TSP `t` (theme) verb, as surface theme synchronization is no longer required
+
 ### Fixed
 
 - Restored WebP and JPEG images stay visible in Kitty scrollback after resuming a session ([#17220](https://github.com/can1357/oh-my-pi/issues/17220)).
