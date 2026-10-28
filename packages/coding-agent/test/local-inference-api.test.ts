@@ -322,6 +322,39 @@ describe("tiny model chat client", () => {
 		}
 	});
 
+	it("closes an aborted load's HUD row when its worker goes away", async () => {
+		const activities: DownloadActivity[] = [];
+		const stop = onDownloadActivity(activity => activities.push(activity));
+		const loading = Promise.withResolvers<void>();
+		const worker = new FakeTinyWorker((request, current) => {
+			if (request.type !== "load") return;
+			current.emit({
+				type: "progress",
+				id: request.id,
+				event: { modelKey: "lfm2.5-230m", status: "initiate", name: "onnxruntime-node@1.0.0" },
+			});
+			loading.resolve();
+		});
+		const client = new TinyTitleClient(async () => worker);
+		const controller = new AbortController();
+
+		try {
+			const download = client.downloadModel("lfm2.5-230m", { signal: controller.signal });
+			await loading.promise;
+			controller.abort();
+			expect(await download).toEqual({ ok: false });
+			worker.emitError(new Error(WORKER_CONNECTION_CLOSED));
+
+			expect(activities.map(activity => [activity.id, activity.state])).toEqual([
+				[activities[0]!.id, "running"],
+				[activities[0]!.id, "failed"],
+			]);
+		} finally {
+			stop();
+			await client.terminate();
+		}
+	});
+
 	it("surfaces a worker that cannot be reached in the download HUD", async () => {
 		const failed = Promise.withResolvers<DownloadActivity>();
 		const stop = onDownloadActivity(activity => {
