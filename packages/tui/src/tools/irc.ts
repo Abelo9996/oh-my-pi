@@ -12,7 +12,7 @@ export interface IrcMessage {
 	to: string;
 	body: string;
 	ts: number;
-	/** Message id fulfilled by this final reply; progress/acknowledgements omit it. */
+	/** Message id being answered. */
 	replyTo?: string;
 	/**
 	 * Automated wake-turn relay of a woken subagent's stop output (task executor
@@ -27,6 +27,12 @@ export interface IrcMessage {
 	 * the broadcaster, mostly to say the message was not for it.
 	 */
 	broadcast?: boolean;
+	/**
+	 * Interim acknowledgement or progress on something the recipient asked
+	 * (`agent://<id>?progress`): it neither answers that request nor asks one,
+	 * so the recipient's `wait` keeps waiting for the actual reply.
+	 */
+	progress?: boolean;
 }
 
 /** Delivery outcome for one peer recipient. */

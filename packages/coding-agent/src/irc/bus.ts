@@ -27,19 +27,6 @@ interface SendMark {
 	seq: number;
 }
 
-interface IrcRequest {
-	id: string;
-	to: string;
-	sentAt: number;
-}
-
-interface IrcReply {
-	from: string;
-	to: string;
-	/** Absent for an owned-job outcome, which answers all existing requests to that agent. */
-	replyTo?: string;
-}
-
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
 
@@ -55,8 +42,6 @@ export class IrcBus {
 
 	/** Reset the global bus. Test-only. */
 	static resetGlobalForTests(): void {
-		const bus = IrcBus.#global;
-		if (bus) bus.#unsubscribeRegistry();
 		IrcBus.#global = undefined;
 	}
 
@@ -75,12 +60,14 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
-	/** The latest successful explicit send per `from` → `to`; see {@link sentSince}. */
+	/** The latest successful non-progress send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, SendMark>>();
-	/** Outstanding direct requests by sender and message identity. */
-	readonly #requests = new Map<string, Map<string, IrcRequest>>();
-	readonly #listeners = new Set<(reply?: IrcReply) => void>();
-	readonly #unsubscribeRegistry: () => void;
+	/** The latest direct (non-broadcast, non-progress) send per `from` → `to`; see {@link unansweredSends}. */
+	readonly #lastDirect = new Map<string, Map<string, SendMark>>();
+	/** The latest progress message per `from` → `to`: a promise that a reply will follow. */
+	readonly #lastProgress = new Map<string, Map<string, SendMark>>();
+	/** The latest job-carried reply per agent → owner; see {@link IrcBus.recordReply}. */
+	readonly #lastJobReply = new Map<string, Map<string, SendMark>>();
 	/** Last {@link SendMark.seq} handed out, taken when a send starts. */
 	#sendSeq = 0;
 
@@ -89,17 +76,6 @@ export class IrcBus {
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
-		this.#unsubscribeRegistry = registry.onChange(event => {
-			if (event.type !== "removed" && event.ref.status !== "aborted") return;
-			this.#requests.delete(event.ref.id);
-			for (const [from, requests] of this.#requests) {
-				for (const [id, request] of requests) {
-					if (request.to === event.ref.id) requests.delete(id);
-				}
-				if (requests.size === 0) this.#requests.delete(from);
-			}
-			this.#emitChange();
-		});
 	}
 
 	/**
@@ -124,38 +100,15 @@ export class IrcBus {
 		// Taken before delivery: a reply sent while this message is still being
 		// delivered must still order after it.
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
-		// Register before handing off: a wake can answer, or settle its owned
-		// job, before delivery itself returns. Never reinsert that request.
-		let isRequest = !message.broadcast && !message.wakeRelay && !message.replyTo;
-		const requestsFromRecipient = this.#requests.get(message.to);
-		if (isRequest && requestsFromRecipient) {
-			// A message back while the sender owes this recipient an answer is
-			// progress on that request, not a new reverse reply obligation.
-			const since = this.#registry.get(message.to)?.session?.runStartedAt ?? 0;
-			for (const request of requestsFromRecipient.values()) {
-				if (request.to === message.from && request.sentAt >= since) {
-					isRequest = false;
-					break;
-				}
-			}
-		}
-		if (isRequest) {
-			let requests = this.#requests.get(message.from);
-			if (!requests) {
-				requests = new Map();
-				this.#requests.set(message.from, requests);
-			}
-			requests.set(message.id, { id: message.id, to: message.to, sentAt: message.ts });
-		}
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
-			if (!message.wakeRelay) this.#record(this.#lastSent, message.from, message.to, mark);
-			if (message.replyTo && !message.broadcast) this.#recordReply(message.from, message.to, message.replyTo);
-		} else if (isRequest) {
-			const requests = this.#requests.get(message.from);
-			requests?.delete(message.id);
-			if (requests?.size === 0) this.#requests.delete(message.from);
-			this.#emitChange();
+			if (message.progress) {
+				this.#record(this.#lastProgress, message.from, message.to, mark);
+			} else {
+				this.#record(this.#lastSent, message.from, message.to, mark);
+				if (!message.broadcast && !message.wakeRelay)
+					this.#record(this.#lastDirect, message.from, message.to, mark);
+			}
 		}
 		return receipt;
 	}
@@ -170,73 +123,41 @@ export class IrcBus {
 		if ((sent.get(to)?.seq ?? 0) < mark.seq) sent.set(to, mark);
 	}
 
-	#recordReply(from: string, to: string, replyTo?: string): void {
-		const requests = this.#requests.get(to);
-		if (requests) {
-			for (const [id, request] of requests) {
-				if (request.to === from && (replyTo === undefined || id === replyTo)) requests.delete(id);
-			}
-			if (requests.size === 0) this.#requests.delete(to);
-		}
-		this.#emitChange({ from, to, replyTo });
-	}
-
-	#emitChange(reply?: IrcReply): void {
-		for (const listener of this.#listeners) {
-			try {
-				listener(reply);
-			} catch {
-				// Observers must not break message or job delivery.
-			}
-		}
-	}
-
-	/** Observe settled requests; successful replies carry their correlation for wake-turn deduplication. */
-	onChange(listener: (reply?: IrcReply) => void): () => void {
-		this.#listeners.add(listener);
-		return () => this.#listeners.delete(listener);
+	#recordReply(from: string, to: string): void {
+		this.#record(this.#lastJobReply, from, to, { ts: Date.now(), seq: ++this.#sendSeq });
 	}
 
 	/**
-	 * Whether `from` successfully sent `to` an explicit message at or after
-	 * `sinceTs`. Automatic wake relays do not count as explicit messages.
-	 * Wake-turn summaries use it to distinguish message-only output from no
-	 * output and to avoid treating a post-progress relay as a final answer.
+	 * Whether `from` successfully sent `to` anything, progress included, at or
+	 * after `sinceTs`. The wake-turn relay uses it to skip agents that already
+	 * answered their waker themselves, or promised it a later answer.
 	 */
 	sentSince(from: string, to: string, sinceTs: number): boolean {
-		const sent = this.#lastSent.get(from)?.get(to);
-		return sent !== undefined && sent.ts >= sinceTs;
+		return [this.#lastSent, this.#lastProgress].some(table => (table.get(from)?.get(to)?.ts ?? -1) >= sinceTs);
 	}
 
 	/**
-	 * Direct requests sent at or after `sinceTs` still owed to `from`.
-	 * Only a reply naming that message from its recipient, or that agent's
-	 * owned-job outcome, settles it. Ordinary acknowledgements do not.
-	 * Idle/wake transitions retain requests; cancellation or unavailability
-	 * removes them. Message identity distinguishes same-millisecond requests.
+	 * Agents `from` messaged directly at or after `sinceTs` that have not
+	 * answered since, with when the latest of those messages went out: the
+	 * replies a `wait` can block for. A message back answers, and so does a
+	 * settled job of the agent `from` owns, which delivers its result. Progress
+	 * answers nothing; it marks the request `promised`, and from then on only
+	 * an explicit message answers it (a job settling the turn that sent the
+	 * progress must not). "Since" is by send order, not timestamp, so an answer
+	 * to an earlier question never settles a later one sent within the same
+	 * millisecond.
 	 */
-	unansweredSends(from: string, sinceTs: number): IrcRequest[] {
-		const requests = this.#requests.get(from);
-		if (!requests) return [];
-		const unanswered: IrcRequest[] = [];
-		for (const [id, request] of requests) {
-			if (request.sentAt < sinceTs) {
-				requests.delete(id);
-				continue;
-			}
-			const ref = this.#registry.get(request.to);
-			if (
-				!ref ||
-				ref.kind === "advisor" ||
-				ref.status === "aborted" ||
-				(!ref.session && (ref.status !== "parked" || !ref.sessionFile))
-			) {
-				requests.delete(id);
-				continue;
-			}
-			unanswered.push(request);
+	unansweredSends(from: string, sinceTs: number): Array<{ to: string; sentAt: number; promised: boolean }> {
+		const sends = this.#lastDirect.get(from);
+		if (!sends) return [];
+		const unanswered: Array<{ to: string; sentAt: number; promised: boolean }> = [];
+		for (const [to, sent] of sends) {
+			if (sent.ts < sinceTs) continue;
+			const after = (table: Map<string, Map<string, SendMark>>) => (table.get(to)?.get(from)?.seq ?? 0) > sent.seq;
+			const promised = after(this.#lastProgress);
+			if (after(this.#lastSent) || (!promised && after(this.#lastJobReply))) continue;
+			unanswered.push({ to, sentAt: sent.ts, promised });
 		}
-		if (requests.size === 0) this.#requests.delete(from);
 		return unanswered;
 	}
 
@@ -459,7 +380,6 @@ export class IrcBus {
 		if (index === -1 || mailbox.length === 0) return undefined;
 		const [message] = mailbox.splice(index, 1);
 		if (mailbox.length === 0) this.#mailboxes.delete(agentId);
-		if (message?.replyTo && !message.broadcast) this.#recordReply(message.from, message.to, message.replyTo);
 		return message;
 	}
 

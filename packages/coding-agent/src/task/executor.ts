@@ -3058,7 +3058,6 @@ export interface IrcWakeTurnMonitorOptions {
 interface WakeSource {
 	from: string;
 	messageId?: string;
-	answered?: boolean;
 }
 
 function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
@@ -3067,20 +3066,20 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 		if (record.role !== "custom") continue;
 		const details = record.details && typeof record.details === "object" ? record.details : undefined;
 		const from = details ? Reflect.get(details, "from") : undefined;
-		if (typeof from !== "string" || from === selfId) continue;
+		if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
 		// Automated wake-turn relays are answers, not wake sources: relaying one
 		// back would ping-pong two idle peers forever. A broadcast leg is not one
 		// either: it asks no one in particular, so relaying every woken peer's
 		// turn back would flood the broadcaster with "not for me" replies.
+		// A progress note promises a later answer and asks nothing back.
 		if (
 			details &&
 			(Reflect.get(details, "wakeRelay") === true ||
 				Reflect.get(details, "broadcast") === true ||
-				typeof Reflect.get(details, "replyTo") === "string")
+				Reflect.get(details, "progress") === true)
 		)
 			continue;
 		const messageId = details ? Reflect.get(details, "id") : undefined;
-		if (sources.some(source => source.from === from && source.messageId === messageId)) continue;
 		sources.push({ from, messageId: typeof messageId === "string" ? messageId : undefined });
 	}
 	return sources;
@@ -3097,7 +3096,7 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
  */
 async function relayWakeTurnOutput(args: {
 	id: string;
-	sources: WakeSource[];
+	records: AgentMessage[];
 	turnStartTime: number;
 	yielded: boolean;
 	result: SingleResult | undefined;
@@ -3114,23 +3113,26 @@ async function relayWakeTurnOutput(args: {
 	jobOwnerId: string | undefined;
 }): Promise<void> {
 	const bus = IrcBus.global();
-	if (args.sources.length === 0) return;
+	const sources = wakeSources(args.records, args.id);
+	if (sources.length === 0) return;
 	const failed = wakeTurnFailed(args);
-	for (const source of args.sources) {
+	for (const source of sources) {
 		if (source.from === args.jobOwnerId) continue;
 		const alreadyMessaged = bus.sentSince(args.id, source.from, args.turnStartTime);
-		// Only a correlated answer duplicates this request's turn output.
-		// Progress does not fulfill it; failure remains a distinct lifecycle fact.
-		if (source.answered && !failed) continue;
+		// A completed turn's answer would duplicate what the agent already sent
+		// this waker, so dedup stays. A failed/cancelled turn is a distinct
+		// lifecycle fact: `sentSince` cannot tell "already answered you" from
+		// "pinged you 'on it'", and suppressing the failure notice on a mere ping
+		// strands the waker exactly as before — one message later. So the failure
+		// lane always notifies, flavoured to acknowledge the earlier message.
+		if (alreadyMessaged && !failed) continue;
 		const body = buildWakeRelayBody({ ...args, alreadyMessaged });
 		if (!body) continue;
 		const receipt = await bus.send({
 			from: args.id,
 			to: source.from,
 			body,
-			// Once the agent explicitly messages its requester, its stop output
-			// is only a notice: it must not finalize a promised later reply.
-			replyTo: alreadyMessaged ? undefined : source.messageId,
+			replyTo: source.messageId,
 			wakeRelay: true,
 		});
 		if (receipt.outcome === "failed") {
@@ -3261,13 +3263,6 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const turnStartTime = Date.now();
 		const relay = Promise.withResolvers<void>();
 		session.trackIrcReply(relay.promise);
-		const sources = wakeSources(records, id);
-		const unsubscribeReplies = IrcBus.global().onChange(reply => {
-			if (!reply || reply.from !== id || reply.replyTo === undefined) return;
-			for (const source of sources) {
-				if (source.from === reply.to && source.messageId === reply.replyTo) source.answered = true;
-			}
-		});
 		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
 		// The parent receives this turn's outcome through an owner-routed job:
 		// ordinary async-result delivery, and what its `wait` blocks on. A
@@ -3275,7 +3270,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		// after its steer is consumed. Otherwise only an accepted yield registers
 		// a job, before the ref goes idle.
 		const ownerId = AgentRegistry.global().get(id)?.parentId;
-		const ownerWoken = sources.some(source => source.from === ownerId);
+		const ownerWoken = wakeSources(records, id).some(source => source.from === ownerId);
 		// Cancelling the job cancels the turn it stands for.
 		const jobCancel = new AbortController();
 		// The turn's finished tool calls, which the job's widget reads like a first run's.
@@ -3517,7 +3512,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				try {
 					await relayWakeTurnOutput({
 						id,
-						sources,
+						records,
 						turnStartTime,
 						yielded,
 						result,
@@ -3534,7 +3529,6 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						error: relayError instanceof Error ? relayError.message : String(relayError),
 					});
 				} finally {
-					unsubscribeReplies();
 					relay.resolve();
 				}
 			}

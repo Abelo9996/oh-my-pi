@@ -9,7 +9,7 @@
 ### Fixed
 
 - Fixed `read` rejecting artifact URLs from truncation hints when cached approvals or restricted folders are configured ([#17282](https://github.com/can1357/oh-my-pi/pull/17282) by [@iliaal](https://github.com/iliaal)).
-- Fixed `wait` forgetting peer requests after interim acknowledgements or idle/wake transitions; final peer replies use `agent://<id>?replyTo=<message-id>` ([#17176](https://github.com/can1357/oh-my-pi/pull/17176) by [@alphastorm](https://github.com/alphastorm))
+- Fixed `wait` treating a peer's "on it" acknowledgement as its answer: peers send interim notes to `agent://<id>?progress`, and the requester keeps waiting for the real reply even while the peer idles ([#17176](https://github.com/can1357/oh-my-pi/pull/17176) by [@alphastorm](https://github.com/alphastorm))
 - A failed Hindsight memory recall (for example `recall request timed out after 30s`) now shows a warning instead of silently sending the prompt without memories; `omp -p` writes it, and Hindsight retain failures, to stderr ([#17278](https://github.com/can1357/oh-my-pi/pull/17278) by [@enieuwy](https://github.com/enieuwy))
 - Fixed cancelling an MCP OAuth login or `/mcp` auth lookup at the wrong moment crashing the session with an unhandled rejection ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 

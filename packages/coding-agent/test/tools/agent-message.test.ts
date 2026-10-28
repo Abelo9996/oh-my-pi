@@ -6,7 +6,6 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 
@@ -103,59 +102,14 @@ describe("write agent:// messaging", () => {
 		await expect(new AgentProtocolHandler().resolve(new URL("agent://all") as never)).rejects.toThrow("write-only");
 	});
 
-	it("correlates a final reply through the message URL without closing another request", async () => {
-		registerPeer("Scout");
-		registerPeer("Sender");
-		const sender = new WriteTool(makeSession({ senderId: "Sender" }));
-		await sender.execute("first", { path: "agent://Scout", content: "release the first slot" });
-		await sender.execute("second", { path: "agent://Scout", content: "release the next slot" });
-		const [first, second] = received.get("Scout")!;
-		const scout = new WriteTool(makeSession({ senderId: "Scout" }));
-		await scout.execute("ack", { path: "agent://Sender", content: "on it" });
-		expect(IrcBus.global().unansweredSends("Sender", 0)).toHaveLength(2);
-		await scout.execute("answer", {
-			path: `agent://Sender?replyTo=${first!.id}`,
-			content: "first slot released",
-		});
-		expect(received.get("Sender")?.at(-1)).toMatchObject({ replyTo: first!.id, body: "first slot released" });
-		expect(IrcBus.global().unansweredSends("Sender", 0)).toMatchObject([{ id: second!.id, to: "Scout" }]);
-	});
-
-	it("does not owe a reply to its acknowledgement but tracks a new question after fulfilling the request", async () => {
-		registerPeer("Scout");
-		registerPeer("Sender");
-		const sender = new WriteTool(makeSession({ senderId: "Sender" }));
-		const scoutSession = makeSession({ senderId: "Scout" });
-		scoutSession.settings = Settings.isolated({ "launch.enabled": false });
-		const scout = new WriteTool(scoutSession);
-		await sender.execute("request", { path: "agent://Scout", content: "notify me when the slot is released" });
-		const request = received.get("Scout")![0]!;
-		await scout.execute("ack", { path: "agent://Sender", content: "on it; release notice will follow" });
-
-		expect(IrcBus.global().unansweredSends("Scout", 0)).toEqual([]);
-		const afterAck = await new WaitTool(scoutSession).execute("after-ack", {});
-		expect(afterAck.content[0]).toMatchObject({ text: expect.stringContaining("Nothing to wait for") });
-		expect(IrcBus.global().unansweredSends("Sender", 0)).toMatchObject([{ id: request.id, to: "Scout" }]);
-
-		await scout.execute("final", { path: `agent://Sender?replyTo=${request.id}`, content: "slot released" });
-		await scout.execute("new-question", { path: "agent://Sender", content: "which slot is next?" });
-		const question = received.get("Sender")!.at(-1)!;
-		expect(IrcBus.global().unansweredSends("Scout", 0)).toMatchObject([{ id: question.id, to: "Sender" }]);
-		const waiting = new WaitTool(scoutSession).execute("await-new-answer", {});
-		await sender.execute("new-answer", { path: `agent://Scout?replyTo=${question.id}`, content: "slot two" });
-		expect((await waiting).details?.waited?.body).toBe("slot two");
-	});
-
-	it("rejects empty reply correlation and correlated broadcasts", async () => {
+	it("marks ?progress writes as progress and rejects progress broadcasts", async () => {
 		registerPeer("Scout");
 		const tool = new WriteTool(makeSession());
-		await expect(tool.execute("empty-reply", { path: "agent://Scout?replyTo=", content: "answer" })).rejects.toThrow(
-			"non-empty",
+		await tool.execute("ack", { path: "agent://Scout?progress", content: "on it" });
+		expect(received.get("Scout")).toMatchObject([{ to: "Scout", body: "on it", progress: true }]);
+		await expect(tool.execute("all", { path: "agent://all?progress", content: "on it" })).rejects.toThrow(
+			"?progress",
 		);
-		await expect(
-			tool.execute("broadcast-reply", { path: "agent://all?replyTo=request", content: "answer" }),
-		).rejects.toThrow("broadcast");
-		expect(received.get("Scout")).toEqual([]);
 	});
 
 	it("does not duplicate a child broadcast in the main session's relay view", async () => {

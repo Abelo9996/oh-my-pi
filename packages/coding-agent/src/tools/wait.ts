@@ -35,23 +35,35 @@ function takeQueuedMessage(messaging: WaitMessaging | undefined): IrcMessage | u
 }
 
 interface PendingReplies {
-	/** Available agents with outstanding requests, not blocked on the caller. */
+	/** Agents asked that can still answer: running, holding the question for a turn of its own, or that promised a reply, and not blocked on the caller. */
 	from: string[];
 	/** Agents asked that cannot answer before the caller finishes (see `AgentAwaits.blocksOn`). */
 	blocked: string[];
+	/** Agents asked whose turn ended without an answer, or that are gone. */
+	stopped: string[];
 }
 
 /**
- * Outstanding requests from this run, split by dependency-cycle liveness.
- * An idle boundary is not fulfillment: a wakeable peer may answer later.
+ * Agents the caller messaged during its current run that have not answered
+ * yet, split by whether a reply can still come. A message back answers, and
+ * so does a settled job of the agent the caller owns, which delivers its
+ * result. A running agent, or one still holding the question for a turn of
+ * its own (a subagent answers a message that reached it as it finished after
+ * its result is out), can answer, and so can a live one that sent progress
+ * promising a later reply. Any other idle agent has finished the turn it got
+ * the question in, and any automatic reply (a woken subagent's relayed
+ * output) has arrived by then.
  */
 function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const { registry, senderId } = messaging;
-	const replies: PendingReplies = { from: [], blocked: [] };
+	const replies: PendingReplies = { from: [], blocked: [], stopped: [] };
 	const since = registry.get(senderId)?.session?.runStartedAt ?? 0;
-	for (const { to, sentAt } of IrcBus.global().unansweredSends(senderId, since)) {
-		const targets = registry.awaits.blocksOn(to, senderId, sentAt) ? replies.blocked : replies.from;
-		if (!targets.includes(to)) targets.push(to);
+	for (const { to, sentAt, promised } of IrcBus.global().unansweredSends(senderId, since)) {
+		const session = registry.get(to)?.session;
+		if (session && registry.awaits.blocksOn(to, senderId, sentAt)) replies.blocked.push(to);
+		else if (session && (promised || session.isStreaming || session.hasQueuedIrcFrom(senderId)))
+			replies.from.push(to);
+		else replies.stopped.push(to);
 	}
 	return replies;
 }
@@ -61,6 +73,9 @@ function noReplyText(replies: PendingReplies): string {
 	const ids = (list: string[]) => list.map(id => `\`${id}\``).join(", ");
 	if (replies.blocked.length > 0) {
 		return `${ids(replies.blocked)} cannot reply before you finish: it is waiting on your result. Finish without the answer.`;
+	}
+	if (replies.stopped.length > 0) {
+		return `${ids(replies.stopped)} finished its turn without replying. Ask again, or finish without the answer.`;
 	}
 	return "no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own.";
 }
@@ -74,9 +89,9 @@ export function hasWaitTool(session: ToolSession): boolean {
  * Blocks on background jobs and services the calling agent started, or on
  * the reply to a message it sent this run. Other agents' work never sustains
  * a wait: a peer owes no message. A reply wait ends once no agent asked can
- * still answer: each one is unavailable, has fulfilled the request, or is
- * blocked on the caller itself, the cycle that would park both sides.
- * Any message ends the wait without fulfilling an uncorrelated request.
+ * still answer: each one finished its turn, or is blocked on the caller
+ * itself, the cycle that would park both sides. A message arriving mid-wait
+ * ends any wait.
  */
 export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetails> {
 	readonly name = "wait";
@@ -130,12 +145,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		}
 		const serviceRunning = hasLiveOwnedService(this.session);
 		if (jobs.length === 0 && !serviceRunning) {
-			const replies = messaging ? pendingReplies(messaging) : { from: [], blocked: [] };
+			const replies = messaging ? pendingReplies(messaging) : { from: [], blocked: [], stopped: [] };
 			if (replies.from.length === 0) {
 				// An idle poll, not a failure: flagged so the loop guard keeps counting
 				// across it, unless an interrupt (news for the model) landed meanwhile
-				// or the text names an agent blocked on the caller.
-				const news = signal?.aborted || replies.blocked.length > 0;
+				// or the text names an agent asked that can no longer answer.
+				const news = signal?.aborted || replies.blocked.length > 0 || replies.stopped.length > 0;
 				return {
 					content: [{ type: "text", text: `Nothing to wait for: ${noReplyText(replies)}` }],
 					details: { op: "wait", jobs: [] },
@@ -170,8 +185,9 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					.wait(messaging.senderId, {}, 0, busAbort.signal)
 					.catch(() => null)
 			: undefined;
-		// Re-check explicit fulfillment, availability, and dependency changes.
-		// A peer ending its turn without a correlated reply does not settle it.
+		// A reply wait re-checks whether an agent asked can still answer on
+		// every block change, status change, and end of an asked agent's turn
+		// (after any automatic reply that turn owes has been sent).
 		const replyWait = messaging !== undefined && jobs.length === 0 && !serviceRunning;
 		let noReply: PendingReplies | undefined;
 		const replyGone = Promise.withResolvers<void>();
@@ -185,8 +201,15 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			};
 			unsubscribers.push(messaging.registry.awaits.onChange(checkReplies));
 			unsubscribers.push(messaging.registry.onChange(checkReplies));
-			unsubscribers.push(IrcBus.global().onChange(checkReplies));
-			checkReplies();
+			for (const id of pendingReplies(messaging).from) {
+				const session = messaging.registry.get(id)?.session;
+				if (!session) continue;
+				unsubscribers.push(
+					session.subscribe(event => {
+						if (event.type === "agent_end") void session.waitForIrcReplies().then(checkReplies);
+					}),
+				);
+			}
 		}
 		// A wait that only these subagents' results can end blocks the caller on
 		// them, which their own reply waits read. A bash job or service is
@@ -194,11 +217,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const watchedAgents = jobs.flatMap(job => (job.agentId ? [job.agentId] : []));
 		const releaseHold =
 			messaging && !serviceRunning && watchedAgents.length === jobs.length
-				? messaging.registry.awaits.hold(
-						messaging.senderId,
-						replyWait ? pendingReplies(messaging).from : watchedAgents,
-						{ interruptible: true },
-					)
+				? messaging.registry.awaits.hold(messaging.senderId, watchedAgents, { interruptible: true })
 				: undefined;
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
 		const timer = setTimeout(timedOut, WAIT_MAX_MS);
