@@ -275,10 +275,7 @@ export function createAdvisorMessageCard(
 		body: () => new AdvisorNotes(notes, 0, uiTheme),
 		expanded: getExpanded(),
 		paddingX: 1,
-		maxCollapsedRows:
-			chatTranscriptDisplayPreferences.advisorCollapsedLines > 0
-				? chatTranscriptDisplayPreferences.advisorCollapsedLines
-				: undefined,
+		maxCollapsedRows: chatTranscriptDisplayPreferences.advisorCollapsedLines || undefined,
 	});
 	// The tool-output toggle owns expansion state; synchronize the controlled
 	// disclosure from the callback on every render.
