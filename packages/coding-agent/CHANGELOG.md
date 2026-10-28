@@ -12,6 +12,7 @@
 ### Changed
 
 - A muted `/live` call now stays shown as muted when the voice model starts a task or the session starts, instead of switching to "working" or "listening" while the microphone is still off ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
+- `PI_INTENT_PROMPT` replaces the system-prompt guidance for the `i` intent field; `PI_INTENT_DESC` replaces its tool-schema description
 
 ### Fixed
 
