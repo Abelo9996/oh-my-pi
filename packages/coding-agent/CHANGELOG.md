@@ -5,6 +5,7 @@
 ### Added
 
 - Pin and unpin sessions from the resume picker with `Alt+K` / `Alt+Shift+K` (remappable as `app.session.pin` / `app.session.unpin`); pinned sessions move to the top at once and also lead search results ([#9837](https://github.com/can1357/oh-my-pi/pull/9837) by [@zhang17-24](https://github.com/zhang17-24))
+- Set `PI_LINK_SCHEME` (and optionally `PI_LINK_HOST`) to make file links in SSH/tmux sessions open through a desktop protocol handler such as `ompfile://<host>/<path>?line=N&col=M` ([#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu))
 - Added `task.perCallModel` (`off` by default, `eval`, `on`): task items and eval `agent()`/`workpool()` can select one exact `provider/model-id[@upstream][:level]`, limited to configured chat-role values, the selected bundled or user-level agent's own frontmatter while it is still discovered and not disabled, or the parent's live model; `task.perCallModelAllow` narrows those grants to exact models. Per-call workers recheck approval on every main-loop request and cold revival, disable retry fallback, context promotion and prewalk, and refuse Factory models with attached server-side fallback chains. `task.maxEffort` caps an explicit `:level`; unset, `:inherit` and `:off` keep their existing meaning, though an endpoint's effort-negotiation retry may round to its nearest supported tier ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
