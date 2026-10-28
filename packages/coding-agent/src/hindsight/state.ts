@@ -309,9 +309,11 @@ export class HindsightSessionState {
 			const block = `<memories>\n${this.config.recallPromptPreamble}\n\n${formatted}\n</memories>`;
 			return { context: block, ok: true };
 		} catch (err) {
-			if (this.config.debug) {
-				logger.debug("Hindsight: recall failed", { bankId: this.bankId, error: String(err) });
-			}
+			// A cancelled turn (Esc) is not a failure.
+			if (signal?.aborted) return { context: null, ok: false };
+			const errorText = err instanceof Error ? err.message : String(err);
+			logger.warn("Hindsight: recall failed", { bankId: this.bankId, error: errorText });
+			this.session.emitNotice("warning", `Memory recall failed: ${errorText}`, "Hindsight");
 			return { context: null, ok: false };
 		}
 	}
