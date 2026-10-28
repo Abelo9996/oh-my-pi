@@ -2429,6 +2429,9 @@ export class EventController {
 		this.#settleWatchEpoch = undefined;
 		const session = this.ctx.session;
 		try {
+			// Ending this wait means "stay quiet until I prompt"; latch before awaiting the
+			// abort so a job finishing in between cannot start a turn.
+			session.suppressAutoResumeUntilPrompt();
 			await session.abort({ reason: USER_INTERRUPT_LABEL });
 			await this.#runSerialized(async () => {
 				if (this.ctx.session !== session || session.isStreaming) return;
