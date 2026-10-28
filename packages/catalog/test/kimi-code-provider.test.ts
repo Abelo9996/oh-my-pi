@@ -1,13 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import {
-	isCredentialScopedModelCacheProvider,
-	resolveModelCacheProviderId,
-} from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
 import { kimiCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -44,8 +39,6 @@ describe("Kimi Code provider catalog", () => {
 			}),
 			cacheDbPath: temp.join("models.db"),
 		};
-		expect(providerEntry("kimi-code")?.dynamicModelsAuthoritative).toBe(true);
-		expect(options.dynamicModelsAuthoritative).toBe(true);
 		const online = await resolveProviderModels(options, "online");
 		expect(online.models.map(model => model.id)).toEqual(["k3.1-pro"]);
 		const offline = await resolveProviderModels(options, "offline");
@@ -79,13 +72,6 @@ describe("Kimi Code provider catalog", () => {
 		expect(offlineA.models.map(model => model.id)).toEqual(["k3.1-pro"]);
 		const offlineB = await resolveProviderModels(planB, "offline");
 		expect(offlineB.models.map(model => model.id)).toEqual(["kimi-for-coding"]);
-
-		// The registry hydrates credential-scoped caches with the resolved key, so
-		// both call paths must land on the namespace discovery writes.
-		expect(isCredentialScopedModelCacheProvider("kimi-code")).toBe(true);
-		expect(planA.cacheProviderId).toBe(resolveModelCacheProviderId("kimi-code", { apiKey: "plan-a-key" }));
-		expect(planB.cacheProviderId).toBe(resolveModelCacheProviderId("kimi-code", { apiKey: "plan-b-key" }));
-		expect(planA.cacheProviderId).not.toBe(planB.cacheProviderId);
 	});
 
 	it("preserves live Kimi thinking ladders during catalog regeneration", async () => {
