@@ -408,7 +408,7 @@ export interface OpenFile {
 	syncedHash?: number | bigint;
 	/** When an OMP operation last used this document; long-unused documents close before the next open. */
 	lastUsedAt: number;
-	/** When this document was reopened after an idle close; absent for a first open. */
+	/** When OMP last reopened this document (an idle close, or a diagnostics reopen); absent for a first open. */
 	reopenedAt?: number;
 }
 
@@ -438,12 +438,15 @@ export interface LspClient {
 	requestId: number;
 	diagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
+	/** Set once a publish echoes a document version, so a wait can identify the report for a reopen. */
+	publishesDocumentVersions?: boolean;
 	/** Dynamic capability registrations keyed by the server-provided registration ID. */
 	dynamicCapabilityRegistrations?: Map<string, string>;
 	openFiles: Map<string, OpenFile>;
 	/**
-	 * Documents closed for idleness, with the last version the server saw. A reopen
-	 * resumes past that version; absent until the client closes one.
+	 * Documents OMP closed and will reopen (for idleness, or mid diagnostics reopen),
+	 * with the last version the server saw. A reopen resumes past that version; absent
+	 * until the client closes one.
 	 */
 	idleClosedFiles?: Map<string, number>;
 	pendingRequests: Map<number | string, PendingRequest>;

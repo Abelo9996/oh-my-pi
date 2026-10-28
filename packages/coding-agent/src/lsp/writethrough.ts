@@ -587,10 +587,12 @@ async function runLspWritethrough(
 	}
 
 	if (formatter !== undefined) {
+		// Carries the formatter result. With diagnostics requested, none arrived in time
+		// (or they come later through the deferred channel): do not vouch for the file.
 		diagnostics ??= {
 			server: servers.map(([name]) => name).join(", "),
 			messages: [],
-			summary: "OK",
+			summary: enableDiagnostics ? "no diagnostics report yet" : "OK",
 			errored: false,
 		};
 		diagnostics.formatter = formatter;

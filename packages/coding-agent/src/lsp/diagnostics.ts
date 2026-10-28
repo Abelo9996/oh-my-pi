@@ -1,10 +1,17 @@
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import * as fs from "node:fs";
 import path from "node:path";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
-import { getOrCreateClient, sendRequest, supportsDocumentDiagnostics, waitForProjectLoaded } from "./client";
+import {
+	getOrCreateClient,
+	LspRequestTimeoutError,
+	LspResponseError,
+	sendRequest,
+	supportsDocumentDiagnostics,
+	waitForProjectLoaded,
+} from "./client";
 import { getLinterClient } from "./clients";
 import { hasRootMarkerAncestor } from "./config";
 import { applyTextEditsToString } from "./edits";
@@ -205,6 +212,13 @@ interface WaitForDiagnosticsOptions {
 	 * publish be superseded by the fresh one.
 	 */
 	settleMs?: number;
+	/**
+	 * Hold the wait while the server loads its project, once it supports pulls: a pull
+	 * during load answers from a half-loaded project (rust-analyzer: an empty report).
+	 * The budget restarts when the load settles, as if the caller had waited first.
+	 * Push-only servers are never held.
+	 */
+	afterProjectLoad?: boolean;
 }
 
 /**
@@ -242,6 +256,31 @@ function requestDocumentDiagnostics(
 		});
 }
 
+/** JSON-RPC `ContentModified`: the document changed while the server computed its answer. */
+const LSP_CONTENT_MODIFIED = -32801;
+/** JSON-RPC `ServerCancelled`; on a diagnostic pull, `data.retriggerRequest` says whether to ask again. */
+const LSP_SERVER_CANCELLED = -32802;
+
+/**
+ * Whether a failed pull asks to be retried rather than reporting a failure. rust-analyzer,
+ * for one, cancels pulls with `retriggerRequest: true` while it primes caches after start.
+ */
+function shouldRetriggerPull(failure: unknown): boolean {
+	if (!(failure instanceof LspResponseError)) return false;
+	if (failure.code === LSP_CONTENT_MODIFIED) return true;
+	if (failure.code !== LSP_SERVER_CANCELLED) return false;
+	return !(isRecord(failure.data) && failure.data.retriggerRequest === false);
+}
+
+/**
+ * Whether a failed pull means the server failed, not that its report is still missing:
+ * a pull the server asks to have retried, or one it was still computing when the wait's
+ * budget ran out, leaves the file unverified.
+ */
+function isPullFailure(failure: unknown): boolean {
+	return !(failure instanceof LspRequestTimeoutError) && !shouldRetriggerPull(failure);
+}
+
 function isProvisionalColdPublish(
 	client: LspClient,
 	uri: string,
@@ -250,8 +289,8 @@ function isProvisionalColdPublish(
 	now: number,
 ): boolean {
 	if (expectedDocumentVersion === undefined) return false;
-	// A document reopened after an idle close can still receive publishes from before
-	// the close: the empty one that cleared it, or one versioned for its earlier life.
+	// A document OMP closed and reopened can still receive publishes from before the
+	// close: the empty one that cleared it, or one versioned for its earlier life.
 	const reopenedAt = client.openFiles.get(uri)?.reopenedAt;
 	if (reopenedAt !== undefined && now - reopenedAt < DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS) {
 		if (published.diagnostics.length === 0) return true;
@@ -265,14 +304,28 @@ function isProvisionalColdPublish(
 	);
 }
 
+/**
+ * Wait for a fresh diagnostics report for `uri`: a pull answer, or a publish that
+ * passes the freshness checks. Resolves `undefined` when none arrives within the
+ * budget, which callers MUST NOT read as a clean file; `[]` is a clean report.
+ */
 export async function waitForDiagnostics(
 	client: LspClient,
 	uri: string,
 	options: WaitForDiagnosticsOptions = {},
-): Promise<Diagnostic[]> {
-	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, settleMs = DIAGNOSTICS_SETTLE_MS } = options;
-	const deadline = Date.now() + timeoutMs;
-	let pullAttempted = false;
+): Promise<Diagnostic[] | undefined> {
+	const {
+		timeoutMs = 3000,
+		signal,
+		minVersion,
+		expectedDocumentVersion,
+		settleMs = DIAGNOSTICS_SETTLE_MS,
+		afterProjectLoad = false,
+	} = options;
+	let deadline = Date.now() + timeoutMs;
+	let awaitingProjectLoad = afterProjectLoad;
+	// When to send the next pull; `undefined` once one is in flight or answered.
+	let nextPullAt: number | undefined = 0;
 	let pullResultPromise: Promise<PullDiagnosticsOutcome> | undefined;
 	let pulled: Diagnostic[] | undefined;
 	let pullFailure: unknown;
@@ -280,8 +333,16 @@ export async function waitForDiagnostics(
 	let settledAt = 0;
 	while (Date.now() < deadline) {
 		throwIfAborted(signal);
-		if (!pullAttempted && supportsDocumentDiagnostics(client)) {
-			pullAttempted = true;
+		// Decided per turn: a server can register pulls after the wait began (Roslyn).
+		if (awaitingProjectLoad && supportsDocumentDiagnostics(client)) {
+			awaitingProjectLoad = false;
+			// Also waits out rust-analyzer's workspace load, which outlasts its `$/progress`.
+			await waitForProjectLoaded(client, signal);
+			throwIfAborted(signal);
+			deadline = Math.max(deadline, Date.now() + timeoutMs);
+		}
+		if (nextPullAt !== undefined && Date.now() >= nextPullAt && supportsDocumentDiagnostics(client)) {
+			nextPullAt = undefined;
 			pullResultPromise = requestDocumentDiagnostics(client, uri, signal, Math.max(1, deadline - Date.now()));
 		}
 
@@ -321,9 +382,14 @@ export async function waitForDiagnostics(
 				break;
 			}
 			if (pullResult.failed !== undefined) {
-				// A pull failure leaves the report unknown, but a dual-mode server
-				// may still publish fresh diagnostics within the remaining budget.
-				pullFailure = pullResult.failed;
+				if (shouldRetriggerPull(pullResult.failed)) {
+					// The server asked to be asked again.
+					nextPullAt = Date.now() + DIAGNOSTICS_POLL_MS;
+				} else if (isPullFailure(pullResult.failed)) {
+					// A pull failure leaves the report unknown, but a dual-mode server
+					// may still publish fresh diagnostics within the remaining budget.
+					pullFailure = pullResult.failed;
+				}
 			}
 		}
 	}
@@ -346,16 +412,16 @@ export async function waitForDiagnostics(
 	if (pullResultPromise) {
 		const outcome = await pullResultPromise;
 		if (outcome.diagnostics !== undefined) pulled = outcome.diagnostics;
-		else if (outcome.failed !== undefined) pullFailure = outcome.failed;
+		else if (outcome.failed !== undefined && isPullFailure(outcome.failed)) pullFailure = outcome.failed;
 	}
 	throwIfAborted(signal);
 	if (pulled === undefined) {
-		// A failed pull (timeout/RPC error) leaves the file's state unknown; never
-		// let it collapse into a clean empty result the caller renders as "OK".
+		// A pull the server failed leaves the file's state unknown; never let it
+		// collapse into a clean empty result the caller renders as "OK".
 		if (pullFailure !== undefined) {
 			throw pullFailure instanceof Error ? pullFailure : new Error(String(pullFailure));
 		}
-		return [];
+		return undefined;
 	}
 	client.diagnostics.set(uri, {
 		diagnostics: pulled,
@@ -473,10 +539,6 @@ export async function getDiagnosticsForFile(
 				// Default: use LSP
 				const client = await getOrCreateClient(serverConfig, cwd, undefined, boundSignal);
 				throwIfAborted(boundSignal);
-				if (isProjectAwareLspServer(serverConfig)) {
-					await waitForProjectLoaded(client, boundSignal);
-					throwIfAborted(boundSignal);
-				}
 				// Content already synced + didSave sent, wait for fresh diagnostics
 				const minVersion = minVersions?.get(serverName);
 				const expectedDocumentVersion = expectedDocumentVersions?.get(serverName);
@@ -485,6 +547,7 @@ export async function getDiagnosticsForFile(
 					signal: boundSignal,
 					minVersion,
 					expectedDocumentVersion,
+					afterProjectLoad: isProjectAwareLspServer(serverConfig),
 				});
 				return { serverName, serverConfig, diagnostics };
 			});
@@ -492,17 +555,18 @@ export async function getDiagnosticsForFile(
 	);
 
 	for (const result of results) {
-		if (result.status === "fulfilled") {
-			serverNames.push(result.value.serverName);
-			allDiagnostics.push(
-				...filterOrphanProjectDiagnostics(
-					absolutePath,
-					result.value.serverName,
-					result.value.serverConfig,
-					result.value.diagnostics,
-				),
-			);
-		}
+		// A server that sent no fresh report is skipped, like one that overran its
+		// budget: counting it would report its file as clean.
+		if (result.status !== "fulfilled" || result.value.diagnostics === undefined) continue;
+		serverNames.push(result.value.serverName);
+		allDiagnostics.push(
+			...filterOrphanProjectDiagnostics(
+				absolutePath,
+				result.value.serverName,
+				result.value.serverConfig,
+				result.value.diagnostics,
+			),
+		);
 	}
 
 	if (serverNames.length === 0) {

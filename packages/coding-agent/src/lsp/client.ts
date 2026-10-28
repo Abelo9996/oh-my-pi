@@ -20,6 +20,32 @@ import type {
 } from "./types";
 import { detectLanguageId, EquivalentUriMap, fileToUri, readTextFromDisk, uriToFile } from "./utils";
 
+/**
+ * A JSON-RPC error response to one of our requests. The message keeps the code, so
+ * substring checks such as `isMethodNotFoundError` still match.
+ */
+export class LspResponseError extends Error {
+	constructor(
+		readonly code: number | undefined,
+		readonly data: unknown,
+		message: string,
+	) {
+		super(`LSP error${code === undefined ? "" : ` ${code}`}: ${message}`);
+		this.name = "LspResponseError";
+	}
+}
+
+/** A request the server did not answer within its timeout; it may still be computing the answer. */
+export class LspRequestTimeoutError extends Error {
+	constructor(
+		readonly method: string,
+		readonly timeoutMs: number,
+	) {
+		super(`LSP request ${method} timed out after ${timeoutMs}ms`);
+		this.name = "LspRequestTimeoutError";
+	}
+}
+
 // =============================================================================
 // Client State
 // =============================================================================
@@ -472,6 +498,7 @@ async function startMessageReader(client: LspClient): Promise<void> {
 									version: params.version ?? null,
 								});
 								client.diagnosticsVersion += 1;
+								if (typeof params.version === "number") client.publishesDocumentVersions = true;
 							} else if (message.method === "$/progress" && message.params) {
 								const params = message.params as { token: string | number; value?: { kind?: string } };
 								if (params.value?.kind === "begin") {
@@ -493,10 +520,12 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								// Include the JSON-RPC error code: `isMethodNotFoundError` matches
 								// `-32601` by substring, so method-not-found is recognized even when
 								// the server's message text is nonstandard (e.g. "Unknown request").
-								const code = message.error.code;
+								const { code, data } = message.error;
 								pending.reject(
-									new Error(
-										`LSP error${typeof code === "number" ? ` ${code}` : ""}: ${message.error.message}`,
+									new LspResponseError(
+										typeof code === "number" ? code : undefined,
+										data,
+										message.error.message,
 									),
 								);
 							} else {
@@ -864,10 +893,6 @@ export function isRustAnalyzerClient(client: LspClient): boolean {
 	);
 }
 
-function isRustAnalyzerStatusTimeout(err: unknown): boolean {
-	return err instanceof Error && err.message.startsWith("LSP request rust-analyzer/analyzerStatus timed out after ");
-}
-
 async function waitForRustAnalyzerWorkspace(client: LspClient, signal?: AbortSignal): Promise<void> {
 	if (rustAnalyzerReadyClients.has(client)) {
 		return;
@@ -885,7 +910,7 @@ async function waitForRustAnalyzerWorkspace(client: LspClient, signal?: AbortSig
 		try {
 			status = await sendRequest(client, "rust-analyzer/analyzerStatus", {}, signal, statusRequestTimeoutMs);
 		} catch (err) {
-			if (!isRustAnalyzerStatusTimeout(err) || Date.now() >= deadline) {
+			if (!(err instanceof LspRequestTimeoutError) || Date.now() >= deadline) {
 				return;
 			}
 			await Bun.sleep(pollMs);
@@ -1320,9 +1345,9 @@ function closeIdleFiles(client: LspClient, signal?: AbortSignal): void {
 }
 
 /**
- * Track a document the server just opened at `version`. A document closed for
- * idleness is marked reopened, so diagnostics waits treat the empty publish that
- * cleared its earlier life as provisional.
+ * Track a document the server just opened at `version`. A document OMP closed
+ * (for idleness, or to reopen it for diagnostics) is marked reopened, so diagnostics
+ * waits treat the empty publish that cleared its earlier life as provisional.
  */
 function trackOpenedFile(client: LspClient, uri: string, languageId: string, version: number, content: string): void {
 	const reopened = client.idleClosedFiles?.delete(uri) === true;
@@ -1517,13 +1542,18 @@ export async function reconcileFileFromDisk(
  * leaves those consumers stale, so sync all open documents first.
  *
  * Files with an in-flight OMP write are skipped by
- * {@link reconcileFileFromDisk} (their overlay leads disk), and unchanged files
- * send nothing. Returns the number of documents that were re-synced.
+ * {@link reconcileFileFromDisk} (their overlay leads disk), unchanged files
+ * send nothing, and `excludeUri` is left for the caller to sync. Returns the
+ * number of documents that were re-synced.
  */
-export async function reconcileOpenFilesFromDisk(client: LspClient, signal?: AbortSignal): Promise<number> {
+export async function reconcileOpenFilesFromDisk(
+	client: LspClient,
+	signal?: AbortSignal,
+	excludeUri?: string,
+): Promise<number> {
 	let reconciled = 0;
 	for (const uri of Array.from(client.openFiles.keys())) {
-		if (!uri.startsWith("file://")) continue;
+		if (uri === excludeUri || !uri.startsWith("file://")) continue;
 		if (await reconcileFileFromDisk(client, uriToFile(uri), signal)) reconciled++;
 	}
 	return reconciled;
@@ -1696,7 +1726,18 @@ export async function notifyWorkspaceWatchedFiles(
 				.filter(change => isPathInsideWorkspace(change.filePath, workspace))
 				.map(change => {
 					const uri = fileToUri(change.filePath);
-					client.diagnostics.delete(uri);
+					// Keep a report echoing the open document's version: after a writethrough,
+					// which syncs the overlay before writing, it already answers the new disk
+					// text, and a publish that beat this notification must not be lost. The
+					// check does not prove that sync happened (the ACP write bridge writes
+					// without one); such a report stays stale until reconcileFileFromDisk sees
+					// the disk change and drops it.
+					const published = client.diagnostics.get(uri);
+					const current =
+						change.type === FileChangeType.Changed &&
+						published !== undefined &&
+						published.version === client.openFiles.get(uri)?.version;
+					if (!current) client.diagnostics.delete(uri);
 					return { uri, type: change.type };
 				});
 			if (clientChanges.length === 0) return;
@@ -1723,6 +1764,15 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 }
 
 /**
+ * Close and reopen a document from disk. A push server need not republish diagnostics
+ * for an identical-text didChange (clangd does not), but recomputes them on open, picking
+ * up changed dependencies whether or not OMP has them open.
+ */
+export async function reopenFile(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
+	await refreshDocument(client, filePath, "reopen", signal);
+}
+
+/**
  * Re-send every open document after a change that can alter how it resolves. This is
  * not a use: idle documents keep aging, and documents closed meanwhile stay closed.
  */
@@ -1735,7 +1785,7 @@ export async function refreshOpenFiles(client: LspClient, signal?: AbortSignal):
 async function refreshDocument(
 	client: LspClient,
 	filePath: string,
-	purpose: "use" | "resync",
+	purpose: "use" | "resync" | "reopen",
 	signal?: AbortSignal,
 ): Promise<void> {
 	throwIfAborted(signal);
@@ -1749,6 +1799,8 @@ async function refreshDocument(
 
 	const refreshPromise = (async () => {
 		throwIfAborted(signal);
+		// A pending OMP write's overlay leads disk; reopening from disk would revert it.
+		if (purpose === "reopen" && pendingDiskWrites.has(uri)) return;
 		// Drop cached diagnostics for this URI before asking the server to recompute.
 		// Otherwise an unrelated publishDiagnostics notification can advance the global
 		// diagnostics version and cause waiters to accept stale unversioned diagnostics.
@@ -1756,10 +1808,10 @@ async function refreshDocument(
 		const info = client.openFiles.get(uri);
 
 		if (!info) {
-			if (purpose === "use") await ensureFileOpen(client, filePath, signal);
+			if (purpose !== "resync") await ensureFileOpen(client, filePath, signal);
 			return;
 		}
-		if (purpose === "use") info.lastUsedAt = Date.now();
+		if (purpose !== "resync") info.lastUsedAt = Date.now();
 
 		let content: string;
 		try {
@@ -1771,8 +1823,25 @@ async function refreshDocument(
 			if (!pendingDiskWrites.has(uri)) await closeDocument(client, uri, signal);
 			return;
 		}
+		if (purpose === "reopen" && pendingDiskWrites.has(uri)) return;
 		const version = ++info.version;
 		throwIfAborted(signal);
+
+		if (purpose === "reopen") {
+			await closeDocument(client, uri, signal);
+			// Record the close like an idle close: a reopen cut short by cancellation resumes
+			// this version, and waits treat the empty publish clearing the old document as
+			// provisional.
+			(client.idleClosedFiles ??= new Map()).set(uri, version);
+			await sendNotification(
+				client,
+				"textDocument/didOpen",
+				{ textDocument: { uri, languageId: info.languageId, version, text: content } },
+				signal,
+			);
+			trackOpenedFile(client, uri, info.languageId, version, content);
+			return;
+		}
 
 		await sendNotification(
 			client,
@@ -1944,7 +2013,7 @@ export async function sendRequest(
 			if (client.pendingRequests.has(id)) {
 				client.pendingRequests.delete(id);
 				void sendNotification(client, "$/cancelRequest", { id }).catch(() => {});
-				const err = new Error(`LSP request ${method} timed out after ${effectiveTimeoutMs}ms`);
+				const err = new LspRequestTimeoutError(method, effectiveTimeoutMs);
 				cleanup();
 				reject(err);
 			}
