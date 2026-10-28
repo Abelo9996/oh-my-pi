@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -49,7 +49,9 @@ import {
 	type ToolExecutionHandle,
 	toolRenderName,
 } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { noticeRow, TranscriptNotice } from "@oh-my-pi/pi-tui/chrome/transcript-notice";
+import { span } from "@oh-my-pi/pi-tui/native/describe";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
@@ -1241,30 +1243,37 @@ export class UiHelpers {
 	}
 
 	showError(errorMessage: string): void {
-		const text = new Text(`Error: ${errorMessage}`, 1, 0).setStyleFn(t => theme.fg("error", t));
-		this.ctx.present([new Spacer(1), text]);
+		this.ctx.present(TranscriptNotice.line("error", errorMessage));
 	}
 
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {
-		const text = new Text(`Warning: ${warningMessage}`, 1, 0).setStyleFn(t => theme.fg("warning", t));
-		const content = [new Spacer(1), text];
-		this.ctx.present(options?.hideWithToolActivity ? new ToolActivityContainer(content) : content);
+		const notice = TranscriptNotice.line("warning", warningMessage);
+		this.ctx.present(options?.hideWithToolActivity ? new ToolActivityContainer(notice) : notice);
 	}
 
 	showNewVersionNotification(newVersion: string): void {
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
 		const title = "Update Available";
 		const prefix = `New version ${newVersion} is available. Run: `;
 		const command = "omp update";
-		block.addChild(
-			new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
-				() =>
-					`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", prefix)}${theme.fg("accent", command)}`,
-			),
+		const native = noticeRow(
+			"info",
+			[
+				span("Update available", "strong"),
+				span(` · New version ${newVersion} is available. Run `),
+				span(command, "code"),
+			],
+			{ icon: "download" },
 		);
-		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
-		this.ctx.present(block);
+		this.ctx.present(
+			new TranscriptNotice(native, [
+				new DynamicBorder(text => theme.fg("warning", text)),
+				new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
+					() =>
+						`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", prefix)}${theme.fg("accent", command)}`,
+				),
+				new DynamicBorder(text => theme.fg("warning", text)),
+			]),
+		);
 	}
 
 	updatePendingMessagesDisplay(): void {

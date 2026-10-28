@@ -53,6 +53,7 @@ export const TSP_KINDS = [
 	"kv",
 	"table",
 	"tree",
+	"json",
 	"badge",
 	"kbd",
 	"icon",
@@ -312,6 +313,20 @@ export interface TspTreeNode {
 }
 export interface TspTreeProps {
 	nodes: readonly TspTreeNode[];
+}
+/**
+ * A raw JSON value the terminal draws as an interactive tree: small containers
+ * whole on one row, larger ones folded to a preview that expands on click.
+ * Folding is local to the terminal and sends no events.
+ */
+export interface TspJsonProps {
+	/** Any JSON value; absent reads as null. */
+	value: unknown;
+	/**
+	 * Levels of containers expanded below the top-level entries (default 0:
+	 * the root's entries listed, every container among them folded).
+	 */
+	open?: number;
 }
 export interface TspBadgeProps {
 	text: string;
@@ -863,6 +878,7 @@ export interface TspPropsByKind {
 	kv: TspKvProps;
 	table: TspTableProps;
 	tree: TspTreeProps;
+	json: TspJsonProps;
 	badge: TspBadgeProps;
 	kbd: TspKbdProps;
 	icon: TspIconProps;

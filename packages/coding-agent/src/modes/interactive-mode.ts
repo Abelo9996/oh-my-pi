@@ -100,6 +100,8 @@ import type {
 } from "../extensibility/extensions";
 import type {
 	CompactOptions,
+	ExtensionLiveSession,
+	ExtensionLiveStartOptions,
 	ExtensionSessionModes,
 	PlanReviewChoice,
 	PlanReviewOption,
@@ -217,7 +219,7 @@ import {
 	todoMatchesAnyDescription,
 } from "@oh-my-pi/pi-tui/tools/todo";
 import { vocalizer } from "../tts/vocalizer";
-import { applyHyperlinkSetting, fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { applyFileLinkSetting, applyHyperlinkSetting, fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import {
 	extensionLinkClicksAvailable,
 	extensionLinksRouted,
@@ -2096,6 +2098,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#applyAutoGraphSetting();
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
+		applyFileLinkSetting();
 		applyHyperlinkSetting();
 		// The TUI polls the provider every frame, so it reads a field kept in sync by
 		// subscription rather than resolving the setting per render.
@@ -9048,13 +9051,29 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.showStatus(`Recording to ${this.#recorder.path} · /record again to stop`);
 	}
 
+	/** Why live mode cannot start right now, or `undefined` when it can. */
+	#liveStartBlocker(): string | undefined {
+		if (this.#dictationStarting || (this.#sttController && this.#sttController.state !== "idle")) {
+			return "Finish the current speech-to-text capture before starting live mode.";
+		}
+		return undefined;
+	}
+
 	/** Start or stop the Codex-backed realtime voice surface. */
 	async handleLiveCommand(): Promise<void> {
-		if (this.#dictationStarting || (this.#sttController && this.#sttController.state !== "idle")) {
-			this.showWarning("Finish the current speech-to-text capture before starting live mode.");
+		const blocker = this.#liveStartBlocker();
+		if (blocker) {
+			this.showWarning(blocker);
 			return;
 		}
 		await this.#liveCommandController.handleCommand();
+	}
+
+	/** Start a live session whose audio runs on an extension's own WebRTC peer. */
+	async startRemoteLive(options: ExtensionLiveStartOptions): Promise<ExtensionLiveSession> {
+		const blocker = this.#liveStartBlocker();
+		if (blocker) throw new Error(blocker);
+		return await this.#liveCommandController.startRemote(options);
 	}
 
 	async showDebugSelector(): Promise<void> {

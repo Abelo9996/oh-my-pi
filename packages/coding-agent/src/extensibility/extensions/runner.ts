@@ -532,6 +532,7 @@ export class ExtensionRunner {
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
 	#getSystemPromptFn: () => string[] = () => [];
 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
+	#startLiveFn?: ExtensionContextActions["startLive"];
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
@@ -861,6 +862,7 @@ export class ExtensionRunner {
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
 		this.#runEphemeralTurnFn = contextActions.runEphemeralTurn;
+		this.#startLiveFn = contextActions.startLive;
 
 		// Command context actions (optional, only for interactive mode)
 		if (commandContextActions) {
@@ -1650,6 +1652,7 @@ export class ExtensionRunner {
 						return await this.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request));
 					}
 				: undefined,
+			startLive: this.#startLiveFn,
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
 			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and
