@@ -6,6 +6,10 @@
 
 - Updated Bun engine requirement to ≥1.4.4
 
+### Fixed
+
+- Fixed forced tool calls on non-reasoning models terminating omp with an unhandled reasoning-effort error ([#17283](https://github.com/can1357/oh-my-pi/pull/17283) by [@wyyufeng](https://github.com/wyyufeng))
+
 ## [18.13.2] - 2026-10-27
 
 ### Fixed
