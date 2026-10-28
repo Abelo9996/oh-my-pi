@@ -664,7 +664,7 @@ describe("table charts in assistant Markdown", () => {
 
 	const answer = `Timings:\n\n${TIMINGS}\n\nThat is all.`;
 
-	it.each(["configuration", "render argument", "row callback", "setter"] as const)(
+	it.each(["configuration", "row callback", "setter"] as const)(
 		"defers hidden smart charts through a %s ceiling until there is room to draw",
 		async bound => {
 			const protocol = TERMINAL.imageProtocol;
@@ -679,14 +679,14 @@ describe("table charts in assistant Markdown", () => {
 				onChange: () => changed.resolve(),
 			});
 			chart.update(table(BEFORE_AFTER));
-			const render = () => chart.render(76, bound === "render argument" ? maxRows : undefined);
+			const render = () => chart.render(76);
 			const resize = (rows: number) => {
 				maxRows = rows;
 				if (bound === "configuration" || bound === "setter") chart.setMaxRows(rows);
 			};
 			try {
 				if (bound === "setter") chart.setMaxRows(0);
-				if (bound !== "render argument") expect(chart.pending).toBe(false);
+				expect(chart.pending).toBe(false);
 				expect(render()).toEqual([]);
 				expect(chart.pending).toBe(false);
 				resize(1);
@@ -725,7 +725,7 @@ describe("table charts in assistant Markdown", () => {
 		},
 	);
 
-	it.each(["render argument", "row callback", "setter"] as const)(
+	it.each(["row callback", "setter"] as const)(
 		"fits a chart and its separator within a %s ceiling and hides both with fewer than two rows",
 		async bound => {
 			const protocol = TERMINAL.imageProtocol;
@@ -738,7 +738,7 @@ describe("table charts in assistant Markdown", () => {
 				onChange: () => landed.resolve(),
 			});
 			chart.update(table(TIMINGS));
-			const render = () => chart.render(76, bound === "render argument" ? maxRows : undefined);
+			const render = () => chart.render(76);
 			try {
 				render();
 				await landed.promise;

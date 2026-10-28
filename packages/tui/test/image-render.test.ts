@@ -251,6 +251,33 @@ describe("terminal image rendering", () => {
 		expect((result?.sequence ?? "").startsWith("\x1bP")).toBe(true);
 	});
 
+	it.each(["width", "height"] as const)("keeps live SIXEL %s shrink encoding asynchronous", async axis => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		let encoded = Promise.withResolvers<void>();
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxHeightCells: 10, requestRender: () => encoded.resolve() },
+			SQUARE_DIMENSIONS,
+		);
+		image.render(20);
+		await encoded.promise;
+		expect(image.render(20).join("")).toContain("\x1bP");
+
+		encoded = Promise.withResolvers<void>();
+		if (axis === "height") image.setMaxHeightCells(2);
+		const width = axis === "width" ? 4 : 20;
+		const pending = image.render(width);
+		expect(image.pending).toBe(true);
+		expect(pending.join("")).not.toContain("\x1bP");
+		await encoded.promise;
+		const drawn = image.render(width);
+		expect(image.pending).toBe(false);
+		expect(drawn.length).toBeLessThanOrEqual(2);
+		expect(drawn.join("")).toContain("\x1bP");
+	});
+
 	it("recomposites a cached SIXEL using the latest background after rapid changes", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		setCellDimensions({ widthPx: 2, heightPx: 6 });

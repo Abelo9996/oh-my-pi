@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- SVG figures and table charts now fit overlay heights and caller-provided row limits, including zero; hidden charts no longer delay transcript completion, and visible SIXEL figures stay drawn while shrinking ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu)).
+- SVG figures and table charts now respect caller-provided row limits, including zero; hidden charts no longer delay transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu)).
 
 ### Added
 

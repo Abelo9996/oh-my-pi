@@ -204,7 +204,6 @@ export class TableChartFigure implements Component {
 	readonly #options: TableChartFigureOptions;
 	readonly #figure: SvgFigure;
 	#maxRows?: number | (() => number | undefined);
-	#renderMaxRows?: number;
 	#table: Tokens.Table | undefined;
 	/** The chart's SVG; `undefined` while not looked up or waiting for a pick. */
 	#chart: string | null | undefined;
@@ -223,13 +222,12 @@ export class TableChartFigure implements Component {
 
 	setMaxRows(maxRows?: number | (() => number | undefined)): void {
 		this.#maxRows = maxRows;
-		this.#renderMaxRows = undefined;
 		this.#figure.setMaxRows(() => this.#resolveMaxRows());
 	}
 
 	/** Reserve the separator inside the caller's ceiling before sizing the image. */
 	#resolveMaxRows(): number | undefined {
-		const bound = this.#renderMaxRows ?? (typeof this.#maxRows === "function" ? this.#maxRows() : this.#maxRows);
+		const bound = typeof this.#maxRows === "function" ? this.#maxRows() : this.#maxRows;
 		return bound != null && Number.isFinite(bound) ? Math.max(0, Math.floor(bound) - 1) : undefined;
 	}
 
@@ -250,24 +248,12 @@ export class TableChartFigure implements Component {
 		);
 	}
 
-	/** Size a chart and its separator without recording an image-budget observation. */
-	measureRows(width: number, maxRows?: number): number {
-		if (!this.#prepareRender(maxRows)) return 0;
-		const rows = this.#figure.measureRows(width);
-		return rows > 0 ? rows + 1 : 0;
-	}
-
-	render(width: number, maxRows?: number): readonly string[] {
-		if (!this.#prepareRender(maxRows)) return [];
+	render(width: number): readonly string[] {
+		if (this.#resolveMaxRows() === 0) return [];
+		if (this.#chart === undefined && !this.#waiting) this.#resolve();
+		if (!this.#chart) return [];
 		const rows = this.#figure.render(width);
 		return rows.length ? ["", ...rows] : rows;
-	}
-
-	#prepareRender(maxRows?: number): boolean {
-		this.#renderMaxRows = maxRows;
-		if (this.#resolveMaxRows() === 0) return false;
-		if (this.#chart === undefined && !this.#waiting) this.#resolve();
-		return !!this.#chart;
 	}
 
 	invalidate(): void {
