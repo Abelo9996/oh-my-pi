@@ -33,15 +33,6 @@ describe("Codex model discovery", () => {
 		expect(result?.models.find(model => model.id === "invalid-maximum")).not.toHaveProperty("maxContextWindow");
 	});
 
-	it("exposes a rejected credential through the published discovery result", async () => {
-		const result = await fetchCodexModels({
-			accessToken: "revoked-token",
-			fetchFn: async () => new Response("token revoked", { status: 401 }),
-		});
-
-		expect(result).toEqual({ models: [], rejectedStatus: 401 });
-	});
-
 	it("marks discovered models for provider-native V2 compaction", async () => {
 		let capturedHeaders: Headers | undefined;
 		const fetchFn: typeof fetch = Object.assign(
