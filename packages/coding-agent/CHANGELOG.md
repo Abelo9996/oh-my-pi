@@ -5,6 +5,7 @@
 ### Added
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
+- `bash` tool commands now see `PI_TOOL_CALL_ID`, the id of the call running them, so a script can point at its own entry in the session transcript
 
 ### Fixed
 

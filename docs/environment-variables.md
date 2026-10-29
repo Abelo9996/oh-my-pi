@@ -603,12 +603,13 @@ These affect where coding-agent stores data and which process-local settings ove
 
 ### Set by the `bash` tool
 
-Every command the agent runs through the `bash` tool (foreground, background, PTY, ACP client terminal, and `name`-launched services) receives the current session identity:
+Every command the agent runs through the `bash` tool (foreground, background, PTY, ACP client terminal, and `name`-launched services) receives the current session identity and the id of the tool call running it:
 
 | Variable          | Value                                                                                      |
 | ----------------- | ------------------------------------------------------------------------------------------ |
 | `PI_SESSION_ID`   | Current session ID                                                                         |
 | `PI_SESSION_FILE` | Absolute path to the current session JSONL file; empty when not persisted (`--no-session`) |
+| `PI_TOOL_CALL_ID` | ID of the `bash` tool call running the command                                             |
 
 Values are read when each tool call starts, so the next call follows `/fork`, `/new`, and `/resume`, and a call already under way keeps the session it started in. They are always set, so an empty value replaces a stale one inherited from a parent omp process. User `!` commands do not receive them.
 
