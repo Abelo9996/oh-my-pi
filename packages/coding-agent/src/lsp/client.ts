@@ -531,7 +531,10 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								} else if (params.value?.kind === "end") {
 									client.activeProgressTokens.delete(params.token);
 									// After a folder add, only progress that began since ends the load.
-									if (client.activeProgressTokens.size === 0 && !pendingFolderLoads.has(client)) {
+									if (
+										client.activeProgressTokens.size === 0 &&
+										!workspaceFolderStates.get(client)?.pendingLoads
+									) {
 										client.resolveProjectLoaded();
 									}
 								}
@@ -608,11 +611,23 @@ async function startMessageReader(client: LspClient): Promise<void> {
 	}
 }
 
-/**
- * Checkouts added to a client's workspace after `initialize`, as symlink-resolved paths,
- * each with its `didChangeWorkspaceFolders` delivery. A failed delivery removes its entry.
- */
-const addedWorkspaceFolders = new WeakMap<LspClient, Map<string, Promise<void>>>();
+/** Workspace folders a client gained after `initialize`. */
+interface WorkspaceFolderState {
+	/**
+	 * Checkouts added to the workspace, as symlink-resolved paths, each with its
+	 * `didChangeWorkspaceFolders` delivery. A failed delivery removes its entry.
+	 */
+	added: Map<string, Promise<void>>;
+	/**
+	 * Folder-add notifications whose load has not begun: each progress `begin` after an
+	 * add starts one, and the project load stays pending while any is left.
+	 */
+	pendingLoads: number;
+	/** The last folder delivery; the next waits for it to settle. */
+	lastDelivery: Promise<void>;
+}
+
+const workspaceFolderStates = new WeakMap<LspClient, WorkspaceFolderState>();
 
 function workspaceFolder(folder: string): { uri: string; name: string } {
 	return { uri: fileToUri(folder), name: path.basename(folder) || "workspace" };
@@ -624,22 +639,12 @@ function workspaceFolder(folder: string): { uri: string; name: string } {
  * `workspace/workspaceFolders` server requests.
  */
 function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: string }> {
-	return [client.cwd, ...(addedWorkspaceFolders.get(client)?.keys() ?? [])].map(workspaceFolder);
+	return [client.cwd, ...(workspaceFolderStates.get(client)?.added.keys() ?? [])].map(workspaceFolder);
 }
 
-/**
- * Per client, folder-add notifications whose load has not begun: each progress `begin`
- * after an add starts one, and the project load stays pending while any is left.
- */
-const pendingFolderLoads = new WeakMap<LspClient, number>();
-
-/** Per client, the last folder delivery; the next waits for it to settle. */
-const lastFolderDelivery = new WeakMap<LspClient, Promise<void>>();
-
 function countFolderLoad(client: LspClient, delta: number): void {
-	const count = (pendingFolderLoads.get(client) ?? 0) + delta;
-	if (count > 0) pendingFolderLoads.set(client, count);
-	else pendingFolderLoads.delete(client);
+	const state = workspaceFolderStates.get(client);
+	if (state) state.pendingLoads = Math.max(0, state.pendingLoads + delta);
 }
 
 /** `filePath` with symlinks resolved, a missing tail kept; lexical when it cannot be resolved. */
@@ -684,16 +689,19 @@ export async function ensureWorkspaceFolders(
 	}
 	if (wanted.size === 0) return;
 	throwIfAborted(signal);
-	const folders = addedWorkspaceFolders.get(client) ?? new Map<string, Promise<void>>();
-	addedWorkspaceFolders.set(client, folders);
+	let state = workspaceFolderStates.get(client);
+	if (!state) {
+		state = { added: new Map(), pendingLoads: 0, lastDelivery: Promise.resolve() };
+		workspaceFolderStates.set(client, state);
+	}
+	const folders = state.added;
 	const missing = [...wanted].filter(folder => !folders.has(folder));
 	if (missing.length > 0) {
 		// One delivery at a time, so a failed write rolls back only its own add's load.
-		const delivery = (lastFolderDelivery.get(client) ?? Promise.resolve())
-			.catch(() => {})
-			.then(() => addWorkspaceFolders(client, missing, folders));
+		const current = state;
+		const delivery = current.lastDelivery.catch(() => {}).then(() => addWorkspaceFolders(client, missing, current));
 		delivery.catch(() => {});
-		lastFolderDelivery.set(client, delivery);
+		current.lastDelivery = delivery;
 		for (const folder of missing) folders.set(folder, delivery);
 	}
 	await untilAborted(signal, Promise.all([...wanted].map(folder => folders.get(folder))));
@@ -707,11 +715,11 @@ export function ensureWorkspaceFolder(client: LspClient, filePath: string, signa
 async function addWorkspaceFolders(
 	client: LspClient,
 	added: readonly string[],
-	folders: Map<string, Promise<void>>,
+	state: WorkspaceFolderState,
 ): Promise<void> {
 	const undoLoad = restartProjectLoad(client);
 	// Progress already running when the add arrives says nothing about the new folders.
-	countFolderLoad(client, 1);
+	state.pendingLoads++;
 	try {
 		await sendNotification(
 			client,
@@ -720,7 +728,7 @@ async function addWorkspaceFolders(
 			AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS),
 		);
 	} catch (err) {
-		for (const folder of added) folders.delete(folder);
+		for (const folder of added) state.added.delete(folder);
 		countFolderLoad(client, -1);
 		undoLoad();
 		throw err;
@@ -731,7 +739,7 @@ async function addWorkspaceFolders(
 /** Whether a change to `filePath` concerns `client`: inside its root or a checkout added to it. */
 async function clientServesPath(client: LspClient, filePath: string): Promise<boolean> {
 	if (isPathInsideWorkspace(filePath, path.resolve(client.cwd))) return true;
-	const folders = addedWorkspaceFolders.get(client);
+	const folders = workspaceFolderStates.get(client)?.added;
 	if (!folders?.size) return false;
 	const file = await realPathOf(filePath);
 	return [...folders.keys()].some(folder => isPathInsideWorkspace(file, folder));
@@ -1141,7 +1149,10 @@ function restartProjectLoad(client: LspClient): () => void {
 	const undo = projectLoadExtenders.get(client)?.() ?? startProjectLoad(client);
 	// However the load ends (its progress, the fallback timer, process exit), adds still
 	// counted as unstarted belong to it and must not hold up the next one.
-	client.projectLoaded.then(() => pendingFolderLoads.delete(client));
+	client.projectLoaded.then(() => {
+		const state = workspaceFolderStates.get(client);
+		if (state) state.pendingLoads = 0;
+	});
 	return undo;
 }
 
@@ -2248,7 +2259,7 @@ export async function sendRequest(
 		// requests with ContentModified (-32801); LSP asks clients to retry them. A
 		// command is never re-run: the server may have acted on it before cancelling.
 		const contentModified = err instanceof Error && err.message.startsWith("LSP error -32801");
-		if (!contentModified || method === "workspace/executeCommand" || !addedWorkspaceFolders.get(client)?.size) {
+		if (!contentModified || method === "workspace/executeCommand" || !workspaceFolderStates.get(client)?.added.size) {
 			throw err;
 		}
 		// The retry spends what is left of the first attempt's budget, the default included.
