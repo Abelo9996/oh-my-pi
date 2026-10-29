@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Fixed startup warnings (`--model`, prewalk and `--plan-yolo` targets, a resumed session's folder that could not be opened) flashing in Tern before omp's UI covered them; they now show as warnings in the UI ([tern-sdk#90](https://github.com/stencil-hq/tern-sdk/issues/90))
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
