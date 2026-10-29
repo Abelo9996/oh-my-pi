@@ -15,7 +15,6 @@ read(path, offset?, limit?)  write(path, content); JS: await read(path, offset?,
 output(*ids, format?, query?, offset?, limit?); JS: await output(...ids, { format?, query?, offset?, limit? }) — Python: sync; JS: async
 wait(handles, timeout?=None, raise_errors?=True); JS: await wait(handles, { timeout?, raiseErrors? }) — Python: sync; JS: async; agent/completion barrier, ordered results; `raise_errors=False` / `raiseErrors: false` retains failures.
 await tool.<name>(args) — async; session tool; `args` is its parameter object
-await batch_tools([{name, args}, ...]); JS: await batchTools([{name, args}, ...]) — session tools in order, ordered outputs; stops at the first failure; a `hasError` result raises with `.results` through that step
 ```
 {{else}}
 `await` marks async helpers; the rest are sync.
@@ -26,7 +25,6 @@ print(value, ...)  log(message)  phase(title)  env(key?, value?)
 read(path, offset?, limit?)  write(path, content)  output(*ids, format?, query?, offset?, limit?)
 wait(handles, timeout?=None, raise_errors?=True) — agent/completion barrier, ordered results; `raise_errors=False` retains failures.
 await tool.<name>(args) — session tool; `args` is its parameter object
-await batch_tools([{"name": ..., "args": {...}}, ...]) — session tools in order, ordered outputs; stops at the first failure; a `hasError` result raises `RuntimeError` with `.results` through that step
 ```
 {{/if}}
 {{#if js}}
@@ -36,7 +34,6 @@ print(value, ...)  log(message)  phase(title)  env(key?, value?)
 await read(path, offset?, limit?)  await write(path, content)  await output(...ids, { format?, query?, offset?, limit? })
 await wait(handles, { timeout?, raiseErrors? }) — agent/completion barrier, ordered results; `raiseErrors: false` retains failures.
 await tool.<name>(args) — session tool; `args` is its parameter object
-await batchTools([{name, args}, ...]) — session tools in order, ordered outputs; stops at the first failure; a `hasError` result throws with `.results` through that step
 ```
 {{/if}}
 {{/ifAll}}

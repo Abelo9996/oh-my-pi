@@ -149,7 +149,6 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `print(...)` (Python) / `print(...)` and `console.*` (JS)
 - `read(path, offset?, limit?)`, `write(path, content)`, `env(...)`, `output(...)`
 - `tool.<name>(args)` for a normal session tool call (async in both runtimes: `await tool.read({...})`)
-- `batchTools([{ name, args }, ...])` (JS) / `batch_tools([...])` (Python) to run session tool calls in order through the same bridge and approvals. It returns the ordered outputs and stops at the first failure: thrown and denied calls propagate, and a result with `hasError: true` raises (`RuntimeError` in Python) with `results` holding the outputs through the failed step.
 - `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default on)
 - `judge(...)`, `judge_batch(...)` (Python) / `judgeBatch(...)` (JS), `completion(...)`
 - `wait(...)` for agent/completion handles

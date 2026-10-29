@@ -108,27 +108,6 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		},
 	});
 
-	// Session tool calls in order. A thrown or denied call propagates; a returned
-	// `hasError: true` stops the batch and throws with `results` through that step.
-	const batchTools = async steps => {
-		if (!Array.isArray(steps)) throw new TypeError("batchTools() expects an array of { name, args } steps");
-		const results = [];
-		for (const [index, step] of steps.entries()) {
-			const name = step?.name;
-			if (typeof name !== "string" || name.length === 0) {
-				throw new TypeError(`batchTools() step ${index} needs a string name`);
-			}
-			const value = await globalThis.__omp_call_tool__(name, step.args ?? {});
-			results.push(value);
-			if (value?.hasError === true) {
-				const error = new Error(`batchTools() step ${index} (${name}) failed: ${value.text ?? ""}`);
-				error.results = results;
-				throw error;
-			}
-		}
-		return results;
-	};
-
 	const output = async (...args) => {
 		let opts = {};
 		let ids = args;
@@ -657,7 +636,6 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.console = consoleBridge;
 	globalThis.print = consoleBridge.log;
 	globalThis.tool = tool;
-	globalThis.batchTools = batchTools;
 	globalThis.completion = completion;
 	globalThis.output = output;
 	globalThis.agent = agent;

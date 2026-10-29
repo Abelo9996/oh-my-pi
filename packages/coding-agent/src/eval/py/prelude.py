@@ -708,28 +708,6 @@ if "__omp_prelude_loaded__" not in globals():
 
     tool = _ToolProxy()
 
-    async def batch_tools(steps):
-        """Run session tool calls in order and return their outputs.
-
-        A raised or denied call propagates unchanged; a result with ``hasError``
-        stops the batch with ``RuntimeError`` whose ``results`` hold the outputs
-        through the failed step.
-        """
-        if not isinstance(steps, (list, tuple)):
-            raise TypeError("batch_tools(...) expects a list of {'name', 'args'} steps")
-        results = []
-        for index, step in enumerate(steps):
-            name = step.get("name") if isinstance(step, dict) else None
-            if not isinstance(name, str) or not name:
-                raise TypeError(f"batch_tools step {index} needs a string 'name'")
-            value = await _ToolCallable(name)(step.get("args"))
-            results.append(value)
-            if isinstance(value, dict) and value.get("hasError") is True:
-                error = RuntimeError(f"batch_tools step {index} ({name}) failed: {value.get('text', '')}")
-                error.results = results
-                raise error
-        return results
-
     _HANDLE_UNSET = object()
 
     class _Handle:

@@ -10,7 +10,9 @@
 
 ### Added
 
-- Eval cells can run session tools in order with `batchTools([{ name, args }, ...])` (JS) or `batch_tools([...])` (Python): calls keep normal approvals and stop at the first failure, and a returned tool error raises with the outputs collected so far
+- Added evaluation test suite for ordered execution of session tool batches, confirming failure-stop semantics and state preservation
+- Added verification that tool batch execution correctly respects user-defined permissions and stops upon blocked calls
+- Added evaluation tests for batch cancellation, ensuring abort signals correctly interrupt pending steps
 - The agent can reply mid-task without ending its turn by writing Markdown to `out://` (`write`, or `> out://` from bash, up to 64 KiB): the reply shows like a response, streaming as it is written, so answering a question you ask during work or a requested progress report no longer cuts the task short. On by default in the interactive TUI and off in print, RPC, and ACP sessions; set `out.enabled` to force it either way
 - `tools.approval["computer.control"]: allow` lets the `computer` tool take foreground control on a machine with nobody to confirm it, such as a dedicated VM, and `deny` refuses it without asking; the approval mode alone never grants it ([#16917](https://github.com/can1357/oh-my-pi/pull/16917) by [@will-bogusz](https://github.com/will-bogusz))
 - Added opt-in `taskFile` input (`task.file=true`) to dispatch subagent instructions from a UTF-8 file via an absolute path or `local://` URL, recording the submitted path and SHA-256 ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal)).
