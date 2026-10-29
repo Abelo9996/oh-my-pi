@@ -515,11 +515,11 @@
           "FILE:@@//crates/pi-predict/Cargo.toml ebca66557be234e2188466035691181e7479b00033bf1e03f0baa48ed6295820",
           "FILE:@@//crates/pi-shell/Cargo.toml 810229cdfc7c5fd5a6772c2875ce04e9f9ea6aaec91c5a9736cb90abd7e38beb",
           "FILE:@@//crates/vendor/brush-core/Cargo.toml f941ad0e115ab014d04e6cbb6256d1eef7cf49bc12b8dc4e8a3d43dfefe28499",
-          "FILE:@@//crates/vendor/brush-parser/Cargo.toml eb5743019a24ecce17193da5b02b5987ee0ba2a02b805fb82f43695c8c6f0844",
+          "FILE:@@//crates/vendor/brush-parser/Cargo.toml c2cd00775d9c2092691b85bd7fd47ab08b96140930c8f227aa295b7878f45c1b",
           "FILE:@@//crates/pi-vcs/Cargo.toml e02a33f911203a8519c876905e81d13607b9e64c9943e9a7301de80c27b00ff3",
           "FILE:@@//crates/pi-voice/Cargo.toml 937db9095dc9f18fe1712945e55db5cf41504976e66b769650ca29165a11e947",
           "FILE:@@//crates/vendor/cfg_aliases/Cargo.toml 4f86686307ed6b8a0c24145d97bd42809dec663b92785e917887c934b28ae150",
-          "FILE:@@//crates/vendor/grep-searcher/Cargo.toml 45470e7797ea375b2851ed40b9bffdf67a2a0e64430500a856b2b45b5689affe",
+          "FILE:@@//crates/vendor/grep-searcher/Cargo.toml c7baa4f3286506c1d2aea81646645f819f042ed9e0baeb1ff318b8c0f5ccf114",
           "FILE:@@//crates/vendor/napi/Cargo.toml 064b561f5f8a075efc77387418751d92ae4c03c816245403eee6b5460940fb40",
           "FILE:@@//crates/vendor/tree-sitter-go/Cargo.toml e3f4a8444057434ab482de256ab6491f2bb3adc3916600cf335b2dfa60565ca4"
         ],

@@ -1989,10 +1989,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(cfgRetryFallbackChains.get(settings).web).toEqual([
-				"openai-codex/gpt-5.5",
-				"openai-codex/gpt-5.6",
-			]);
+			expect(cfgRetryFallbackChains.get(settings).web).toEqual(["openai-codex/gpt-5.5", "openai-codex/gpt-5.6"]);
 		});
 
 		it("keeps a legacy Gemini wire tier ahead of non-Gemini fallbacks", async () => {
