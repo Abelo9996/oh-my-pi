@@ -253,6 +253,7 @@ async function createContext() {
 		showError,
 		showStatus: vi.fn(),
 		isGuidedGoalInterviewActive,
+		sessionManager: { getSessionId: () => "session", getLeafId: () => null },
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -758,7 +759,11 @@ describe("InputController keybinding setup", () => {
 			handleCompactCommand,
 			queueCompactionMessage,
 			runYieldCompaction: vi.fn(),
-			sessionManager: { getSessionId: () => "session-1", getLeafId: () => "entry-7" },
+			sessionManager: {
+				getSessionId: () => "session-1",
+				getLeafId: () => "entry-7",
+				getBranch: () => [{ id: "entry-7" }],
+			},
 		});
 		return { handleCompactCommand, queueCompactionMessage };
 	}
@@ -858,6 +863,78 @@ describe("InputController keybinding setup", () => {
 		expect(queueCompactionMessage).toHaveBeenCalledWith("after the compaction", "followUp", undefined, {
 			preserveDraft: true,
 		});
+	});
+
+	it("holds an Enter queue shorthand behind a follow-up /compact whose input hook is slower", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		withCompactionQueue(ctx);
+		const compactHook = Promise.withResolvers<void>();
+		const followUp = vi.fn(async () => {});
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			followUp,
+			extensionRunner: {
+				hasHandlers: (event: string) => event === "input",
+				emitInput: async (text: string) => {
+					if (text.startsWith("/compact")) await compactHook.promise;
+					return undefined;
+				},
+			},
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		editor.setText("/compact");
+		const compact = controller.handleFollowUp();
+		const queued = editor.onSubmit?.("=> later");
+		compactHook.resolve();
+		await Promise.all([compact, queued]);
+
+		expect(ctx.yieldCompaction?.text).toBe("/compact");
+		expect(followUp).not.toHaveBeenCalled();
+		expect(ctx.compactionQueuedMessages.map(entry => entry.text)).toEqual(["later"]);
+	});
+
+	it("returns a follow-up /compact to the editor when the conversation changed during its input hook", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const { handleCompactCommand } = withCompactionQueue(ctx);
+		const showWarning = vi.fn();
+		const sessionManager = {
+			sessionId: "session-1",
+			getSessionId: () => sessionManager.sessionId,
+			getLeafId: () => null,
+		};
+		Object.assign(ctx, { showWarning, sessionManager });
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			extensionRunner: {
+				hasHandlers: (event: string) => event === "input",
+				// The user resumes another session while the hook runs.
+				emitInput: async () => {
+					sessionManager.sessionId = "session-2";
+					return undefined;
+				},
+			},
+		});
+
+		editor.setText("/compact");
+		await new InputController(ctx).handleFollowUp();
+
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(ctx.yieldCompaction).toBeUndefined();
+		expect(editor.getText()).toBe("/compact");
+		expect(showWarning).toHaveBeenCalledTimes(1);
+	});
+
+	it("hands input queued during a compaction back to the editor on a session reset", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		withCompactionQueue(ctx);
+		ctx.compactionQueuedMessages.push({ text: "typed while compacting", mode: "followUp" });
+
+		new InputController(ctx).restoreCompactionQueueToEditor();
+
+		expect(editor.getText()).toBe("typed while compacting");
+		expect(ctx.compactionQueuedMessages).toEqual([]);
 	});
 
 	it("continue shortcuts submit a resume instead of a prompt", async () => {

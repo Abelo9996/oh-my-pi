@@ -60,6 +60,7 @@ import type { EventController } from "./controllers/event-controller";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
+import type { ConversationPosition } from "./utils/conversation-position";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 
@@ -69,14 +70,14 @@ export type CompactionQueuedMessage = {
 	images?: ImageContent[];
 };
 
-/** `/compact` sent with the follow-up key during a run: it runs once the run settles. */
-export type YieldCompaction = {
+/**
+ * `/compact` sent with the follow-up key during a run: it runs once the run settles, while the
+ * session's branch still continues from the position it was queued at. A switch or tree
+ * navigation hands it back to the editor instead.
+ */
+export type YieldCompaction = ConversationPosition & {
 	/** The submitted command, restored to the editor when the request is dequeued. */
 	text: string;
-	/** Conversation position when queued: the request runs only while the session's branch still
-	 *  continues from it. A switch or tree navigation hands it back to the editor instead. */
-	sessionId: string;
-	leafId: string | null;
 	instructions?: string;
 	mode?: CompactMode;
 };
@@ -416,8 +417,8 @@ export interface InteractiveModeContext {
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	/** Start the compaction queued for the next yield, if any; it runs once the session is idle. */
 	runYieldCompaction(): void;
-	/** Hand a queued `/compact` and the follow-ups held behind it back to the editor. */
-	restoreYieldCompactionToEditor(): void;
+	/** Hand a queued `/compact` and the input in the compaction queue back to the editor. */
+	restoreCompactionQueueToEditor(): void;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
 	/** No argument restores the default; a function label is re-read on every spinner tick. */

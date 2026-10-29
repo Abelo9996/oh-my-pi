@@ -1,5 +1,5 @@
 import { SEANCE_SLASH_COMMAND } from "./seance";
-import { clearSubmittedText, refuseImages, runWithDetachedDraft } from "./helpers/draft";
+import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
@@ -7,6 +7,7 @@ import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -276,11 +277,17 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return;
 			}
 			const { ctx } = runtime;
-			if (runtime.followUp && ctx.session.isStreaming) {
+			const origin = runtime.followUp;
+			if (origin && !continuesConversation(ctx.sessionManager, origin)) {
+				// Input hooks ran while the conversation changed: never compact one it was not sent in.
+				restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				ctx.showWarning("Conversation changed before /compact ran; returned it to the editor");
+				return;
+			}
+			if (origin && ctx.session.isStreaming) {
 				ctx.yieldCompaction = {
+					...origin,
 					text: command.text,
-					sessionId: ctx.sessionManager.getSessionId(),
-					leafId: ctx.sessionManager.getLeafId(),
 					instructions: parsed.instructions,
 					mode: parsed.mode,
 				};

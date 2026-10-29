@@ -73,6 +73,7 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { resendProgramStatus } from "../../utils/run-status";
 import { loadImageInput } from "../../utils/image-loading";
 import { materializeImageChipLinks } from "../utils/ui-helpers";
+import { conversationPosition } from "../utils/conversation-position";
 import { ensureSupportedImageInput, ImageInputTooLargeError } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { type ImageAttachmentSource, tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
@@ -320,8 +321,11 @@ export class InputController {
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
-	/** Settles when the latest follow-up submission has passed its input hooks. */
-	#followUpHookOrder: Promise<void> = Promise.resolve();
+	/**
+	 * Settles when the latest submission (Enter or the follow-up key) has passed its input hooks.
+	 * Each submission awaits the previous one's, so queue placement follows submission order.
+	 */
+	#submissionHookOrder: Promise<void> = Promise.resolve();
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -1117,20 +1121,30 @@ export class InputController {
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
 
-			// A startup-deferred extension's input hook must see the first submission.
-			if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
-			if (runner?.hasHandlers("input")) {
-				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
-				if (!input) {
-					// The handler consumed the submission. The editor text was reset
-					// before this callback ran, so anything in it now is a newer draft;
-					// only the submitted attachments are dropped, and only while they
-					// are still the live prefix.
-					this.#dropSubmittedPending(inputImages);
-					return;
+			// Input hooks pass in submission order with the follow-up key's (see `#submissionHookOrder`):
+			// `/queue` placement behind a queued `/compact` must follow the order the user sent them.
+			const earlier = this.#submissionHookOrder;
+			const hooksDone = Promise.withResolvers<void>();
+			this.#submissionHookOrder = hooksDone.promise;
+			try {
+				await earlier;
+				// A startup-deferred extension's input hook must see the first submission.
+				if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
+				if (runner?.hasHandlers("input")) {
+					const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
+					if (!input) {
+						// The handler consumed the submission. The editor text was reset
+						// before this callback ran, so anything in it now is a newer draft;
+						// only the submitted attachments are dropped, and only while they
+						// are still the live prefix.
+						this.#dropSubmittedPending(inputImages);
+						return;
+					}
+					({ text, images: inputImages, imageLinks: inputImageLinks } = input);
+					hasInputImages = (inputImages?.length ?? 0) > 0;
 				}
-				({ text, images: inputImages, imageLinks: inputImageLinks } = input);
-				hasInputImages = (inputImages?.length ?? 0) > 0;
+			} finally {
+				hooksDone.resolve();
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
 			const draftDetached = submittedMode !== undefined && DETACHED_DRAFT_COMMANDS.has(submittedMode);
@@ -2071,13 +2085,15 @@ export class InputController {
 		// Detach before the first await: another Ctrl+Enter cannot submit the
 		// same draft, and later typing belongs to the next submission.
 		this.ctx.editor.clearDraft();
+		// The conversation this was sent in; a queued `/compact` must not land in another one.
+		const origin = conversationPosition(this.ctx.sessionManager);
 
-		// The follow-up key fires without awaiting: input hooks pass in submission order, so a slow hook
-		// on a queued `/compact` cannot let a later follow-up reach the queues first. Dispatch past this
-		// point decides queue placement synchronously.
-		const earlier = this.#followUpHookOrder;
+		// Input hooks pass in submission order (shared with Enter, see `#submissionHookOrder`), so a
+		// slow hook on a queued `/compact` cannot let later input reach the queues first. Dispatch past
+		// this point decides queue placement synchronously.
+		const earlier = this.#submissionHookOrder;
 		const hooksDone = Promise.withResolvers<void>();
-		this.#followUpHookOrder = hooksDone.promise;
+		this.#submissionHookOrder = hooksDone.promise;
 		try {
 			await earlier;
 			if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
@@ -2129,7 +2145,7 @@ export class InputController {
 					ctx: this.ctx,
 					input,
 					draftDetached: true,
-					followUp: true,
+					followUp: origin,
 				});
 				if (slashResult === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
@@ -2222,17 +2238,21 @@ export class InputController {
 	}
 
 	/**
-	 * Hand a queued `/compact` and the follow-ups held behind it back to the editor: the
-	 * conversation it was queued in is no longer the one that will yield.
+	 * Hand a queued `/compact` and the input waiting in the compaction queue (follow-ups held behind
+	 * the request, or input typed while a compaction runs) back to the editor: the conversation it was
+	 * queued for is no longer the one that will receive it.
 	 */
-	restoreYieldCompactionToEditor(): void {
+	restoreCompactionQueueToEditor(): void {
 		const request = this.ctx.yieldCompaction;
-		if (!request) return;
-		this.ctx.yieldCompaction = undefined;
 		const held = this.ctx.compactionQueuedMessages;
+		if (!request && held.length === 0) return;
+		this.ctx.yieldCompaction = undefined;
 		this.ctx.compactionQueuedMessages = [];
-		this.#restoreEntriesToEditor([{ text: request.text }, ...held.map(e => ({ text: e.text, images: e.images }))]);
-		this.ctx.showStatus("Conversation changed: queued compaction returned to the editor");
+		this.#restoreEntriesToEditor([
+			...(request ? [{ text: request.text }] : []),
+			...held.map(e => ({ text: e.text, images: e.images })),
+		]);
+		this.ctx.showStatus("Conversation changed: queued input returned to the editor");
 	}
 
 	/**

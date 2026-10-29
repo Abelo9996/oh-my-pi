@@ -1951,11 +1951,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
 		// A view switch leaves the main session, and the input queued for it, in place. A session reset
-		// hands a queued `/compact` and the follow-ups held behind it back to the editor.
-		if (!options?.viewOnly) {
-			if (this.yieldCompaction) this.#inputController.restoreYieldCompactionToEditor();
-			this.compactionQueuedMessages = [];
-		}
+		// hands a queued `/compact` and the input in the compaction queue back to the editor.
+		if (!options?.viewOnly) this.#inputController.restoreCompactionQueueToEditor();
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.lastAssistantUsage = undefined;
@@ -9245,8 +9242,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController.handleDequeue();
 	}
 
-	restoreYieldCompactionToEditor(): void {
-		this.#inputController.restoreYieldCompactionToEditor();
+	restoreCompactionQueueToEditor(): void {
+		this.#inputController.restoreCompactionQueueToEditor();
 	}
 
 	handleImagePaste(): Promise<boolean> {

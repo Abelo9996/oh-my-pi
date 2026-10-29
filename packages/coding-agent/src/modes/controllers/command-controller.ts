@@ -48,7 +48,8 @@ import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
 import { moveDirectorySource } from "../move-directory-source";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext, YieldCompaction } from "../../modes/types";
+import type { InteractiveModeContext } from "../../modes/types";
+import { continuesConversation } from "../utils/conversation-position";
 import { ContextViewer } from "@oh-my-pi/pi-tui/overlays/context-viewer";
 import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
@@ -2093,10 +2094,10 @@ export class CommandController {
 			// A prompt in pre-dispatch setup: wait until it starts a run or bails.
 			await Bun.sleep(10);
 		}
-		if (!this.#continuesConversation(request)) {
+		if (!continuesConversation(this.ctx.sessionManager, request)) {
 			// Switched sessions or navigated the tree (both may reuse this `AgentSession`): nothing queued
 			// for the old position may compact or run here.
-			this.ctx.restoreYieldCompactionToEditor();
+			this.ctx.restoreCompactionQueueToEditor();
 			return;
 		}
 		this.ctx.yieldCompaction = undefined;
@@ -2117,14 +2118,6 @@ export class CommandController {
 			compactionFlushes = true;
 		});
 		if (!compactionFlushes) await this.ctx.flushCompactionQueue({ willRetry: false });
-	}
-
-	/** The session still holds the conversation the request was queued in, continued from the same point. */
-	#continuesConversation(request: YieldCompaction): boolean {
-		const { sessionManager } = this.ctx;
-		if (sessionManager.getSessionId() !== request.sessionId) return false;
-		const { leafId } = request;
-		return leafId === null || sessionManager.getBranch().some(entry => entry.id === leafId);
 	}
 
 	/**

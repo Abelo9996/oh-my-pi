@@ -181,7 +181,7 @@ describe("compaction queued for the next yield", () => {
 			updatePendingMessagesDisplay: vi.fn(),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
-			restoreYieldCompactionToEditor: vi.fn(),
+			restoreCompactionQueueToEditor: vi.fn(),
 			flushCompactionQueue,
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
@@ -253,7 +253,7 @@ describe("compaction queued for the next yield", () => {
 
 		await controller.runYieldCompaction();
 
-		expect(ctx.restoreYieldCompactionToEditor).toHaveBeenCalledTimes(1);
+		expect(ctx.restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
 		expect(handleCompactCommand).not.toHaveBeenCalled();
 		expect(flushCompactionQueue).not.toHaveBeenCalled();
 	});
