@@ -1,10 +1,10 @@
-# 01 — Host preparation & single-node k3s cluster
+# 03 — Cache host: single-node k3s on can.internal
 
-This guide takes a fresh Linux host from bare OS to a **working single-node [k3s](https://k3s.io) cluster** that is ready to run Kata-isolated CI runners. It covers host prerequisites (hardware virtualization, kernel modules, time sync, the nginx port constraint), the exact k3s install, kubeconfig setup, cluster networking (Flannel CNI, CIDRs, CoreDNS), and pod-to-internet egress via host firewalld NAT.
+The shared Bazel cache ([04-caching.md](04-caching.md)) runs as a pod on a **single-node [k3s](https://k3s.io) cluster** on can.internal, the host that also serves build.stencil.so through nginx (including the GitHub webhook relay for vmon CI, [01-vmon-runners.md](01-vmon-runners.md)). CI jobs themselves run on vmon, not here. This guide takes a fresh Linux host to that cluster: host prerequisites (kernel modules, time sync, the nginx port constraint), the exact k3s install, kubeconfig setup, cluster networking (Flannel CNI, CIDRs, CoreDNS), and pod-to-internet egress via host firewalld NAT.
 
-Read [README.md](README.md) first for the overall architecture and the placeholder/redaction table. When this guide is done, continue with **[02-kata-runtime.md](02-kata-runtime.md)** to install the Kata Containers runtime and register the `kata-qemu` RuntimeClass.
+Read [README.md](README.md) first for the overall architecture and the placeholder/redaction table. When this guide is done, continue with **[04-caching.md](04-caching.md)** to deploy bazel-remote.
 
-All configs below are copied from the live reference host and then redacted. Substitute the placeholders from the [README redaction table](README.md#redaction--placeholders) (notably `<CI_HOST>`, `<PUBLIC_IP>`, `<EXT_IFACE>`, `<TAILNET_IP>`) with your own values. CIDRs (`10.42.0.0/16`, `10.43.0.0/16`), the CoreDNS IP (`10.43.0.10`), and version numbers are kept as-is.
+All configs below are copied from the live reference host and then redacted. Substitute the placeholders from the [README redaction table](README.md#redaction--placeholders) (notably `<CACHE_HOST>`, `<PUBLIC_IP>`, `<EXT_IFACE>`, `<TAILNET_IP>`) with your own values. CIDRs (`10.42.0.0/16`, `10.43.0.0/16`), the CoreDNS IP (`10.43.0.10`), and version numbers are kept as-is.
 
 The reference host is a bare-metal **CentOS Stream 10** box, 32 vCPU / 125 GiB RAM, AMD CPU, running **k3s `v1.35.5+k3s1`** (bundled containerd `v2.2.3-k3s1`). Commands are shown for RHEL-family (`dnf` / `firewalld`); adapt package and firewall commands for your distro.
 
@@ -12,50 +12,7 @@ The reference host is a bare-metal **CentOS Stream 10** box, 32 vCPU / 125 GiB R
 
 ## 1. Host prerequisites
 
-### 1.1 Hardware virtualization / KVM
-
-Every CI job boots its own QEMU/KVM microVM, so the host **must** expose working KVM. On bare metal this means VT-x (Intel) or AMD-V (AMD) enabled in firmware; on a VM you need working _nested_ virtualization.
-
-Check the CPU virtualization flag (`vmx` = Intel, `svm` = AMD) and that the KVM device and modules are present:
-
-```bash
-# CPU supports virtualization? (non-zero count = yes)
-grep -E -c '(vmx|svm)' /proc/cpuinfo
-
-# which flavor
-grep -E -om1 '(vmx|svm)' /proc/cpuinfo      # reference host prints: svm  (AMD)
-lscpu | grep -i virtualization
-
-# /dev/kvm must exist and be accessible
-ls -l /dev/kvm                              # crw-rw-rw-. 1 root kvm 10, 232 ... /dev/kvm
-
-# KVM kernel modules loaded
-lsmod | grep -E '^kvm'                      # kvm_amd ... kvm   (or kvm_intel on Intel)
-```
-
-On the reference host this yields:
-
-```
-$ ls -l /dev/kvm
-crw-rw-rw-. 1 root kvm 10, 232 /dev/kvm
-
-$ lsmod | grep -E '^kvm'
-kvm_amd               237568  99
-kvm                  1470464  78 kvm_amd
-```
-
-The module loads automatically when the CPU flag is present; if `/dev/kvm` is missing, load it explicitly and persist it:
-
-```bash
-modprobe kvm_amd        # or: modprobe kvm_intel
-echo kvm_amd > /etc/modules-load.d/kvm.conf
-```
-
-On Debian/Ubuntu you can instead run `kvm-ok` (from the `cpu-checker` package); on RHEL-family the checks above are the equivalent.
-
-> Kata also needs the `vhost_vsock` and `vhost_net` modules for its agent vsock channel and VM networking. Those are part of the Kata runtime setup and are covered in [02-kata-runtime.md](02-kata-runtime.md); the KVM availability above is the only virtualization prerequisite for this guide.
-
-### 1.2 Kernel modules and sysctls for k3s networking
+### 1.1 Kernel modules and sysctls for k3s networking
 
 k3s needs the `br_netfilter` and `overlay` modules and a couple of sysctls so that bridged pod traffic is seen by iptables and so the host can route/NAT pod traffic. The k3s systemd unit loads the modules on start (`ExecStartPre=-/sbin/modprobe br_netfilter` / `overlay`) and the installer sets the sysctls, but set them explicitly so they survive reboots and are correct before install:
 
@@ -88,7 +45,7 @@ overlay               229376  49
 
 `net.ipv4.ip_forward = 1` is what lets the host route (and NAT — see [section 5](#5-cluster-networking-cni-cidrs--nat-egress)) pod traffic out to the internet.
 
-### 1.3 SELinux
+### 1.2 SELinux
 
 The reference host runs SELinux in **Permissive** mode:
 
@@ -97,9 +54,9 @@ $ getenforce
 Permissive
 ```
 
-The k3s installer installs an SELinux policy (`k3s-selinux`) when SELinux is Enforcing on RHEL-family hosts, so Enforcing also works; Permissive is used here to keep the Kata/QEMU + virtio-fs path unencumbered during bring-up. Pick one consistently — if you run Enforcing, make sure `container-selinux` / `k3s-selinux` are installed (the k3s installer pulls them).
+The k3s installer installs an SELinux policy (`k3s-selinux`) when SELinux is Enforcing on RHEL-family hosts, so Enforcing also works; Permissive is simply the reference host's setting. Pick one consistently — if you run Enforcing, make sure `container-selinux` / `k3s-selinux` are installed (the k3s installer pulls them).
 
-### 1.4 Base packages
+### 1.3 Base packages
 
 The k3s install script needs only `curl`; everything else (its own containerd, CNI, kubectl) is bundled. Make sure the host has current packages and the basics:
 
@@ -108,11 +65,11 @@ dnf -y update
 dnf -y install curl tar iptables
 ```
 
-> Do **not** pre-install a separate containerd/Docker for k3s to use — k3s ships and manages its own containerd v2. (A separate Docker install can coexist for _building_ the runner image; that is covered in [03-runner-image.md](03-runner-image.md).)
+> Do **not** pre-install a separate containerd/Docker for k3s to use — k3s ships and manages its own containerd v2. (A separate Docker install can coexist; its `br-*` bridges live in their own firewalld zone.)
 
-### 1.5 Time synchronization
+### 1.4 Time synchronization
 
-Clock skew breaks TLS to the Kubernetes API and to GitHub. Keep an NTP client running. The reference host uses `chrony`:
+Clock skew breaks TLS to the Kubernetes API and to bazel-remote. Keep an NTP client running. The reference host uses `chrony`:
 
 ```bash
 dnf -y install chrony
@@ -120,7 +77,7 @@ systemctl enable --now chronyd
 timedatectl                       # "System clock synchronized: yes", "NTP service: active"
 ```
 
-### 1.6 The nginx port constraint (why Traefik and servicelb are disabled)
+### 1.5 The nginx port constraint (why Traefik and servicelb are disabled)
 
 The reference host **also runs nginx**, which owns ports 80 and 443:
 
@@ -156,8 +113,8 @@ What each piece does:
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `INSTALL_K3S_VERSION=v1.35.5+k3s1` | Pin the exact k3s release (reproducible installs; omit to track the stable channel).                                                                                                                 |
 | `server`                           | Run this node as a **control-plane + worker** (single-node cluster — it both schedules and runs pods).                                                                                               |
-| `--disable=traefik`                | Do **not** deploy the bundled Traefik ingress controller, so nothing tries to bind host :80/:443 (owned by nginx — see [1.6](#16-the-nginx-port-constraint-why-traefik-and-servicelb-are-disabled)). |
-| `--disable=servicelb`              | Do **not** deploy Klipper servicelb, so `LoadBalancer` services do not bind host ports. Runners need no inbound `LoadBalancer`; the ARC listener reaches GitHub via **outbound** long-poll.          |
+| `--disable=traefik`                | Do **not** deploy the bundled Traefik ingress controller, so nothing tries to bind host :80/:443 (owned by nginx — see [1.6](#15-the-nginx-port-constraint-why-traefik-and-servicelb-are-disabled)). |
+| `--disable=servicelb`              | Do **not** deploy Klipper servicelb, so `LoadBalancer` services do not bind host ports. bazel-remote is published as a filtered NodePort instead ([04-caching.md](04-caching.md)).          |
 
 Everything else is left at k3s defaults _on purpose_ — those defaults are what the rest of this doc set relies on:
 
@@ -167,7 +124,7 @@ Everything else is left at k3s defaults _on purpose_ — those defaults are what
 | `--cluster-cidr` (pod network)     | `10.42.0.0/16`             | Pod IP range.                                                                             |
 | `--service-cidr` (service network) | `10.43.0.0/16`             | ClusterIP range.                                                                          |
 | `--cluster-dns` (CoreDNS)          | `10.43.0.10`               | In-cluster DNS resolver.                                                                  |
-| Container runtime                  | bundled **containerd v2**  | Kata is wired into _this_ containerd in [02-kata-runtime.md](02-kata-runtime.md).         |
+| Container runtime                  | bundled **containerd v2**  | Runs the bazel-remote pod; no extra runtime is configured.                                |
 
 Because we do not pass `--node-ip` / `--flannel-iface`, k3s auto-detects the host's primary interface and uses its address as the node IP (the public IPv4 on the reference host). If your host has multiple NICs, set `--node-ip` / `--flannel-iface` explicitly.
 
@@ -254,11 +211,11 @@ Wait until the node reports `Ready`:
 kubectl get nodes -o wide
 ```
 
-Reference output (redacted — `<CI_HOST>` is the hostname, `<PUBLIC_IP>` the auto-detected node IP):
+Reference output (redacted — `<CACHE_HOST>` is the hostname, `<PUBLIC_IP>` the auto-detected node IP):
 
 ```
 NAME        STATUS   ROLES                  AGE   VERSION        INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                      KERNEL-VERSION                  CONTAINER-RUNTIME
-<CI_HOST>   Ready    control-plane,master   ...   v1.35.5+k3s1   <PUBLIC_IP>   <none>        CentOS Stream 10 (Coughlan)   7.0.10-1.el10.elrepo.x86_64     containerd://2.2.3-k3s1
+<CACHE_HOST>   Ready    control-plane,master   ...   v1.35.5+k3s1   <PUBLIC_IP>   <none>        CentOS Stream 10 (Coughlan)   7.0.10-1.el10.elrepo.x86_64     containerd://2.2.3-k3s1
 ```
 
 Then confirm the core system pods are running:
@@ -276,7 +233,7 @@ kube-system   local-path-provisioner-<hash>              1/1     Running   0    
 kube-system   metrics-server-<hash>                      1/1     Running   0          ...
 ```
 
-`local-path-provisioner` is the default storage class (used later for the RustFS cache PVC in [04-arc-and-caching.md](04-arc-and-caching.md)); `coredns` is cluster DNS; `metrics-server` backs `kubectl top`. There is intentionally **no** `traefik` or `svclb-*` pod.
+`local-path-provisioner` is the default storage class (it backs the `bazel-remote-data` PVC, [04-caching.md](04-caching.md)); `coredns` is cluster DNS; `metrics-server` backs `kubectl top`. There is intentionally **no** `traefik` or `svclb-*` pod.
 
 ---
 
@@ -339,13 +296,13 @@ kube-dns   ClusterIP   10.43.0.10   <none>        53/UDP,53/TCP,9153/TCP   ...
 
 ### 5.3 Pod-to-internet egress via host firewalld NAT
 
-Runner microVMs need outbound internet (to reach GitHub, fetch toolchains, etc.) but the host must **not** expose the cluster on its public interface. The path is:
+Pods need outbound internet only occasionally, but the host must **not** expose the cluster on its public interface (the one deliberate exception is the source-filtered bazel-remote NodePort, [04-caching.md](04-caching.md)). The path is:
 
 ```
 pod (10.42.0.0/16) --default route--> cbr0/flannel --> host routing --> firewalld masquerade (SNAT) --> <EXT_IFACE> --> internet (as <PUBLIC_IP>)
 ```
 
-This relies on `net.ipv4.ip_forward = 1` (set in [1.2](#12-kernel-modules-and-sysctls-for-k3s-networking)) plus firewalld **masquerade** (SNAT) and **forwarding** on the public zone. On the reference host the external interface lives in the default `public` zone with masquerade enabled:
+This relies on `net.ipv4.ip_forward = 1` (set in [1.2](#11-kernel-modules-and-sysctls-for-k3s-networking)) plus firewalld **masquerade** (SNAT) and **forwarding** on the public zone. On the reference host the external interface lives in the default `public` zone with masquerade enabled:
 
 ```
 $ firewall-cmd --list-all
@@ -416,7 +373,7 @@ $ firewall-cmd --query-forward
 yes
 ```
 
-> This is host-level NAT only. A second, finer-grained layer — the `runner-egress-lockdown` Kubernetes **NetworkPolicy** — restricts _which_ destinations runner pods may reach (it blocks `<PUBLIC_IP>`, the tailnet `100.64.0.0/10`, RFC-1918 ranges, etc., while allowing the public internet and cluster DNS). That policy is part of the runner setup and is documented in [04-arc-and-caching.md](04-arc-and-caching.md).
+> This is host-level NAT only. Inbound, the bazel-remote NodePort (`30992/tcp`) is the only cluster port reachable from outside, and a prerouting nft table installed by `infra/bazel-remote/setup.sh` admits it only from the vmon egress addresses and the tailnet ([04-caching.md](04-caching.md)).
 
 ---
 
@@ -436,13 +393,11 @@ kubectl run egress-test --image=busybox:1.36 --restart=Never --rm -it -- \
 
 Expected: the first command resolves to a `10.43.x.x` ClusterIP; the second resolves a public name and prints a line of text fetched from the internet (proving SNAT/masquerade works). If DNS fails, recheck CoreDNS (`kubectl -n kube-system get pods`); if egress fails, recheck `ip_forward`, `masquerade`, and `forward` from [section 5.3](#53-pod-to-internet-egress-via-host-firewalld-nat).
 
-> On the live reference host, the ARC scale-set **listener** pod (in `arc-systems`) is itself continuous proof of working egress: it stays `Running` only because it can reach GitHub outbound through this exact NAT path.
-
 ---
 
 ## Next steps
 
 The host now runs a healthy single-node k3s cluster with working networking and NAT egress, and Traefik/servicelb disabled so nginx keeps :80/:443. Continue with:
 
-- **[02-kata-runtime.md](02-kata-runtime.md)** — install Kata Containers, wire it into k3s' bundled containerd, and register the `kata-qemu` RuntimeClass.
+- **[04-caching.md](04-caching.md)** — deploy bazel-remote (`infra/bazel-remote/setup.sh`) and wire the CI caches.
 - [README.md](README.md) — architecture overview, full component map, and the placeholder/redaction reference.

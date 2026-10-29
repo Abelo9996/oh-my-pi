@@ -2,12 +2,16 @@
 #
 # One replica, node-local storage (RWO local-path PVC), TLS + htpasswd auth from
 # secrets created by setup.sh (run that script on the CI host; it generates the
-# CA/server cert and credentials, then applies this file).
+# CA/server cert and credentials, installs the NodePort source filter, then
+# applies this file).
 #
-# Exposure: ClusterIP `bazel-remote` only — gRPC :9092 + HTTP :8080 for
-# in-cluster runner pods (kata microVMs). Nothing is published outside the
-# cluster: GitHub-hosted runners never talk to this infrastructure (they use
-# an actions/cache-backed bazel disk cache instead).
+# Exposure:
+# - ClusterIP `bazel-remote` - gRPC :9092 + HTTP :8080 inside the cluster.
+# - NodePort `bazel-remote-public` - gRPC only, node port 30992, for the vmon CI
+#   runners (infra/docs/04-caching.md). setup.sh drops every source except the
+#   vmon egress CIDRs and the tailnet before kube-proxy's DNAT (nft table
+#   `bazel_remote_public`); externalTrafficPolicy Local keeps client addresses.
+#   Reads are unauthenticated, writes need the `ci` htpasswd user.
 #
 # Clients verify the self-signed server cert against the CA committed at
 # infra/bazel-remote/ca.crt (`--tls_certificate=infra/bazel-remote/ca.crt`).
@@ -107,3 +111,15 @@ spec:
   ports:
     - { name: grpc, port: 9092, targetPort: grpc, protocol: TCP }
     - { name: http, port: 8080, targetPort: http, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bazel-remote-public
+  namespace: bazel-cache
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector: { app: bazel-remote }
+  ports:
+    - { name: grpc, port: 9092, targetPort: grpc, nodePort: 30992, protocol: TCP }
