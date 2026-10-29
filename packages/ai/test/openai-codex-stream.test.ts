@@ -21,6 +21,7 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -779,6 +780,66 @@ describe("openai-codex streaming", () => {
 
 		return { result, textEndContents, eventTypes, fetchMock };
 	}
+
+	/** Streams one Codex request over a websocket that answers it with `event`. */
+	async function runCodexWebSocketEvent(event: unknown) {
+		class ReplyWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			override send(): void {
+				this.sendJson(event);
+			}
+		}
+		global.WebSocket = ReplyWebSocket as unknown as typeof WebSocket;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		try {
+			return await streamOpenAICodexResponses(createCodexTestModel(), createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				sessionId: "websocket-event",
+				providerSessionState,
+				fetch: async () => {
+					throw new Error("websocket events must not fall back to HTTP");
+				},
+			}).result();
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
+	}
+
+	describe.each(["websocket", "sse"] as const)("%s streamed retry advice", transport => {
+		it.each([
+			["top-level headers", "top", { "Retry-After": "425" }, 425_000, undefined],
+			["nested error headers", "error", { "retry-after": "436" }, 436_000, undefined],
+			["response.failed headers", "response", { "retry-after-ms": "1500" }, 1500, undefined],
+			["no headers", "top", {}, undefined, undefined],
+			[
+				"outer headers when nested advice is malformed",
+				"response",
+				{ "retry-after-ms": "later" },
+				30_000,
+				{ "Retry-After": "30" },
+			],
+			["nested headers over outer ones", "error", { "retry-after-ms": "1500" }, 1500, { "Retry-After": "30" }],
+		] as const)("keeps the retry hint from %s", async (_name, placement, headers, expectedDelay, outerHeaders) => {
+			const error = { code: "turn_rate_limit_exceeded", message: "Codex is at capacity, please try again later" };
+			const failure: Record<string, unknown> =
+				placement === "response"
+					? { type: "response.failed", response: { status: "failed", error: { ...error, headers } } }
+					: {
+							type: "error",
+							status: 429,
+							error: placement === "error" ? { ...error, headers } : error,
+							...(placement === "top" ? { headers } : {}),
+						};
+			if (outerHeaders) failure.headers = outerHeaders;
+			const result =
+				transport === "sse" ? (await runCodexSseEvents([failure])).result : await runCodexWebSocketEvent(failure);
+			expect(result.stopReason).toBe("error");
+			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(expectedDelay);
+		});
+	});
 
 	it("surfaces result-bearing native images with stale generating status", async () => {
 		const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
