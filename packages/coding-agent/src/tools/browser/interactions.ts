@@ -158,13 +158,12 @@ export class ClickRefusedError extends ToolAbortError {
 }
 
 /**
- * Typing aborted after some keys reached the page; the field keeps those `typed` of `total` code points.
+ * Text entry aborted after input reached the page; `progress` says what the field may already hold.
  * The per-op timeout reports this instead of an actionability hint, since the element did take input.
  */
 export class TypingInterruptedError extends ToolAbortError {
 	constructor(
-		readonly typed: number,
-		readonly total: number,
+		readonly progress: string,
 		options?: ErrorOptions,
 	) {
 		super(undefined, options);
@@ -473,7 +472,10 @@ async function typeKeys(
 		}
 	} catch (error) {
 		if (signal?.aborted && typed > 0) {
-			throw new TypingInterruptedError(typed, characters.length, { cause: signal.reason });
+			throw new TypingInterruptedError(
+				`typing stopped after ${typed} of ${characters.length} characters (the field keeps what was typed)`,
+				{ cause: signal.reason },
+			);
 		}
 		throw error;
 	}
@@ -537,7 +539,10 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 							namespace: string | null,
 							tag: "input",
 						): { value: string; setAttribute(name: string, value: string): void };
-						createRange(): { selectNodeContents(node: unknown): void };
+						createRange(): {
+							selectNodeContents(node: unknown): void;
+							getClientRects(): ArrayLike<{ width: number; height: number }>;
+						};
 						getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
 					};
 					dispatchEvent(event: unknown): boolean;
@@ -634,7 +639,10 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					const selection = node.ownerDocument.getSelection();
 					selection?.removeAllRanges();
 					selection?.addRange(range);
-					return { target: "editable" as const, hasText: Boolean(node.innerText) };
+					// Backspace over a selection that shows nothing deletes the character before it, outside the
+					// element, so an empty fill deletes only a selection that draws something (text, an image).
+					const shown = Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0);
+					return { target: "editable" as const, shown };
 				}
 				const before = node.value;
 				if ("value" in node) write("");
@@ -657,11 +665,24 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 			}
 			return;
 		case "editable":
-			// One `Input.insertText` replaces the selection the way a paste does; the editor's own
-			// beforeinput handling applies it to its model. Backspace is a real deletion of the selection.
+			if (!value && !prepared.shown) return;
 			throwIfAborted(signal);
-			if (value) await untilAborted(signal, () => page.keyboard.sendCharacter(value));
-			else if (prepared.hasText) await untilAborted(signal, () => page.keyboard.press("Backspace"));
+			try {
+				// One `Input.insertText` replaces the selection the way a paste does; the editor's own
+				// beforeinput handling applies it to its model. Backspace is a real deletion of the selection.
+				await untilAborted(signal, () =>
+					value ? page.keyboard.sendCharacter(value) : page.keyboard.press("Backspace"),
+				);
+			} catch (error) {
+				// The input was already sent and cannot be recalled, so the editor may hold its result.
+				if (signal?.aborted) {
+					throw new TypingInterruptedError(
+						`the ${value ? "replacement text" : "deletion"} was already sent and may have reached the editor`,
+						{ cause: signal.reason },
+					);
+				}
+				throw error;
+			}
 			return;
 		case "field":
 			await typeKeys(page, value, signal);

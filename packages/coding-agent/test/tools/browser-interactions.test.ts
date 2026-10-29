@@ -9,12 +9,15 @@ import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import {
 	clickElement,
 	clickQueryHandlerText,
+	fillViaHandle,
 	resolveActionableQueryHandlerClickTarget,
+	TypingInterruptedError,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/page-kit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -139,6 +142,38 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
 			if (!(outcome.error instanceof Error)) throw new Error("Expected candidate lookup to reject with an Error");
 			expect(outcome.error.name).toBe("AbortError");
 			expect(outcome.error.cause).toBe(reason);
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	}, 30_000);
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
+	test("reports a rich-text replacement that was already sent when the fill is aborted", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent('<div id="editor" contenteditable>old text</div>');
+			const editor = await page.$("#editor");
+			if (!editor) throw new Error("Expected the editor");
+			const controller = new AbortController();
+			const reason = new Error("per-op deadline");
+			const send = page.keyboard.sendCharacter.bind(page.keyboard);
+			// The insertion reaches the page, then the deadline fires while its reply is still outstanding.
+			page.keyboard.sendCharacter = async text => {
+				await send(text);
+				controller.abort(reason);
+				return Promise.withResolvers<void>().promise;
+			};
+
+			const error = await rejectionOf(fillViaHandle(editor, "new text", controller.signal));
+			if (!(error instanceof TypingInterruptedError))
+				throw new Error(`Expected TypingInterruptedError, got ${error}`);
+			expect(error.progress).toContain("replacement text was already sent");
+			expect(error.cause).toBe(reason);
+			expect(await editor.evaluate(el => el.textContent)).toBe("new text");
 		} finally {
 			await page.close().catch(() => undefined);
 			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
@@ -625,6 +660,38 @@ return { filled, cleared: await tab.evaluate(() => window.model) };`,
 				context,
 			);
 			expect(valueFrom<{ filled: string; cleared: string }>(result)).toEqual({ filled: "new query", cleared: "" });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
+	test("an empty fill deletes a contenteditable's non-text content and nothing outside it", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-clear-${crypto.randomUUID()}`;
+		// The blank span holds only an empty text node: its selected contents show nothing, so a Backspace there
+		// would delete the "p" before it.
+		const clearHtml = `<!doctype html><div id="pictured" contenteditable><img alt="pic" width="20" height="20"
+src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div><div id="host" contenteditable>keep<span id="blank"></span>this</div>
+<script>document.querySelector("#blank").append("");</script>`;
+		const context = { session, toolCallId: "browser-editable-clear" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(clearHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#pictured", "");
+await tab.fill("#blank", "");
+return { images: await tab.count("#pictured img"), host: await tab.text("#host") };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<{ images: number; host: string }>(result)).toEqual({ images: 0, host: "keepthis" });
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
