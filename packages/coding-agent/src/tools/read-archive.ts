@@ -35,6 +35,7 @@ import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
+import { RACY_STAMP_WINDOW_MS } from "./racy-stamp";
 
 interface ResolvedArchiveReadPath {
 	absolutePath: string;
@@ -71,13 +72,6 @@ const archiveReaderCache = new LRUCache<string, CachedArchiveReader>({
 	sizeCalculation: cached => Math.max(1, cached.entryCount),
 });
 
-/**
- * Archives changed more recently than this are never memoized (git's racy-clean
- * rule): on coarse-timestamp filesystems a same-size rewrite inside one timestamp
- * granule leaves the identity unchanged.
- */
-const RACY_IDENTITY_WINDOW_MS = 2_000;
-
 async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
 	// The clock is read before the stat, so a change landing between the two counts as recent.
 	const checkedAtMs = Date.now();
@@ -97,7 +91,7 @@ async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
 		return cached.reader;
 	}
 	const reader = await openArchive(absolutePath);
-	if (!CACHEABLE_ARCHIVE_FORMATS[reader.format] || checkedAtMs - stat.ctimeMs < RACY_IDENTITY_WINDOW_MS) {
+	if (!CACHEABLE_ARCHIVE_FORMATS[reader.format] || checkedAtMs - stat.ctimeMs < RACY_STAMP_WINDOW_MS) {
 		archiveReaderCache.delete(absolutePath);
 		return reader;
 	}
