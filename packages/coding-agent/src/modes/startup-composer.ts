@@ -1,9 +1,5 @@
 import type { Terminal } from "@oh-my-pi/pi-tui";
-import type {
-	Composer,
-	ComposerPreferences,
-	ComposerWelcomeUpdate,
-} from "@oh-my-pi/pi-tui/prompt/composer";
+import type { Composer, ComposerPreferences, ComposerWelcomeUpdate } from "@oh-my-pi/pi-tui/prompt/composer";
 import type * as ComposerRuntime from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	type ComposerCache,
