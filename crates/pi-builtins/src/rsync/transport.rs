@@ -14,7 +14,7 @@ use std::{
 	io::{self, Read, Write},
 	process::{Child, ExitStatus},
 	sync::{
-		Arc, Condvar, Mutex,
+		Arc, Condvar, LazyLock, Mutex,
 		atomic::{AtomicBool, Ordering},
 	},
 	thread::JoinHandle,
@@ -29,6 +29,7 @@ use crate::{
 			RERR_IPC, RERR_SYNTAX, RERR_TIMEOUT, RERR_WAITCHILD, RsyncError, timeout_message,
 		},
 		log::{Debug, LogCode, Logger, Role, syserr_text},
+		mux::ReadProbe,
 		paths::vec_os_lossy,
 	},
 };
@@ -39,8 +40,38 @@ pub(crate) use tcp::{TcpConfig, connect_tcp, unknown_name_text};
 
 /// How long one wait slice lasts before cancellation and limits are rechecked.
 const SLICE: Duration = Duration::from_millis(100);
-/// Capacity of each direction of the in-process duplex.
-const PIPE_CAPACITY: usize = 256 * 1024;
+/// Capacity of each direction of the in-process duplex: what a Unix-domain socket
+/// pair holds on this platform (upstream's local copies run over `fd_pair`'s
+/// socketpair; 8192 bytes on macOS). The small buffer makes writers wait on readers
+/// exactly as upstream's processes do, which fixes where frames meet reads.
+fn pipe_capacity() -> usize {
+	static CAPACITY: LazyLock<usize> = LazyLock::new(measure_socketpair);
+	*CAPACITY
+}
+
+#[cfg(unix)]
+fn measure_socketpair() -> usize {
+	use std::os::unix::net::UnixStream;
+	const FALLBACK: usize = 8192;
+	let Ok((ours, _theirs)) = UnixStream::pair() else { return FALLBACK };
+	if ours.set_nonblocking(true).is_err() {
+		return FALLBACK;
+	}
+	let chunk = [0u8; 1024];
+	let mut total = 0usize;
+	while total < 16 * 1024 * 1024 {
+		match (&ours).write(&chunk) {
+			Ok(0) | Err(_) => break,
+			Ok(n) => total += n,
+		}
+	}
+	if total == 0 { FALLBACK } else { total }
+}
+
+#[cfg(not(unix))]
+fn measure_socketpair() -> usize {
+	8192
+}
 /// Upstream's argv limit (`MAX_ARGS`) and the room it keeps for server options.
 const MAX_ARGS: usize = 1000;
 const MAX_SERVER_ARGS: usize = 20 * 2 + 100;
@@ -118,6 +149,9 @@ pub(crate) fn truncate(s: &str, max: usize) -> &str {
 pub(crate) struct Connection {
 	pub reader: Box<dyn Read + Send>,
 	pub writer: Box<dyn Write + Send>,
+	/// Whether `reader` would return at once (data or EOF waiting), without
+	/// reading; None when the stream cannot tell.
+	pub probe:  Option<ReadProbe>,
 	/// Remote-shell (or connect-program) process; killed on drop or cancel,
 	/// reaped by [`Connection::finish`].
 	pub child:  Option<ChildGuard>,
@@ -305,6 +339,17 @@ enum Sock {
 }
 
 impl Sock {
+	/// Our end becomes non-blocking: a write takes what the socket buffer has room
+	/// for and returns (upstream's fds are non-blocking too), and the waits stay in
+	/// [`Sock::ready`].
+	fn set_nonblocking(&self) -> io::Result<()> {
+		match self {
+			Self::Tcp(s) => s.set_nonblocking(true),
+			#[cfg(unix)]
+			Self::Unix(s) => s.set_nonblocking(true),
+		}
+	}
+
 	#[cfg(unix)]
 	fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
 		use std::os::fd::AsFd;
@@ -487,17 +532,26 @@ fn retryable(err: &io::Error) -> bool {
 	matches!(err.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock)
 }
 
-/// Reader and writer over one socket, sharing `ctl`.
+/// Reader and writer over one socket, sharing `ctl`, plus a readiness probe (a
+/// zero-timeout poll).
 fn sock_halves(
 	sock: Sock,
 	cancel: &Arc<AtomicBool>,
 	ctl: &ConnCtl,
-) -> (Box<dyn Read + Send>, Box<dyn Write + Send>) {
+) -> (Box<dyn Read + Send>, Box<dyn Write + Send>, ReadProbe) {
+	// Best effort: a socket left blocking still works, only with whole writes.
+	let _ = sock.set_nonblocking();
 	let sock = Arc::new(sock);
 	let reader =
 		SockReader { sock: Arc::clone(&sock), cancel: Arc::clone(cancel), ctl: ctl.clone() };
+	// Weak: the probe must not keep the socket open once both halves are gone
+	// (a child such as `cat` waits for that EOF).
+	let probed = Arc::downgrade(&sock);
+	let probe: ReadProbe = Arc::new(move || {
+		probed.upgrade().is_none_or(|sock| sock.ready(false, Duration::ZERO).unwrap_or(true))
+	});
 	let writer = SockWriter { sock, cancel: Arc::clone(cancel), ctl: ctl.clone() };
-	(Box::new(reader), Box::new(writer))
+	(Box::new(reader), Box::new(writer), probe)
 }
 
 /// One direction of the in-process duplex.
@@ -576,7 +630,7 @@ impl Write for PipeWriter {
 			if state.reader_closed {
 				return Err(io::Error::from(io::ErrorKind::BrokenPipe));
 			}
-			let room = PIPE_CAPACITY - state.buf.len();
+			let room = pipe_capacity().saturating_sub(state.buf.len());
 			if room > 0 {
 				let n = room.min(buf.len());
 				state.buf.extend(&buf[..n]);
@@ -617,9 +671,15 @@ pub(crate) fn local_pair(cancel: Arc<AtomicBool>) -> (Connection, Connection) {
 			PipeReader { pipe: Arc::clone(inbound), cancel: Arc::clone(cancel), ctl: ctl.clone() };
 		let writer =
 			PipeWriter { pipe: Arc::clone(outbound), cancel: Arc::clone(cancel), ctl: ctl.clone() };
+		let probed = Arc::clone(inbound);
+		let probe: ReadProbe = Arc::new(move || {
+			let state = lock(&probed.state);
+			!state.buf.is_empty() || state.writer_closed
+		});
 		Connection {
 			reader: Box::new(reader),
 			writer: Box::new(writer),
+			probe:  Some(probe),
 			child:  None,
 			ctl:    ctl.clone(),
 		}
@@ -1108,11 +1168,12 @@ fn spawn_piped(
 		let child = cmd.spawn();
 		drop(cmd);
 		let child = child?;
-		let (reader, _) = sock_halves(Sock::Unix(ours_from), cancel, ctl);
-		let (_, writer) = sock_halves(Sock::Unix(ours_to), cancel, ctl);
+		let (reader, _, probe) = sock_halves(Sock::Unix(ours_from), cancel, ctl);
+		let (_, writer, _) = sock_halves(Sock::Unix(ours_to), cancel, ctl);
 		Ok(Connection {
 			reader,
 			writer,
+			probe: Some(probe),
 			child: Some(ChildGuard::new(env, child, Arc::clone(cancel), report, role)),
 			ctl: ctl.clone(),
 		})
@@ -1130,10 +1191,13 @@ fn spawn_piped(
 			return Err(io::Error::other("child pipes missing"));
 		};
 		let reader = PumpReader::new(stdout, Arc::clone(cancel), ctl.clone());
+		let pumped = reader.rx.clone();
+		let probe: ReadProbe = Arc::new(move || !pumped.is_empty() || pumped.is_disconnected());
 		let writer = ChildWriter { pipe: stdin, cancel: Arc::clone(cancel) };
 		Ok(Connection {
 			reader: Box::new(reader),
 			writer: Box::new(writer),
+			probe:  Some(probe),
 			child:  Some(ChildGuard::new(env, child, Arc::clone(cancel), report, role)),
 			ctl:    ctl.clone(),
 		})
@@ -1234,7 +1298,7 @@ mod tests {
 	fn local_pair_transfers_both_ways_and_reports_eof() {
 		let cancel = Arc::new(AtomicBool::new(false));
 		let (mut client, mut server) = local_pair(Arc::clone(&cancel));
-		let big: Vec<u8> = (0..PIPE_CAPACITY * 3).map(|i| (i % 251) as u8).collect();
+		let big: Vec<u8> = (0..pipe_capacity() * 3).map(|i| (i % 251) as u8).collect();
 		let expect = big.clone();
 		let writer = std::thread::spawn(move || {
 			client.writer.write_all(&big).unwrap();
@@ -1271,7 +1335,7 @@ mod tests {
 		assert_eq!(mapped.code, RERR_SIGNAL);
 		// A writer blocked on a full pipe is released too.
 		let mut writer = server.writer;
-		let err = writer.write_all(&vec![0u8; PIPE_CAPACITY * 2]).unwrap_err();
+		let err = writer.write_all(&vec![0u8; pipe_capacity() * 2]).unwrap_err();
 		assert_eq!(RsyncError::from_io(&err, 12).code, RERR_SIGNAL);
 	}
 

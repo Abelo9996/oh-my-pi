@@ -56,7 +56,7 @@ use crate::rsync::{
 	exit::{RERR_FILEIO, RERR_PROTOCOL, RsyncError},
 	flist::FileEntry,
 	flists::Flists,
-	generator::{DestTrees, Sibling},
+	generator::{DestTrees, SibOut, Sibling},
 	log::{Debug, Info, LogCode, LogItem, Logger},
 	meta::{self, ATTRS_ACCURATE_TIME, ATTRS_SKIP_ATIME, ATTRS_SKIP_CRTIME, ATTRS_SKIP_MTIME, AttrHooks},
 	mux::{MuxReader, MuxWriter},
@@ -83,7 +83,7 @@ pub(crate) fn run(
 	fr: &mut FlistReceiver,
 	input: &mut MuxReader,
 	out: &MuxWriter,
-	sib: &flume::Sender<Sibling>,
+	sib: &SibOut,
 ) -> Result<(), RsyncError> {
 	run_batch(ctx, trees, flists, fr, input, out, sib, None)
 }
@@ -98,13 +98,16 @@ pub(crate) fn run_batch(
 	fr: &mut FlistReceiver,
 	input: &mut MuxReader,
 	out: &MuxWriter,
-	sib: &flume::Sender<Sibling>,
+	sib: &SibOut,
 	batch_gen: Option<&mut dyn Read>,
 ) -> Result<(), RsyncError> {
 	let mut rx = Receiver::new(ctx, trees, flists, out, sib, fr, batch_gen);
 	let result = rx.recv_files(fr, input);
 	if result.is_err() {
 		rx.cleanup();
+	} else {
+		// main.c do_recv: io_flush(FULL_FLUSH) after recv_files.
+		sib.flush_all();
 	}
 	result
 }
@@ -223,7 +226,7 @@ struct Receiver<'a, 'b> {
 	trees: &'a DestTrees,
 	flists: &'a Flists,
 	out: &'a MuxWriter,
-	sib: &'a flume::Sender<Sibling>,
+	sib: &'a SibOut,
 	log: &'a Logger,
 	batch: Option<BatchGen<'b>>,
 	xattrs: Arc<Mutex<XattrReceiver>>,
@@ -296,7 +299,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		trees: &'a DestTrees,
 		flists: &'a Flists,
 		out: &'a MuxWriter,
-		sib: &'a flume::Sender<Sibling>,
+		sib: &'a SibOut,
 		fr: &FlistReceiver,
 		batch_gen: Option<&'b mut dyn Read>,
 	) -> Self {
@@ -350,9 +353,10 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		self.log.role().name()
 	}
 
+	/// Queues a message for the generator (upstream send_msg_int on the pipe; it leaves
+	/// with the receiver's next input refill or flush).
 	fn tell(&self, msg: Sibling) {
-		// A generator that is gone has already stored its own error.
-		let _ = self.sib.send(msg);
+		self.sib.msg(msg);
 	}
 
 	fn no_send(&self, ndx: i32) {
@@ -654,7 +658,8 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		if self.phase == 2 && self.ctx.opts.delay_updates {
 			self.handle_delayed_updates()?;
 		}
-		self.tell(Sibling::Done);
+		// write_int(f_out, NDX_DONE): pipe data, not a message.
+		self.sib.data(Sibling::Done);
 		Ok(false)
 	}
 
@@ -683,12 +688,18 @@ impl<'a, 'b> Receiver<'a, 'b> {
 				}
 				if ndx == NDX_FLIST_EOF {
 					self.flists.set_eof();
+					self.sib.data(Sibling::ListEof);
 					if let Some(progress) = &self.ctx.progress {
 						lock(progress).set_flist_eof(true);
 					}
 					continue;
 				}
+				// Upstream forwards the list's bytes to the generator as pipe data.
+				let before = self.flists.len();
 				fr.recv_extra(input, self.flists, NDX_FLIST_OFFSET - ndx)?;
+				for _ in before..self.flists.len() {
+					self.sib.data(Sibling::List);
+				}
 			};
 			let ndx = self.flists.from_wire(wire);
 			let iflags = u32::from(input.read_shortint().map_err(|e| self.ctx.stream_error(&e))?);
@@ -1573,6 +1584,8 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		if self.batch.as_ref().is_none_or(|b| b.got_eof) {
 			return Ok(false);
 		}
+		// Upstream io_flush(FULL_FLUSH) before reading the generator's batch stream.
+		self.sib.flush_all();
 		loop {
 			let Some(batch) = self.batch.as_ref() else { return Ok(false) };
 			let next = batch.next_ndx;

@@ -20,9 +20,9 @@ wasm = ["tree-sitter/wasm"]
 [dependencies]
 anyhow.workspace = true
 ast-grep-core.workspace = true
-globset.workspace = true
-ignore.workspace = true
 phf.workspace = true
+pi-walker.workspace = true
+pi-vfs.workspace = true
 serde.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
@@ -42,9 +42,12 @@ tree-sitter-rust.workspace = true
 tree-sitter-toml-ng.workspace = true
 tree-sitter-typescript.workspace = true
 tree-sitter-yaml.workspace = true
+xutf.workspace = true
 xxhash-rust.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
+parking_lot.workspace = true
 # Natively compiled stand-ins for wasm grammars the tests parse (see
 # `language::grammar::WasmGrammar::register`).
 tree-sitter-elisp.workspace = true

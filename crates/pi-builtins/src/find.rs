@@ -334,7 +334,7 @@ pub mod matchers {
 			follow:  Follow,
 			/// Cached metadata.
 			meta:    OnceCell<Result<Metadata, WalkError>>,
-			/// The type the walker already reported, when it needs no stat to
+			/// The type the directory listing already reported, when it needs no stat to
 			/// trust: a regular file or directory seen without following links.
 			known_type: Option<FileType>,
 			/// Operand-relative path used for display and path-based matching, when it
@@ -354,12 +354,13 @@ pub mod matchers {
 				Self { fs, path, depth, follow, meta: OnceCell::new(), known_type: None, display }
 			}
 
-			/// Record the type the walker reported, so `-type`, `-prune` and the
-			/// like answer without a stat. Only regular files and directories
-			/// seen without following links qualify: the Windows walker reports
-			/// every reparse point as a symlink, which needs the stat to tell.
+			/// Record the type the directory listing reported, so `-type`,
+			/// `-prune` and the like answer without a stat. Only regular files
+			/// and directories seen without following links qualify: Windows
+			/// listings report every reparse point as a symlink, which needs the
+			/// stat to tell.
 			#[must_use]
-			pub fn with_walker_type(mut self, file_type: pi_walker::FileType) -> Self {
+			pub fn with_listed_type(mut self, file_type: pi_walker::FileType) -> Self {
 				if !self.follow() {
 					self.known_type = match file_type {
 						pi_walker::FileType::File => Some(FileType::Regular),
@@ -4508,7 +4509,7 @@ pub mod matchers {
 }
 
 use std::{
-	cell::{Cell, RefCell},
+	cell::RefCell,
 	error::Error,
 	io::Write,
 	path::{Path, PathBuf},
@@ -4720,43 +4721,24 @@ fn finish_find_walk(
 	}
 }
 
-fn walker_follow_links(follow: Follow) -> pi_walker::FollowLinks {
-	match follow {
-		Follow::Never => pi_walker::FollowLinks::Never,
-		Follow::Roots => pi_walker::FollowLinks::Roots,
-		Follow::Always => pi_walker::FollowLinks::Always,
+fn find_tree_options(config: &Config) -> pi_walker::walk::TreeOptions {
+	pi_walker::walk::TreeOptions {
+		hidden: true,
+		follow: match config.follow {
+			Follow::Never => pi_walker::walk::Follow::Never,
+			Follow::Roots => pi_walker::walk::Follow::Roots,
+			Follow::Always => pi_walker::walk::Follow::Always,
+		},
+		sorted: config.sorted_output,
+		emit_root: true,
+		min_depth: config.min_depth,
+		max_depth: (config.max_depth != usize::MAX).then_some(config.max_depth),
+		contents_first: config.depth_first,
+		same_file_system: config.same_file_system,
+		..pi_walker::walk::TreeOptions::default()
 	}
 }
 
-fn build_find_walk_request(
-	fs: &pi_vfs::BlockingFs,
-	config: &Config,
-	root: &Path,
-) -> pi_walker::WalkRequest {
-	pi_walker::WalkRequest::new(root)
-		.filesystem(fs.clone())
-		.hidden(true)
-		.gitignore(false)
-		.skip_git(false)
-		.skip_node_modules(false)
-		.follow_links(walker_follow_links(config.follow))
-		.detail(pi_walker::WalkDetail::Minimal)
-		.order(if config.sorted_output {
-			pi_walker::WalkOrder::Path
-		} else {
-			pi_walker::WalkOrder::Unordered
-		})
-		.emit_root(true)
-		.depth(config.min_depth, config.max_depth)
-		.visit_order(if config.depth_first {
-			pi_walker::VisitOrder::ContentsFirst
-		} else {
-			pi_walker::VisitOrder::PreOrder
-		})
-		.directory_errors(pi_walker::DirectoryErrorMode::Visit)
-		.same_file_system(config.same_file_system)
-		.cache(false)
-}
 fn process_dir_walk_request(
 	config: &Config,
 	deps: &dyn Dependencies,
@@ -4767,74 +4749,66 @@ fn process_dir_walk_request(
 	operand: &Path,
 ) -> i32 {
 	let fs = host.fs().clone();
-	let request = build_find_walk_request(&fs, config, resolved_root);
-	let current_dir = RefCell::new(None);
-	let ret = Cell::new(0);
-	let local_quit = Cell::new(false);
-	let mut walk_stderr = host.stderr_clone();
-	let status = request.for_each_entry_with_heartbeat(
-		host.cancel_heartbeat(),
-		|entry: pi_walker::EntryMeta<'_>| {
-			let walk_entry = WalkEntry::new(
-				fs.clone(),
-				entry.absolute_path.as_ref().to_path_buf(),
-				entry.depth,
-				config.follow,
-			)
-			.with_walker_type(entry.file_type);
-			let mut current_dir = current_dir.borrow_mut();
-			let mut ret_value = ret.get();
-			let (should_quit, should_skip_current_dir) = apply_find_entry(
-				walk_entry,
-				operand,
-				resolved_root,
-				deps,
-				host,
-				matcher,
-				&mut current_dir,
-				&mut ret_value,
-			);
-			ret.set(ret_value);
-			if host.sigpipe_hit() {
-				Ok(pi_walker::WalkDecision::Stop)
-			} else if should_quit {
-				local_quit.set(true);
-				Ok(pi_walker::WalkDecision::Stop)
-			} else if should_skip_current_dir {
-				Ok(pi_walker::WalkDecision::SkipDescend)
-			} else {
-				Ok(pi_walker::WalkDecision::Include)
-			}
-		},
-		|error| {
-			ret.set(1);
-			let _ = writeln!(walk_stderr, "Error: {}: {}", error.path.display(), error.error);
-			Ok(pi_walker::WalkDecision::Include)
+	let layer = pi_walker::Fs::new(&fs, resolved_root);
+	let stop = host.cancel_stop();
+	let mut current_dir = None;
+	let mut ret = 0;
+	let mut local_quit = false;
+	let status = pi_walker::walk::tree(
+		&layer,
+		resolved_root,
+		&find_tree_options(config),
+		&stop,
+		|event| match event {
+			pi_walker::walk::Event::Entry(entry) => {
+				let walk_entry =
+					WalkEntry::new(fs.clone(), entry.abs.to_path_buf(), entry.depth, config.follow)
+						.with_listed_type(entry.file_type);
+				let (should_quit, should_skip_current_dir) = apply_find_entry(
+					walk_entry,
+					operand,
+					resolved_root,
+					deps,
+					host,
+					matcher,
+					&mut current_dir,
+					&mut ret,
+				);
+				if host.sigpipe_hit() {
+					pi_walker::walk::Action::Stop
+				} else if should_quit {
+					local_quit = true;
+					pi_walker::walk::Action::Stop
+				} else if should_skip_current_dir {
+					pi_walker::walk::Action::SkipDir
+				} else {
+					pi_walker::walk::Action::Continue
+				}
+			},
+			pi_walker::walk::Event::Error(error) => {
+				ret = 1;
+				let _ = writeln!(host.stderr, "Error: {}: {}", error.path.display(), error.error);
+				pi_walker::walk::Action::Continue
+			},
 		},
 	);
-	let mut current_dir = current_dir.into_inner();
-	let mut ret_value = ret.get();
 	match status {
-		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => {
-			finish_find_walk(deps, host, matcher, &mut current_dir, &mut ret_value);
-			if local_quit.get() {
+		Ok(_) => {
+			if local_quit {
 				*quit = true;
 			}
-			ret_value
 		},
-		Err(pi_walker::WalkError::Interrupted(err)) => {
-			ret_value = 1;
-			let _ = writeln!(host.stderr, "Error: {err}");
-			finish_find_walk(deps, host, matcher, &mut current_dir, &mut ret_value);
-			ret_value
+		Err(pi_walker::walk::WalkError::Stopped) => {
+			ret = 1;
+			let _ = writeln!(host.stderr, "Error: cancelled");
 		},
-		Err(pi_walker::WalkError::InvalidData { path, message }) => {
-			ret_value = 1;
-			let _ = writeln!(host.stderr, "Error: {}: {message}", path.display());
-			finish_find_walk(deps, host, matcher, &mut current_dir, &mut ret_value);
-			ret_value
+		Err(pi_walker::walk::WalkError::Root { path, error }) => {
+			ret = 1;
+			let _ = writeln!(host.stderr, "Error: {}: {error}", path.display());
 		},
 	}
+	finish_find_walk(deps, host, matcher, &mut current_dir, &mut ret);
+	ret
 }
 
 fn process_dir(

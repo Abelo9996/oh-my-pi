@@ -17,7 +17,7 @@ use super::{Loc, Receiver};
 use crate::rsync::{
 	flists::lock,
 	checksum::{SumHead, Strong},
-	consts::{CHUNK_SIZE, MSK_ACTIVE_RECEIVER, MSK_ALLOW_FLUSH},
+	consts::CHUNK_SIZE,
 	exit::{RERR_FILEIO, RERR_PROTOCOL, RsyncError},
 	flist::FileEntry,
 	log::{Debug, LogCode, Role, big_num},
@@ -556,9 +556,7 @@ impl Receiver<'_, '_> {
 				Token::Literal(data) => {
 					progress_show(ctx, offset, total);
 					if keepalive {
-						self.out
-							.maybe_keepalive(MSK_ALLOW_FLUSH | MSK_ACTIVE_RECEIVER)
-							.map_err(RsyncError::from_stream)?;
+						self.out.note_active_receiver();
 					}
 					if deltasum >= 3 {
 						let text = format!("data recv {} at {}\n", data.len(), big_num(offset as i64, 0));
@@ -578,9 +576,7 @@ impl Receiver<'_, '_> {
 				Token::Block(index) => {
 					progress_show(ctx, offset, total);
 					if keepalive {
-						self.out
-							.maybe_keepalive(MSK_ALLOW_FLUSH | MSK_ACTIVE_RECEIVER)
-							.map_err(RsyncError::from_stream)?;
+						self.out.note_active_receiver();
 					}
 					let i = i32::try_from(index).unwrap_or(i32::MAX);
 					if i >= head.count {

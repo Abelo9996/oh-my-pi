@@ -45,12 +45,12 @@ use crate::rsync::exit::{
 use crate::rsync::filter::{FilterConfig, FileReader, Filters, ImpliedFilters, RuleArg};
 use crate::rsync::flist::FlistOpts;
 use crate::rsync::flists::Flists;
-use crate::rsync::generator::{self, DestTrees, Sibling};
+use crate::rsync::generator::{self, DestTrees, SibOut, Sibling};
 use crate::rsync::handshake::{self, Negotiated, Roles, Setup};
 use crate::rsync::iconv;
 use crate::rsync::log::{self, Info, LogCode, LogConfig, Logger, OutLevels, Role, Stats};
 use crate::rsync::meta::MetaOpts;
-use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, WriteConfig};
+use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, ReadProbe, WriteConfig};
 use crate::rsync::operands::{self, OperandConfig, Operands, Remote};
 use crate::rsync::options::{self, FilesFromFd, Options, Parsed};
 use crate::rsync::paths::{self, bytes_os_lossy};
@@ -646,7 +646,7 @@ struct Shared {
 	abort: Arc<AtomicBool>,
 	first: Mutex<Option<Failure>>,
 	shutting_down: AtomicBool,
-	sib: Mutex<Option<flume::Sender<Sibling>>>,
+	sib: Mutex<Option<Arc<SibOut>>>,
 	to_sender: Mutex<Option<flume::Sender<Msg>>>,
 	flists: Mutex<Option<Arc<Flists>>>,
 	first_message: AtomicBool,
@@ -676,7 +676,7 @@ impl Shared {
 		drop(first);
 		self.abort.store(true, Ordering::Relaxed);
 		if let Some(sib) = lock(&self.sib).as_ref() {
-			let _ = sib.send(Sibling::ErrorExit(code));
+			sib.send_now(Sibling::ErrorExit(code));
 		}
 	}
 
@@ -756,8 +756,9 @@ impl Shared {
 			MSG_NO_SEND => {
 				let wire = int();
 				let ndx = lock(&self.flists).as_ref().map_or(wire, |f| f.from_wire(wire));
+				// The receiver forwards it to the generator (send_msg_int on its pipe).
 				if let Some(sib) = lock(&self.sib).as_ref() {
-					let _ = sib.send(Sibling::NoSend(ndx));
+					sib.msg(Sibling::NoSend(ndx));
 				}
 			}
 			MSG_ERROR_EXIT => self.peer_error_exit(&msg.payload),
@@ -793,7 +794,7 @@ impl Shared {
 		}
 		self.abort.store(true, Ordering::Relaxed);
 		if let Some(sib) = lock(&self.sib).as_ref() {
-			let _ = sib.send(Sibling::ErrorExit(val));
+			sib.send_now(Sibling::ErrorExit(val));
 		}
 	}
 
@@ -1081,7 +1082,13 @@ struct Streams {
 	counters: IoCounters,
 }
 
-fn make_streams(conn_reader: Box<dyn Read + Send>, conn_writer: Box<dyn Write + Send>, abort: &Arc<AtomicBool>, opts: &Options) -> Streams {
+fn make_streams(
+	conn_reader: Box<dyn Read + Send>,
+	conn_writer: Box<dyn Write + Send>,
+	probe: Option<ReadProbe>,
+	abort: &Arc<AtomicBool>,
+	opts: &Options,
+) -> Streams {
 	let counters = IoCounters::default();
 	let timeout = (opts.io_timeout > 0).then(|| Duration::from_secs(opts.io_timeout as u64));
 	let wcfg = WriteConfig {
@@ -1091,6 +1098,7 @@ fn make_streams(conn_reader: Box<dyn Read + Send>, conn_writer: Box<dyn Write + 
 	};
 	let writer = MuxWriter::new(conn_writer, counters.clone(), wcfg);
 	let mut reader = MuxReader::new(conn_reader, counters.clone(), Arc::clone(abort), ReadConfig { timeout });
+	reader.set_probe(probe);
 	reader.link_writer(writer.clone());
 	reader.set_counting(false);
 	writer.set_counting(false);
@@ -1303,13 +1311,13 @@ fn client_start(
 	let mut batch_gen: Option<Box<dyn Read + Send>> = None;
 	let mut batch_flags = None;
 	let mut batch_writer = None;
-	let (conn_reader, conn_writer, peer): (Box<dyn Read + Send>, Box<dyn Write + Send>, PeerKind) =
+	let (conn_reader, conn_writer, probe, peer): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, PeerKind) =
 		match (&ops.remote, batch) {
 			(None, Some(BatchFiles::Read { data, flags })) => {
 				batch_flags = Some(flags);
 				let (gen_out, gen_in) = transport::local_pair(Arc::clone(&abort));
 				batch_gen = Some(gen_in.reader);
-				(data, gen_out.writer, PeerKind::None)
+				(data, gen_out.writer, None, PeerKind::None)
 			}
 			(None, other) => {
 				if let Some(BatchFiles::Write { data, script }) = other {
@@ -1335,7 +1343,7 @@ fn client_start(
 					.name("rsync-local-server".into())
 					.spawn(move || server_main(&sio, sopts, Some(LocalServer { conn: server, client_info: info, filters: sfilters })))
 					.map_err(|e| RsyncError::new(crate::rsync::exit::RERR_IPC, syserr_text(Role::Client, &e, "fork")).at("pipe.c", 112))?;
-				(client.reader, client.writer, PeerKind::Local { handle: Some(handle), kill: Arc::clone(&kill) })
+				(client.reader, client.writer, client.probe, PeerKind::Local { handle: Some(handle), kill: Arc::clone(&kill) })
 			}
 			(Some(remote), other) => {
 				if let Some(BatchFiles::Write { data, script }) = other {
@@ -1352,11 +1360,12 @@ fn client_start(
 				}
 				let reader = std::mem::replace(&mut conn.reader, Box::new(io::empty()));
 				let writer = std::mem::replace(&mut conn.writer, Box::new(io::sink()));
+				let probe = conn.probe.take();
 				let peer = if conn.child.is_some() { PeerKind::Child(Some(conn)) } else { PeerKind::None };
-				(reader, writer, peer)
+				(reader, writer, probe, peer)
 			}
 		};
-	let streams = make_streams(conn_reader, conn_writer, &abort, &opts);
+	let streams = make_streams(conn_reader, conn_writer, probe, &abort, &opts);
 	let end = ClientRun {
 		io,
 		opts,
@@ -1841,12 +1850,12 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		Arc::clone(&shared_slot),
 	);
 	let local_server = local.is_some();
-	let (conn_reader, conn_writer, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Vec<u8>, Option<Filters>) =
+	let (conn_reader, conn_writer, probe, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Vec<u8>, Option<Filters>) =
 		match local {
-			Some(LocalServer { conn, client_info, filters }) => (conn.reader, conn.writer, client_info, Some(filters)),
-			None => (Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), Vec::new(), None),
+			Some(LocalServer { conn, client_info, filters }) => (conn.reader, conn.writer, conn.probe, client_info, Some(filters)),
+			None => (Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, Vec::new(), None),
 		};
-	let mut streams = make_streams(conn_reader, conn_writer, &abort, &opts);
+	let mut streams = make_streams(conn_reader, conn_writer, probe, &abort, &opts);
 	let mut opts = opts;
 	if opts.secluded_pending() {
 		let argv = match handshake::read_secluded_args(&mut streams.reader, &io.fs, &io.cwd, opts.max_alloc) {
@@ -2491,11 +2500,23 @@ impl SideRun {
 				return outcome;
 			}
 		};
+		// do_recv: io_flush(FULL_FLUSH) before the fork, so messages such as
+		// "created directory" leave now and the generator starts with nothing
+		// pending (its first refill then writes its requests on their own).
+		if let Err(e) = writer.clone().flush() {
+			fail(ctx.stream_error(&e), Role::PreReceiver);
+			return outcome;
+		}
 		writer.set_role(Role::Generator);
 		reader.set_role(Role::Receiver);
 		outcome.role = Role::Generator;
-		let (sib_tx, sib_rx) = flume::unbounded::<Sibling>();
-		*lock(&shared.sib) = Some(sib_tx.clone());
+		// The receiver → generator pipe. The receiver's refills of its socket input
+		// deliver what it queued for the generator; they never write the socket the
+		// generator writes (upstream's receiver is a separate process).
+		let (sib_out, sib_in) = generator::sib_pipe(&flists, ctx.inc_recurse);
+		*lock(&shared.sib) = Some(Arc::clone(&sib_out));
+		let hook_out = Arc::clone(&sib_out);
+		reader.set_refill_hook(Some(Box::new(move |ready| hook_out.refill(ready))));
 		let xattrs = fr.xattrs();
 		let acls = fr.acls();
 		let mut gen_filters = self.filters.clone();
@@ -2514,7 +2535,7 @@ impl SideRun {
 			let trees_ref = &trees;
 			let flists_ref = &flists;
 			let generator_thread = s.spawn(move || {
-				let res = generator::run(&gen_ctx, trees_ref, flists_ref, xattrs, acls, gen_filters, &gen_writer, &sib_rx);
+				let res = generator::run(&gen_ctx, trees_ref, flists_ref, xattrs, acls, gen_filters, &gen_writer, &sib_in);
 				match res {
 					Ok(()) => {
 						gen_shared.shutting_down.store(true, Ordering::Relaxed);
@@ -2551,20 +2572,23 @@ impl SideRun {
 			let end_ref = &end;
 			let totals_ref = &mut client_totals;
 			let mut batch_gen = batch_gen.as_mut();
+			let sib_out = &*sib_out;
 			let recv = s.spawn(move || {
 				let res = match batch_gen.as_deref_mut() {
 					Some(bg) => {
 						let bg: &mut dyn Read = &mut **bg;
-						receiver::run_batch(&recv_ctx, trees_ref, flists_ref, fr_ref, reader_ref, &recv_writer, &sib_tx, Some(bg))
+						receiver::run_batch(&recv_ctx, trees_ref, flists_ref, fr_ref, reader_ref, &recv_writer, sib_out, Some(bg))
 					}
-					None => receiver::run(&recv_ctx, trees_ref, flists_ref, fr_ref, reader_ref, &recv_writer, &sib_tx),
+					None => receiver::run(&recv_ctx, trees_ref, flists_ref, fr_ref, reader_ref, &recv_writer, sib_out),
 				};
 				let res = res.and_then(|()| {
 					let totals = receiver_stats(&recv_ctx, reader_ref)?;
 					*lock(end_ref) = Some(Instant::now());
 					*totals_ref = totals;
-					let _ = sib_tx.send(Sibling::Done);
-					receiver_goodbye(&recv_ctx, fr_ref, reader_ref, batch_gen.as_deref_mut(), &sib_tx)
+					// do_recv: NDX_DONE to the generator, then io_flush(FULL_FLUSH).
+					sib_out.data(Sibling::Done);
+					sib_out.flush_all();
+					receiver_goodbye(&recv_ctx, fr_ref, reader_ref, batch_gen.as_deref_mut(), sib_out)
 				});
 				if let Err(err) = res {
 					recv_shared.fail(err, Role::Receiver);
@@ -2574,6 +2598,7 @@ impl SideRun {
 			let _ = generator_thread.join();
 		});
 		*lock(&shared.sib) = None;
+		reader.set_refill_hook(None);
 		outcome.end = lock(&end).take();
 		if !am_server {
 			let (read, written) = client_totals.unwrap_or((counters.total_read() as i64, counters.total_written() as i64));
@@ -2681,7 +2706,7 @@ fn receiver_goodbye(
 	fr: &mut FlistReceiver,
 	r: &mut MuxReader,
 	batch_gen: Option<&mut Box<dyn Read + Send>>,
-	sib: &flume::Sender<Sibling>,
+	sib: &SibOut,
 ) -> Result<(), RsyncError> {
 	if ctx.proto.version < 31 {
 		return Ok(());
@@ -2707,7 +2732,10 @@ fn receiver_goodbye(
 		}
 		read_del_stats(ctx, &mut **bg)?;
 	}
-	let _ = sib.send(Sibling::Done);
+	// read_final_goodbye: write_int(f_out, NDX_DONE) to the generator; it leaves with
+	// the next refill, which upstream's receiver starts at once.
+	sib.data(Sibling::Done);
+	sib.flush_all();
 	Ok(())
 }
 

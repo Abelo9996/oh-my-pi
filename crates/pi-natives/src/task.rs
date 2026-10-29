@@ -132,6 +132,27 @@ impl CancelToken {
 	pub fn into_core(self) -> core_cancel::CancelToken {
 		self.core
 	}
+
+	/// The N-API error for a failed pi-walker walk: a stop reports this token's
+	/// own cancellation error (`Aborted: Timeout`, …).
+	pub fn walk_failure(&self, err: pi_walker::walk::WalkError) -> Error {
+		match err {
+			pi_walker::walk::WalkError::Root { path, error } => Error::from_reason(format!(
+				"Native directory scan failed for {}: {error}",
+				path.display()
+			)),
+			pi_walker::walk::WalkError::Stopped => {
+				self.heartbeat().err().unwrap_or_else(|| Error::from_reason("Aborted"))
+			},
+		}
+	}
+}
+
+/// pi-walker walks and searches poll the token between directories and files.
+impl pi_walker::Stop for CancelToken {
+	fn stop(&self) -> bool {
+		self.aborted()
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

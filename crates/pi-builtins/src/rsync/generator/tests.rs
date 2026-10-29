@@ -9,7 +9,7 @@ use std::{
 	sync::{Arc, Mutex},
 };
 
-use super::{DestTrees, Sibling, basis, listing, run};
+use super::{DestTrees, SibIn, SibOut, Sibling, basis, listing, run, sib_pipe};
 #[cfg(unix)]
 use crate::rsync::{
 	consts::LINK_DEST,
@@ -146,25 +146,33 @@ fn trees_for(dest: &Path) -> DestTrees {
 	}
 }
 
+/// A receiver pipe that has already delivered the four phase ends a run needs. Keep the
+/// sending half alive while the generator runs.
+fn finished_pipe(ctx: &Ctx, flists: &Flists) -> (Arc<SibOut>, SibIn) {
+	let (out, sib_in) = sib_pipe(flists, ctx.inc_recurse);
+	for _ in 0..4 {
+		out.data(Sibling::Done);
+	}
+	out.flush_all();
+	(out, sib_in)
+}
+
 /// Runs the generator with a receiver that finishes every phase at once; returns the
 /// bytes it wrote for the sender.
 fn generate(ctx: &Ctx, trees: &DestTrees, flists: &Flists) -> Vec<u8> {
-	let (tx, rx) = flume::unbounded();
-	for _ in 0..4 {
-		tx.send(Sibling::Done).unwrap();
-	}
+	let (_out, sib_in) = finished_pipe(ctx, flists);
 	let xattrs = Arc::new(Mutex::new(XattrReceiver::new(1 << 30)));
-	generate_with(ctx, trees, flists, xattrs, &rx, false).0
+	generate_with(ctx, trees, flists, xattrs, &sib_in, false).0
 }
 
-/// [`generate`] with the receiver channel, xattr cache, and multiplexing chosen by the
+/// [`generate`] with the receiver pipe, xattr cache, and multiplexing chosen by the
 /// caller; also returns how many chunks the generator itself flushed to the stream.
 fn generate_with(
 	ctx: &Ctx,
 	trees: &DestTrees,
 	flists: &Flists,
 	xattrs: Arc<Mutex<XattrReceiver>>,
-	rx: &flume::Receiver<Sibling>,
+	rx: &SibIn,
 	multiplex: bool,
 ) -> (Vec<u8>, usize) {
 	let wire = Buf::default();
@@ -626,8 +634,8 @@ fn inc_lists(log: &Logger) -> (Arc<Flists>, FileList) {
 	(flists, second)
 }
 
-/// B4/O2: a file-list segment published while the generator waits must wake it at once
-/// (no lost wake-up, no polling): the generator then finishes the new segment.
+/// B4/O2: a file-list segment the receiver forwards while the generator waits wakes it
+/// at once (no lost wake-up, no polling): the generator then finishes the new segment.
 #[test]
 fn generator_wakes_when_a_segment_arrives_while_it_waits() {
 	let tmp = tempfile::tempdir().unwrap();
@@ -638,22 +646,26 @@ fn generator_wakes_when_a_segment_arrives_while_it_waits() {
 	let mut ctx = make_ctx(opts, tmp.path(), &log);
 	ctx.inc_recurse = true;
 	let (flists, second) = inc_lists(&ctx.logger);
-	let (tx, rx) = flume::unbounded();
+	let (sib_out, sib_in) = sib_pipe(&flists, true);
 	let publisher = {
 		let flists = Arc::clone(&flists);
 		std::thread::spawn(move || {
 			std::thread::sleep(std::time::Duration::from_millis(50));
 			flists.push(second);
 			flists.set_eof();
+			sib_out.data(Sibling::List);
+			sib_out.data(Sibling::ListEof);
 			for _ in 0..4 {
-				tx.send(Sibling::Done).unwrap();
+				sib_out.data(Sibling::Done);
 			}
+			sib_out.flush_all();
+			sib_out
 		})
 	};
 	let started = std::time::Instant::now();
 	let xattrs = Arc::new(Mutex::new(XattrReceiver::new(1 << 30)));
-	let (bytes, _) = generate_with(&ctx, &trees_for(tmp.path()), &flists, xattrs, &rx, false);
-	publisher.join().unwrap();
+	let (bytes, _) = generate_with(&ctx, &trees_for(tmp.path()), &flists, xattrs, &sib_in, false);
+	drop(publisher.join().unwrap());
 	assert!(started.elapsed() < std::time::Duration::from_secs(5));
 	let (reqs, dones) = parse_with(&bytes, false);
 	assert!(reqs.iter().any(|r| r.ndx == 4), "the late segment's file was requested");
@@ -661,12 +673,14 @@ fn generator_wakes_when_a_segment_arrives_while_it_waits() {
 	assert_eq!(dones, 2 + 3);
 }
 
-/// B / O2: the generator flushes only when it must block. With every list and every
-/// receiver report already available, its whole output leaves in the final flush
-/// (upstream: wait_for_receiver reads queued input without flushing, and
-/// maybe_flush_socket never flushes before the last list arrived).
+/// G2 (upstream perform_io model): the generator writes its buffered output once per
+/// refill of its pipe input and never while pipe input it already read is waiting.
+/// Here the receiver delivered the second list, the list end, and every phase end in
+/// one batch before the generator started: the refill at the end of the first list
+/// writes that list's requests (a reference capture's `D:303`), everything after it is
+/// handled from the inbox without I/O, and the rest leaves in the final flush.
 #[test]
-fn generator_does_not_flush_when_nothing_blocks() {
+fn generator_flushes_once_per_refill() {
 	let tmp = tempfile::tempdir().unwrap();
 	let mut opts = base_opts();
 	opts.dry_run = true;
@@ -675,15 +689,73 @@ fn generator_does_not_flush_when_nothing_blocks() {
 	let mut ctx = make_ctx(opts, tmp.path(), &log);
 	ctx.inc_recurse = true;
 	let (flists, second) = inc_lists(&ctx.logger);
+	let (_out, sib_in) = {
+		let (out, sib_in) = sib_pipe(&flists, true);
+		flists.push(second);
+		flists.set_eof();
+		out.data(Sibling::List);
+		out.data(Sibling::ListEof);
+		for _ in 0..4 {
+			out.data(Sibling::Done);
+		}
+		out.flush_all();
+		(out, sib_in)
+	};
+	let xattrs = Arc::new(Mutex::new(XattrReceiver::new(1 << 30)));
+	let (bytes, writes) = generate_with(&ctx, &trees_for(tmp.path()), &flists, xattrs, &sib_in, false);
+	assert_eq!(writes, 2);
+	let (reqs, dones) = parse_with(&bytes, false);
+	assert!(reqs.iter().any(|r| r.ndx == 4), "the forwarded list's file was requested");
+	assert_eq!(dones, 2 + 3);
+}
+
+/// G2: a list the receiver has published but not yet forwarded stays invisible to the
+/// generator (upstream's generator learns of lists only by reading its pipe).
+#[test]
+fn generator_ignores_lists_not_forwarded_yet() {
+	let tmp = tempfile::tempdir().unwrap();
+	let mut opts = base_opts();
+	opts.dry_run = true;
+	opts.do_xfers = false;
+	let log = Buf::default();
+	let mut ctx = make_ctx(opts, tmp.path(), &log);
+	ctx.inc_recurse = true;
+	let (flists, second) = inc_lists(&ctx.logger);
+	let (sib_out, sib_in) = sib_pipe(&flists, true);
+	// Published in the registry, but only the list end and phase ends are forwarded.
 	flists.push(second);
 	flists.set_eof();
-	let (tx, rx) = flume::unbounded();
+	sib_out.data(Sibling::ListEof);
 	for _ in 0..4 {
-		tx.send(Sibling::Done).unwrap();
+		sib_out.data(Sibling::Done);
 	}
+	sib_out.flush_all();
 	let xattrs = Arc::new(Mutex::new(XattrReceiver::new(1 << 30)));
-	let (_, writes) = generate_with(&ctx, &trees_for(tmp.path()), &flists, xattrs, &rx, false);
-	assert_eq!(writes, 1);
+	let (bytes, _) = generate_with(&ctx, &trees_for(tmp.path()), &flists, xattrs, &sib_in, false);
+	let (reqs, _) = parse_with(&bytes, false);
+	assert!(reqs.iter().all(|r| r.ndx != 4), "an unforwarded list is never generated");
+}
+
+/// G3: the receiver's pipe output leaves only at its refills and flushes, messages
+/// before data; when input is already waiting, a refill that wrote messages keeps the
+/// data back (upstream perform_io).
+#[test]
+fn receiver_pipe_batches_like_perform_io() {
+	let flists = Flists::new();
+	let (out, sib_in) = sib_pipe(&flists, true);
+	out.data(Sibling::List);
+	out.msg(Sibling::Success(3));
+	out.msg(Sibling::Success(4));
+	assert!(sib_in.drain().is_empty(), "nothing leaves before a refill");
+	out.refill(true);
+	assert_eq!(sib_in.drain(), [Sibling::Success(3), Sibling::Success(4)]);
+	out.data(Sibling::Done);
+	out.refill(true);
+	assert_eq!(sib_in.drain(), [Sibling::List, Sibling::Done]);
+	out.msg(Sibling::Redo(5));
+	out.data(Sibling::ListEof);
+	out.refill(false);
+	assert_eq!(sib_in.drain(), [Sibling::Redo(5), Sibling::ListEof]);
 }
 
 /// M: `--mkpath src/ dst/new/deeper/` creates all three components and, since the
@@ -787,11 +859,8 @@ fn copy_dest_uptodate_dir_keeps_long_xattrs() {
 	let flists = publish(vec![foo], &ctx.logger);
 	let mut trees = trees_for(&dest);
 	trees.alt_dirs.push(alt_tree);
-	let (tx, rx) = flume::unbounded();
-	for _ in 0..4 {
-		tx.send(Sibling::Done).unwrap();
-	}
-	generate_with(&ctx, &trees, &flists, Arc::new(Mutex::new(receiver)), &rx, false);
+	let (_out, sib_in) = finished_pipe(&ctx, &flists);
+	generate_with(&ctx, &trees, &flists, Arc::new(Mutex::new(receiver)), &sib_in, false);
 	let got = open_tree(&dest).get_xattr(Path::new("foo"), std::ffi::OsStr::new("dir1"), false).unwrap();
 	assert_eq!(got, Some(value));
 }
@@ -810,12 +879,9 @@ fn only_write_batch_never_requests_source_removal() {
 		let log = Buf::default();
 		let ctx = make_ctx(opts, dest, &log);
 		let flists = publish(vec![entry("a", 0o100644, 4, T)], &ctx.logger);
-		let (tx, rx) = flume::unbounded();
-		for _ in 0..4 {
-			tx.send(Sibling::Done).unwrap();
-		}
+		let (_out, sib_in) = finished_pipe(&ctx, &flists);
 		let xattrs = Arc::new(Mutex::new(XattrReceiver::new(1 << 30)));
-		let (bytes, _) = generate_with(&ctx, &trees_for(dest), &flists, xattrs, &rx, true);
+		let (bytes, _) = generate_with(&ctx, &trees_for(dest), &flists, xattrs, &sib_in, true);
 		frames(&bytes).iter().filter(|(code, _)| *code == crate::rsync::consts::MSG_SUCCESS).count()
 	};
 	// The up-to-date file is reported as done for --remove-source-files...

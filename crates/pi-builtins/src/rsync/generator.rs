@@ -11,14 +11,19 @@
 //! `ndx`, the itemize flags, an optional basis-type byte and xname, an optional
 //! xattr-value request, then a sum header and the block sums.
 //!
-//! The receiver reports back over a channel of [`Sibling`] messages (upstream's
-//! receiver→generator pipe): redo requests for files whose checksum failed,
+//! The receiver reports back through a [`SibOut`]/[`SibIn`] pipe of [`Sibling`] items
+//! (upstream's receiver→generator pipe): redo requests for files whose checksum failed,
 //! successes (forwarded to the sender for `--remove-source-files`, and the trigger for
 //! linking hard-link followers), failures, and the end of each phase. The generator
 //! drives the phase protocol (NDX_DONE per phase, the redo phase with full-length
 //! sums, the `--delay-updates` and late-deletion phases of protocols 29–31+), the
 //! `--delete-*` passes through [`crate::rsync::delete::Deleter`], `--list-only`
 //! output, and the end-of-run directory touch-up.
+//!
+//! The generator learns of new file-list segments only through that pipe, and it
+//! writes its buffered socket output where upstream's generator process does: when it
+//! must read more pipe input and has none queued (`wait_for_receiver`), at the loop
+//! checks once the lists are complete, and at the end.
 //!
 //! The generator keeps its per-entry state (the mode `dest_mode` computes without
 //! `-p`, FLAG_FILE_SENT / FLAG_MISSING_DIR / FLAG_DIR_CREATED, hard-link progress) in a
@@ -68,7 +73,7 @@ use crate::rsync::{
 	xattr::{self, XattrCtx, XattrReceiver, XattrSet},
 };
 
-/// Receiver → generator messages (upstream's sibling pipe).
+/// Receiver → generator items (upstream's error pipe).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sibling {
 	/// The received file failed its checksum: request it again in the redo phase.
@@ -81,6 +86,89 @@ pub(crate) enum Sibling {
 	Done,
 	/// The run is ending with this exit code.
 	ErrorExit(i32),
+	/// The receiver read one more file-list segment (upstream forwards its bytes).
+	List,
+	/// The receiver read NDX_FLIST_EOF.
+	ListEof,
+}
+
+#[derive(Default)]
+struct Outbox {
+	/// Upstream `iobuf.msg` of the receiver: MSG_SUCCESS / MSG_REDO / MSG_NO_SEND.
+	msgs: Vec<Sibling>,
+	/// Upstream `iobuf.out` of the receiver: NDX_DONE, forwarded lists, NDX_FLIST_EOF.
+	data: Vec<Sibling>,
+}
+
+/// The receiver's end of the receiver → generator pipe. Items are buffered and handed
+/// to the generator only where upstream's receiver writes its pipe output: on each
+/// refill of its socket input (messages first; data too unless input was already
+/// waiting, upstream `perform_io`) and at its `io_flush` calls.
+pub(crate) struct SibOut {
+	outbox: Mutex<Outbox>,
+	tx: flume::Sender<Vec<Sibling>>,
+}
+
+impl SibOut {
+	/// Queues a message-class item.
+	pub(crate) fn msg(&self, item: Sibling) {
+		lock(&self.outbox).msgs.push(item);
+	}
+
+	/// Queues a data-class item.
+	pub(crate) fn data(&self, item: Sibling) {
+		lock(&self.outbox).data.push(item);
+	}
+
+	/// Hands `item` to the generator at once (an error exit).
+	pub(crate) fn send_now(&self, item: Sibling) {
+		let _ = self.tx.send(vec![item]);
+	}
+
+	/// One `perform_io` pass before reading more socket input: pending messages go out;
+	/// pending data too unless `input_ready` (the pass that wrote the messages already
+	/// satisfied the read).
+	pub(crate) fn refill(&self, input_ready: bool) {
+		let mut outbox = lock(&self.outbox);
+		let mut batch = std::mem::take(&mut outbox.msgs);
+		if batch.is_empty() || !input_ready {
+			batch.append(&mut outbox.data);
+		}
+		drop(outbox);
+		if !batch.is_empty() {
+			let _ = self.tx.send(batch);
+		}
+	}
+
+	/// `io_flush(FULL_FLUSH)`: everything queued goes out (messages first).
+	pub(crate) fn flush_all(&self) {
+		self.refill(false);
+	}
+}
+
+/// The generator's end of the pipe plus the file-list view it starts with (the lists
+/// read before the generator started).
+pub(crate) struct SibIn {
+	rx: flume::Receiver<Vec<Sibling>>,
+	segments: usize,
+	eof: bool,
+}
+
+impl SibIn {
+	/// Everything delivered so far, in order (tests).
+	#[cfg(test)]
+	pub(crate) fn drain(&self) -> Vec<Sibling> {
+		self.rx.try_iter().flatten().collect()
+	}
+}
+
+/// Creates the receiver → generator pipe; the generator's initial view is the lists
+/// `flists` holds now.
+pub(crate) fn sib_pipe(flists: &Flists, inc_recurse: bool) -> (Arc<SibOut>, SibIn) {
+	let (tx, rx) = flume::unbounded();
+	let out = Arc::new(SibOut { outbox: Mutex::new(Outbox::default()), tx });
+	let sib_in = SibIn { rx, segments: flists.len(), eof: !inc_recurse || flists.is_eof() };
+	(out, sib_in)
 }
 
 /// Every local tree the receiving side writes to.
@@ -116,7 +204,7 @@ pub(crate) fn run(
 	acls: Arc<Mutex<AclReceiver>>,
 	filters: Filters,
 	out: &MuxWriter,
-	sib: &flume::Receiver<Sibling>,
+	sib: &SibIn,
 ) -> Result<(), RsyncError> {
 	let mut generator = Gen::new(ctx, trees, flists, xattrs, acls, filters, out, sib);
 	generator.generate_files()
@@ -252,9 +340,13 @@ struct Gen<'a> {
 	acls: Arc<Mutex<AclReceiver>>,
 	filters: Filters,
 	out: MuxWriter,
-	sib: &'a flume::Receiver<Sibling>,
-	/// One token per file-list segment (or EOF) published after the generator started.
-	flists_changed: flume::Receiver<()>,
+	sib: &'a flume::Receiver<Vec<Sibling>>,
+	/// Pipe input already read (upstream `iobuf.in` of the generator).
+	inbox: VecDeque<Sibling>,
+	/// File-list segments the generator has read (upstream: lists it received).
+	seen_segments: usize,
+	/// The generator read NDX_FLIST_EOF (upstream `flist_eof`).
+	seen_eof: bool,
 	ndx_out: NdxCodec,
 	deleter: Deleter,
 	log: Logger,
@@ -297,7 +389,6 @@ struct Gen<'a> {
 	active_files: i32,
 	active_bytes: i64,
 	touch_counter: i32,
-	last_flush: Instant,
 }
 
 fn is_not_found(err: &io::Error) -> bool {
@@ -385,7 +476,7 @@ impl<'a> Gen<'a> {
 		acls: Arc<Mutex<AclReceiver>>,
 		filters: Filters,
 		out: &MuxWriter,
-		sib: &'a flume::Receiver<Sibling>,
+		sib: &'a SibIn,
 	) -> Self {
 		let opts: &Options = &ctx.opts;
 		let log = ctx.logger.clone();
@@ -438,8 +529,10 @@ impl<'a> Gen<'a> {
 			acls,
 			filters,
 			out: out.clone(),
-			sib,
-			flists_changed: flists.watch(),
+			sib: &sib.rx,
+			inbox: VecDeque::new(),
+			seen_segments: sib.segments,
+			seen_eof: sib.eof,
 			ndx_out,
 			deleter,
 			log,
@@ -481,7 +574,6 @@ impl<'a> Gen<'a> {
 			active_files: 0,
 			active_bytes: 0,
 			touch_counter: 0,
-			last_flush: Instant::now(),
 		}
 	}
 
@@ -594,7 +686,7 @@ impl<'a> Gen<'a> {
 
 	/// flist_for_ndx: the generator-live segment holding `ndx` (gap index included).
 	fn seg_for(&self, ndx: i32) -> Option<usize> {
-		(self.first_seg..self.flists.len()).find(|&seg| {
+		(self.first_seg..self.seen_segments).find(|&seg| {
 			let (Some(start), Some(len)) = (self.flists.segment_start(seg), self.flists.segment_len(seg))
 			else {
 				return false;
@@ -690,9 +782,28 @@ impl<'a> Gen<'a> {
 		self.ndx_out.write(&mut self.out, wire).map_err(RsyncError::from_stream)
 	}
 
+	/// io_flush: writes buffered output and, in the same `perform_io` passes, reads the
+	/// pipe input that is waiting. Nothing happens when nothing is buffered.
 	fn flush(&mut self) -> Result<(), RsyncError> {
-		self.last_flush = Instant::now();
-		self.out.flush().map_err(RsyncError::from_stream)
+		if !self.out.output_pending() {
+			return Ok(());
+		}
+		self.out.flush().map_err(RsyncError::from_stream)?;
+		self.pull_input();
+		Ok(())
+	}
+
+	/// Moves every batch the receiver has delivered into the inbox (no waiting).
+	fn pull_input(&mut self) {
+		while let Ok(batch) = self.sib.try_recv() {
+			self.inbox.extend(batch);
+		}
+	}
+
+	/// Entries in the lists the generator has read and not finished (upstream
+	/// `file_total` in the generator process).
+	fn view_file_total(&self) -> usize {
+		(self.first_seg..self.seen_segments).filter_map(|seg| self.flists.segment_len(seg)).sum()
 	}
 
 	/// send_msg_success: tells the sender a file is done (for --remove-source-files).
@@ -718,11 +829,13 @@ impl<'a> Gen<'a> {
 		self.out.send_msg(MSG_SUCCESS, &payload).map_err(RsyncError::from_stream)
 	}
 
-	/// Upstream's loop-check keepalive / maybe_flush_socket between entries.
+	/// Upstream's loop-check keepalive / maybe_flush_socket(0) between entries. Without
+	/// `--timeout` upstream's `last_io_out` never advances, so once the lists are
+	/// complete every loop check flushes buffered data.
 	fn loopchk(&mut self) -> Result<(), RsyncError> {
 		if self.opts.io_timeout > 0 {
 			self.out.maybe_keepalive(MSK_ALLOW_FLUSH).map_err(RsyncError::from_stream)
-		} else if self.flists.is_eof() && self.last_flush.elapsed() >= Duration::from_secs(5) {
+		} else if self.seen_eof && self.out.data_pending() {
 			self.flush()
 		} else {
 			Ok(())
@@ -731,39 +844,40 @@ impl<'a> Gen<'a> {
 
 	// ----- the receiver side channel -----------------------------------------------
 
-	/// wait_for_receiver: handles the next receiver message, or returns once a new
-	/// file-list segment (or the end of the lists) was published. Like upstream, output
-	/// is flushed only when there is nothing to handle and the generator must block.
-	///
-	/// List changes arrive as queued tokens from [`Flists::watch`], so a segment
-	/// published between a caller's check and this wait still wakes it (a stale token
-	/// only causes a harmless extra pass through the caller's loop).
+	/// wait_for_receiver: handles the next item from the receiver (one message, a
+	/// phase end, or one more file list). Pipe input already read is handled without
+	/// any I/O; otherwise the generator refills like upstream's `perform_io`.
 	fn wait_for_receiver(&mut self) -> Result<(), RsyncError> {
-		match self.sib.try_recv() {
-			Ok(msg) => return self.handle_sibling(msg),
-			Err(flume::TryRecvError::Disconnected) => return self.sibling_gone(),
-			Err(flume::TryRecvError::Empty) => {},
+		if self.inbox.is_empty() {
+			self.refill()?;
 		}
-		if self.flists_changed.try_recv().is_ok() {
-			self.drain_flist_tokens();
-			return Ok(());
+		match self.inbox.pop_front() {
+			Some(item) => self.handle_sibling(item),
+			None => self.sibling_gone(),
 		}
-		self.flush()?;
+	}
+
+	/// perform_io for more pipe input. The first pass writes the messages sent since the
+	/// last output pass, or else the buffered data; when it wrote messages and input
+	/// was already waiting, the data stays buffered. Then every waiting batch is read,
+	/// blocking (with keepalives) until one arrives.
+	fn refill(&mut self) -> Result<(), RsyncError> {
+		let ready = !self.sib.is_empty();
+		self.out.output_pass(ready).map_err(RsyncError::from_stream)?;
+		// Output keeps going out while this pass waits for input; what is still
+		// unwritten when input arrives waits for the next pass, as upstream's.
+		let _grant = self.out.grant();
+		self.pull_input();
 		let mut last_idle = Instant::now();
-		loop {
+		while self.inbox.is_empty() {
 			self.check_cancel()?;
-			let woke = flume::Selector::new()
-				.recv(self.sib, Wake::Sibling)
-				.recv(&self.flists_changed, |_| Wake::List)
-				.wait_timeout(Duration::from_millis(100));
-			match woke {
-				Ok(Wake::Sibling(Ok(msg))) => return self.handle_sibling(msg),
-				Ok(Wake::Sibling(Err(_))) => return self.sibling_gone(),
-				Ok(Wake::List) => {
-					self.drain_flist_tokens();
-					return Ok(());
+			match self.sib.recv_timeout(Duration::from_millis(100)) {
+				Ok(batch) => {
+					self.inbox.extend(batch);
+					self.pull_input();
 				},
-				Err(_) => {
+				Err(flume::RecvTimeoutError::Disconnected) => return Ok(()),
+				Err(flume::RecvTimeoutError::Timeout) => {
 					if last_idle.elapsed() >= Duration::from_millis(500) {
 						last_idle = Instant::now();
 						self.out.idle(MSK_ALLOW_FLUSH).map_err(|e| self.log.io_error(&e, RERR_STREAMIO, 0))?;
@@ -771,11 +885,7 @@ impl<'a> Gen<'a> {
 				},
 			}
 		}
-	}
-
-	/// Drops queued list-change tokens (the callers re-read the registry anyway).
-	fn drain_flist_tokens(&self) {
-		while self.flists_changed.try_recv().is_ok() {}
+		Ok(())
 	}
 
 	/// The receiver thread went away while the generator still waits on it.
@@ -794,6 +904,14 @@ impl<'a> Gen<'a> {
 			Sibling::Redo(ndx) => self.entry_status(Status::Redo, ndx),
 			Sibling::Success(ndx) => self.entry_status(Status::Success, ndx),
 			Sibling::NoSend(ndx) => self.entry_status(Status::NoSend, ndx),
+			Sibling::List => {
+				self.seen_segments += 1;
+				Ok(())
+			},
+			Sibling::ListEof => {
+				self.seen_eof = true;
+				Ok(())
+			},
 		}
 	}
 
@@ -987,19 +1105,17 @@ impl<'a> Gen<'a> {
 
 		let mut next_loopchk = 0i32;
 		self.cur_seg = 0;
-		loop {
-			if self.flists.len() <= self.cur_seg {
-				// Never block with requests still buffered (upstream flushes in perform_io).
-				self.flush()?;
-			}
-			if !self.flists.wait_for(self.cur_seg + 1, &self.ctx.cancel)? {
-				self.cur_seg = self.flists.len();
-				break;
+		'lists: loop {
+			// Upstream's cur_flist always exists here; this only guards an empty view.
+			while self.cur_seg >= self.seen_segments {
+				if self.seen_eof {
+					self.cur_seg = self.seen_segments;
+					break 'lists;
+				}
+				self.wait_for_receiver()?;
 			}
 			if self.hard_links() && self.inc() {
-				while !self.flists.is_eof()
-					&& (self.flists.file_total() as i32) < MIN_FILECNT_LOOKAHEAD / 2
-				{
+				while !self.seen_eof && (self.view_file_total() as i32) < MIN_FILECNT_LOOKAHEAD / 2 {
 					self.wait_for_receiver()?;
 				}
 			}
@@ -1044,15 +1160,15 @@ impl<'a> Gen<'a> {
 			}
 			loop {
 				self.check_for_finished_files(true)?;
-				if self.flists.len() > self.cur_seg + 1 || self.flists.is_eof() {
+				if self.seen_segments > self.cur_seg + 1 || self.seen_eof {
 					break;
 				}
 				self.wait_for_receiver()?;
 			}
-			if self.flists.len() <= self.cur_seg + 1 {
+			if self.seen_segments <= self.cur_seg + 1 {
 				// Upstream's cur_flist becomes NULL here, so check_for_finished_files
 				// frees (and sends NDX_DONE for) every remaining list, the last included.
-				self.cur_seg = self.flists.len();
+				self.cur_seg = self.seen_segments;
 				break;
 			}
 			self.cur_seg += 1;
@@ -1386,12 +1502,6 @@ impl<'a> Gen<'a> {
 		}
 		!(self.meta.xattrs && self.xattrs_differ(file, sx, false))
 	}
-}
-
-/// What ended a blocking wait in `wait_for_receiver`.
-enum Wake {
-	Sibling(Result<Sibling, flume::RecvError>),
-	List,
 }
 
 /// What the receiver reported about an entry (upstream FES_*).

@@ -14,6 +14,7 @@
 
 ### Changed
 
+- Removed manual scan cache invalidation triggers after file modifications; filesystem changes are now automatically detected via timestamp validation in the new `pi-walker` architecture
 - A muted `/live` call now stays shown as muted when the voice model starts a task or the session starts, instead of switching to "working" or "listening" while the microphone is still off ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
 - Model refreshes (startup, `/model`, toggling extended context) use far less CPU: unchanged models are no longer rebuilt on every pass, and with a custom agent directory or models config the model cache database is opened once per refresh instead of once per provider
 - `PI_INTENT_PROMPT` replaces the system-prompt guidance for the `i` intent field; `PI_INTENT_DESC` replaces its tool-schema description

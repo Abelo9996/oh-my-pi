@@ -221,12 +221,15 @@ fn sent_received(line: &str) -> (i64, i64) {
 	(at("sent"), at("received"))
 }
 
-/// The --log-file exit line reports the live byte counters, which include the
-/// goodbye exchanged after the --stats snapshot. Captured from rsync 3.5.1 on
-/// a local protocol-33 copy: `--stats` says sent 300,244 / received 57, the log
-/// line of the same transfer says `sent 300249 bytes  received 74 bytes`, i.e.
-/// the sender's goodbye NDX_DONE frame (+5 sent) and the receiver's
-/// MSG_BLOCK_STATS + goodbye frames (+12 +5 received).
+/// The bytes of the log-file exit line (`sent N bytes  received M bytes  total size T`).
+fn log_exit_line(log: &str) -> (i64, i64) {
+	let line = log.lines().find(|l| l.contains("] sent ") && l.contains(" total size ")).unwrap();
+	sent_received(line)
+}
+
+/// The --log-file exit line reports the connection's live byte counters (log_exit),
+/// which include what was exchanged after the --stats snapshot (handle_stats).
+/// Every comparison is within one run, because byte totals can vary between runs.
 #[test]
 fn log_file_exit_line_uses_live_counters() {
 	let dir = tempfile::tempdir().unwrap();
@@ -234,37 +237,93 @@ fn log_file_exit_line_uses_live_counters() {
 	fs::create_dir_all(&src).unwrap();
 	fs::write(src.join("a"), (0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8).collect::<Vec<u8>>()).unwrap();
 	fs::write(src.join("b"), b"hi\n").unwrap();
-	let (code, out, err) = run(&["-a", "--stats", "src/", "d1/"], dir.path());
-	assert_eq!((code, err.as_str()), (0, ""), "{out}");
-	let summary = out.lines().find(|l| l.starts_with("sent ")).unwrap();
-	let (sent, received) = sent_received(summary);
-	let (code, _, err) = run(&["-a", "--log-file=r.log", "src/", "d2/"], dir.path());
-	assert_eq!((code, err.as_str()), (0, ""));
-	let log = fs::read_to_string(dir.path().join("r.log")).unwrap();
-	let exit_line = log.lines().find(|l| l.contains("] sent ") && l.ends_with(" total size 300003")).unwrap();
-	assert_eq!(sent_received(exit_line), (sent + 5, received + 17), "{log}");
 
-	// A pull from the reference server: the client's whole connection through
-	// the final goodbye. Captured from rsync 3.5.1 pulling 300,000 bytes the
-	// same way: --stats sent 46 / received 300,184, log line `sent 51 bytes
-	// received 300212 bytes  total size 300000` (+5 sent, +28 received).
+	// Local push. A clean client run with --stats writes no exit line, but one
+	// ending with code 23 writes both (the summary, then log_exit on the error
+	// exit), so a missing extra source puts the two in one run. Measured with
+	// rsync 3.5.1 (`-a --stats --log-file=r.log src/ nope dst/`, six runs, all
+	// identical): --stats sent 300,244 / received 57, log line sent 300249 /
+	// received 74. That is +5 sent (the sender's goodbye NDX_DONE frame) and +17
+	// received (the receiver's MSG_BLOCK_STATS frame, 12, and goodbye frame, 5).
+	let (code, out, _) = run(&["-a", "--stats", "--log-file=r.log", "src/", "nope", "d1/"], dir.path());
+	assert_eq!(code, 23, "{out}");
+	let summary = sent_received(out.lines().find(|l| l.starts_with("sent ")).unwrap());
+	let log = fs::read_to_string(dir.path().join("r.log")).unwrap();
+	assert_eq!(log_exit_line(&log), (summary.0 + 5, summary.1 + 17), "{log}");
+
+	// Pull from the reference server. A pulling client logs the exit line only
+	// on a clean run without --stats, so its counterpart is the server's own
+	// log line for the same connection: the client sent exactly what the
+	// server received. The client received what the server sent, plus whatever
+	// the server wrote after logging. Measured with rsync 3.5.1 on both ends
+	// (five runs): client sent 70 = server received 70 every time; client
+	// received 300264 or 300280 against server sent 300264.
 	#[cfg(unix)]
 	{
+		use std::os::unix::fs::PermissionsExt;
 		let Some(rsync) = reference() else { return };
-		let rsh = fake_rsh(dir.path());
-		let rsh = rsh.to_str().unwrap();
-		let rpath = format!("--rsync-path={}", rsync.display());
+		// Runs the remote command through sh so --rsync-path can carry options.
+		let rsh = dir.path().join("shrsh");
+		fs::write(&rsh, "#!/bin/sh\nshift\nexec /bin/sh -c \"$*\"\n").unwrap();
+		fs::set_permissions(&rsh, fs::Permissions::from_mode(0o755)).unwrap();
+		let server_log = dir.path().join("s.log");
+		let rpath = format!("--rsync-path={} --log-file={}", rsync.display(), server_log.display());
 		let source = format!("h:{}/src/", dir.path().display());
-		let (code, out, err) = run(&["-a", "--stats", "-e", rsh, &rpath, &source, "p1/"], dir.path());
+		let (code, _, err) = run(&["-a", "--log-file=p.log", "-e", rsh.to_str().unwrap(), &rpath, &source, "p/"], dir.path());
+		assert_eq!((code, err.as_str()), (0, ""));
+		let client = log_exit_line(&fs::read_to_string(dir.path().join("p.log")).unwrap());
+		let server = log_exit_line(&fs::read_to_string(&server_log).unwrap());
+		assert_eq!(client.0, server.1, "client sent vs server received");
+		assert!(matches!(client.1 - server.0, 0 | 16), "client received {} vs server sent {}", client.1, server.0);
+	}
+}
+
+/// Local `--delete` copies terminate at protocol 29 (the server's input is not
+/// multiplexed, so its reads never refill) and at 33 (inc-recursion: the receiver's
+/// successes are messages that can hold back its forwarded lists): before the
+/// receiver blocks on the socket it hands every queued item to the generator.
+#[test]
+fn local_delete_copies_terminate() {
+	for args in [&["-aiH", "--delete", "--protocol=29"][..], &["-ai", "--delete", "--protocol=29"], &["-ai", "--delete"]] {
+		let dir = tempfile::tempdir().unwrap();
+		make_tree(&dir.path().join("src"));
+		fs::create_dir_all(dir.path().join("dst/sub")).unwrap();
+		fs::write(dir.path().join("dst/stale"), b"x").unwrap();
+		fs::write(dir.path().join("dst/sub/stale2"), b"y").unwrap();
+		let cwd = dir.path().to_path_buf();
+		let mut argv: Vec<&'static str> = args.to_vec();
+		argv.extend(["src/", "dst/"]);
+		let (tx, rx) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let _ = tx.send(run(&argv, &cwd));
+		});
+		let (code, _, err) = rx.recv_timeout(std::time::Duration::from_secs(60)).expect("local --delete copy hung");
+		assert_eq!((code, err.as_str()), (0, ""), "{args:?}");
+		assert!(!dir.path().join("dst/stale").exists() && !dir.path().join("dst/sub/stale2").exists());
+	}
+}
+
+/// Byte totals are a function of the transfer, not of thread timing: the same
+/// local copy run repeatedly reports identical `sent`/`received` counts (rsync
+/// 3.5.1 is deterministic here, even under CPU load). Frames meet reads only where
+/// upstream's processes would: reads happen at refills with the socketpair-sized
+/// in-process pipe, never ahead of them.
+#[test]
+fn local_copy_byte_totals_are_deterministic() {
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	for i in 0..20 {
+		fs::write(dir.path().join(format!("src/sub/f{i}")), format!("file {i}\n").repeat(i + 1)).unwrap();
+	}
+	let mut totals = Vec::new();
+	for run_no in 0..5 {
+		let dest = format!("d{run_no}/");
+		let (code, out, err) = run(&["-a", "--stats", "src/", &dest], dir.path());
 		assert_eq!((code, err.as_str()), (0, ""), "{out}");
 		let summary = out.lines().find(|l| l.starts_with("sent ")).unwrap();
-		let (sent, received) = sent_received(summary);
-		let (code, _, err) = run(&["-a", "--log-file=p.log", "-e", rsh, &rpath, &source, "p2/"], dir.path());
-		assert_eq!((code, err.as_str()), (0, ""));
-		let log = fs::read_to_string(dir.path().join("p.log")).unwrap();
-		let exit_line = log.lines().find(|l| l.contains("] sent ") && l.ends_with(" total size 300003")).unwrap();
-		assert_eq!(sent_received(exit_line), (sent + 5, received + 28), "{log}");
+		totals.push(sent_received(summary));
 	}
+	assert!(totals.windows(2).all(|w| w[0] == w[1]), "{totals:?}");
 }
 
 /// A server's stdio may be O_NONBLOCK: EAGAIN is retried, not fatal.

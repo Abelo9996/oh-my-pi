@@ -4,7 +4,7 @@
 //! the workspace tree plus directory-scoped AGENTS.md files. AGENTS.md files
 //! are read from each traversed directory's listing with ignore rules waived
 //! for that name, so a file-level gitignore rule cannot hide them, while
-//! ignored directories are still pruned by the walker.
+//! ignored directories are still pruned by the walk.
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashSet},
@@ -16,7 +16,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::{
-	iofs::{self, FileType, GlobMatch},
+	glob::{FileType, GlobMatch},
 	task,
 };
 
@@ -131,28 +131,25 @@ impl WorkspaceResults {
 	}
 }
 
-fn build_workspace_walk_request(config: &WorkspaceConfig) -> pi_walker::WalkRequest {
-	pi_walker::WalkRequest::new(config.root.clone())
-		.hidden(config.include_hidden)
-		.gitignore(config.use_gitignore)
-		.skip_git(true)
-		.skip_node_modules(true)
-		.follow_links(pi_walker::FollowLinks::Never)
-		.detail(pi_walker::WalkDetail::Full)
+fn workspace_tree_options(config: &WorkspaceConfig) -> pi_walker::walk::TreeOptions {
+	pi_walker::walk::TreeOptions {
+		hidden: config.include_hidden,
+		gitignore: config.use_gitignore,
+		skip_git: true,
+		skip_node_modules: true,
+		follow: pi_walker::walk::Follow::Never,
+		detail: pi_walker::Detail::Full,
 		// Entries past `max_depth` are walked only to find AGENTS.md, so they need
 		// names, not per-entry metadata syscalls.
-		.detail_max_depth(config.max_depth)
+		detail_max_depth: Some(config.max_depth),
 		// File-level ignore rules must not hide AGENTS.md.
-		.unignored_file_name(config.collect_agents_md.then_some(AGENTS_MD_FILENAME))
-		.order(pi_walker::WalkOrder::Path)
-		.emit_root(false)
-		.depth(1, config.walk_max_depth)
-		.directory_errors(if config.report_directory_errors {
-			pi_walker::DirectoryErrorMode::Visit
-		} else {
-			pi_walker::DirectoryErrorMode::SkipSkippable
-		})
-		.cache(false)
+		unignored_name: config.collect_agents_md.then_some(AGENTS_MD_FILENAME),
+		sorted: true,
+		emit_root: false,
+		min_depth: 1,
+		max_depth: Some(config.walk_max_depth),
+		..Default::default()
+	}
 }
 
 fn is_file_or_file_symlink(path: &Path, file_type: FileType) -> bool {
@@ -185,8 +182,8 @@ fn is_excluded_workspace_entry(relative: &str, file_type: FileType) -> bool {
 /// listing the walker never reads. Such directories sit at or below
 /// `max_depth`, so the file is only an AGENTS.md candidate, never a tree entry.
 fn probe_agents_md_at_walk_limit(
-	config: &WorkspaceConfig,
 	directory: &Path,
+	relative_directory: &str,
 	directory_depth: usize,
 	results: &mut WorkspaceResults,
 ) {
@@ -195,9 +192,7 @@ fn probe_agents_md_at_walk_limit(
 	}
 	let candidate = directory.join(AGENTS_MD_FILENAME);
 	if std::fs::metadata(&candidate).is_ok_and(|metadata| metadata.is_file()) {
-		results.insert_agents_md(
-			pi_walker::normalize_relative_path(&config.root, &candidate).into_owned(),
-		);
+		results.insert_agents_md(format!("{relative_directory}/{AGENTS_MD_FILENAME}"));
 	}
 }
 
@@ -207,59 +202,76 @@ fn run_list_workspace(
 ) -> Result<ListWorkspaceResult> {
 	let mut results = WorkspaceResults::default();
 	let mut unreadable_directories = Vec::new();
-	build_workspace_walk_request(&config)
-		.for_each_entry_with_heartbeat(
-			|| ct.heartbeat(),
-			|entry| {
-				let file_type = iofs::from_walker_file_type(entry.file_type);
-				if is_excluded_workspace_entry(entry.relative_path, file_type) {
-					return Ok(pi_walker::WalkDecision::SkipDescend);
+	let mut fatal = None;
+	pi_walker::walk::tree(
+		&pi_walker::Fs::native(),
+		&config.root,
+		&workspace_tree_options(&config),
+		&ct,
+		|event| match event {
+			pi_walker::walk::Event::Entry(entry) => {
+				let relative = String::from_utf8_lossy(entry.path);
+				let file_type = FileType::from(entry.file_type);
+				if is_excluded_workspace_entry(&relative, file_type) {
+					return pi_walker::walk::Action::SkipDir;
 				}
 				if file_type == FileType::Dir {
 					if config.collect_agents_md && entry.depth == config.walk_max_depth {
 						probe_agents_md_at_walk_limit(
-							&config,
-							&entry.absolute_path,
+							entry.abs,
+							&relative,
 							entry.depth,
 							&mut results,
 						);
 					}
 				} else if config.collect_agents_md
-					&& entry.relative_path.rsplit('/').next() == Some(AGENTS_MD_FILENAME)
+					&& entry.name() == AGENTS_MD_FILENAME.as_bytes()
 					// AGENTS.md directory depth: root AGENTS.md is depth 0, child dir
 					// AGENTS.md is depth 1, and so on. Only depths 1..=4 are surfaced.
 					&& (AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&(entry.depth - 1))
-					&& is_file_or_file_symlink(&entry.absolute_path, file_type)
+					&& is_file_or_file_symlink(entry.abs, file_type)
 				{
-					results.insert_agents_md(entry.relative_path.to_owned());
+					results.insert_agents_md(relative.clone().into_owned());
 				}
 				if entry.depth <= config.max_depth {
 					results.insert_entry(GlobMatch {
-						path: entry.relative_path.to_owned(),
+						path: relative.into_owned(),
 						file_type,
-						mtime: entry.mtime,
-						size: entry.size,
+						mtime: entry.mtime.map(GlobMatch::millis),
+						size: entry.size.map(|size| size as f64),
 					});
 				}
-				Ok(pi_walker::WalkDecision::Include)
+				pi_walker::walk::Action::Continue
 			},
-			|error| {
-				let relative = pi_walker::normalize_relative_path(&config.root, error.path);
+			pi_walker::walk::Event::Error(error) => {
+				if !config.report_directory_errors {
+					return pi_walker::walk::Action::Skip;
+				}
+				let relative = error
+					.path
+					.strip_prefix(&config.root)
+					.map_or_else(|_| error.path.to_string_lossy(), Path::to_string_lossy)
+					.replace('\\', "/");
 				if relative.is_empty() {
-					return Err(Error::from_reason(format!(
+					fatal = Some(Error::from_reason(format!(
 						"Native directory scan failed for {}: {}",
 						error.path.display(),
 						error.error
 					)));
+					return pi_walker::walk::Action::Stop;
 				}
 				unreadable_directories.push(WorkspaceDirectoryError {
-					path:    relative.into_owned(),
+					path:    relative,
 					message: error.error.to_string(),
 				});
-				Ok(pi_walker::WalkDecision::Skip)
+				pi_walker::walk::Action::Skip
 			},
-		)
-		.map_err(iofs::map_walker_error)?;
+		},
+	)
+	.map_err(|err| ct.walk_failure(err))?;
+	if let Some(err) = fatal {
+		return Err(err);
+	}
 
 	Ok(ListWorkspaceResult {
 		entries: results.entries.into_values().collect(),
@@ -273,7 +285,7 @@ fn run_list_workspace(
 ///
 /// File-level ignore rules for AGENTS.md are bypassed by checking each
 /// traversed directory directly when `collectAgentsMd` is enabled, but ignored
-/// directories are still pruned by the walker and are not searched.
+/// directories are still pruned by the walk and are not searched.
 #[napi(js_name = "listWorkspace")]
 pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWorkspaceResult> {
 	let ListWorkspaceOptions {
@@ -302,9 +314,11 @@ pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWo
 		} else {
 			max_depth
 		};
+		let root = pi_walker::fs::resolve_dir(&pi_vfs::BlockingFs::native(), Path::new(&path))
+			.map_err(|err| ct.walk_failure(err))?;
 		run_list_workspace(
 			WorkspaceConfig {
-				root: pi_walker::resolve_search_path(&path).map_err(crate::iofs::map_walker_error)?,
+				root,
 				max_depth,
 				walk_max_depth,
 				include_hidden: hidden.unwrap_or(false),

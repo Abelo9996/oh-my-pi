@@ -194,6 +194,10 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	#[allow(unused_mut, reason = "empty when no utility features are enabled")]
 	let mut m = Vec::<(&'static str, builtins::Registration<SE>)>::new();
 
+	#[cfg(feature = "util.ast-grep")]
+	m.push(("ast-grep", ast_grep::ast_grep_builtin::<SE>()));
+	#[cfg(feature = "util.ast-grep")]
+	m.push(("sg", ast_grep::ast_grep_builtin::<SE>()));
 	#[cfg(feature = "util.b2sum")]
 	m.push(("b2sum", b2sum::b2sum_builtin::<SE>()));
 	#[cfg(feature = "util.base32")]

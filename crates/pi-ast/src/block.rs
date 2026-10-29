@@ -1135,15 +1135,22 @@ mod tests {
 	/// instead of one directory, skipping anything over 64 KiB.
 	fn repo_files(byte_budget: Option<usize>) -> Vec<PathBuf> {
 		let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-		let mut files: Vec<PathBuf> = ignore::WalkBuilder::new(&root)
-			.build()
-			.filter_map(Result::ok)
-			.filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-			.map(ignore::DirEntry::into_path)
-			.filter(|path| {
-				matches!(path.extension().and_then(std::ffi::OsStr::to_str), Some("ts" | "py" | "rs"))
+		let opts = pi_walker::walk::Options { gitignore: true, skip_git: true, ..Default::default() };
+		let walked =
+			pi_walker::walk::collect(&pi_walker::Fs::native(), &root, &opts, false, &pi_walker::Never, |_, entry| {
+				let wanted = entry.file_type == pi_walker::FileType::File
+					&& matches!(
+						entry.rel_path().extension().and_then(std::ffi::OsStr::to_str),
+						Some("ts" | "py" | "rs")
+					);
+				if wanted {
+					pi_walker::walk::Action::Continue
+				} else {
+					pi_walker::walk::Action::Skip
+				}
 			})
-			.collect();
+			.expect("repository should walk");
+		let mut files: Vec<PathBuf> = walked.iter().map(|entry| root.join(entry.rel_path())).collect();
 		files.sort();
 		let Some(budget) = byte_budget else {
 			return files;

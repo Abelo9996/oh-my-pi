@@ -107,9 +107,11 @@ impl Fixture {
 			ReadConfig::default(),
 		);
 		let out = MuxWriter::new(Box::new(io::sink()), self.ctx.counters.clone(), WriteConfig::default());
-		let (tx, rx) = flume::unbounded();
-		let result = run(&self.ctx, trees, flists, &mut fr, &mut input, &out, &tx);
-		(result, rx.try_iter().collect())
+		let (sib_out, sib_in) = crate::rsync::generator::sib_pipe(flists, self.ctx.inc_recurse);
+		let result = run(&self.ctx, trees, flists, &mut fr, &mut input, &out, &sib_out);
+		sib_out.flush_all();
+		let items = sib_in.drain().into_iter().filter(|s| !matches!(s, Sibling::List | Sibling::ListEof));
+		(result, items.collect())
 	}
 }
 

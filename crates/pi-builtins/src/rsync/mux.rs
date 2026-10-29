@@ -12,12 +12,19 @@
 //! upstream's. Messages go out at once, ahead of buffered data (upstream
 //! drains its message buffer before data).
 //!
-//! The read half ([`MuxReader`]) owns a background thread that drains the
-//! connection into memory, so blocked reads can honor `--timeout` and the
-//! cancellation flag even though the underlying stream blocks. Frames are
-//! decoded on the reading thread as reads need data: a message is passed to
-//! `on_msg` only once all data before it has been consumed (upstream's
-//! read-driven `read_a_msg`).
+//! The read half ([`MuxReader`]) reads the connection only where upstream's
+//! `perform_io` reads it: when a read needs more than its 32 KiB input ring holds,
+//! or when an output pass on the reading thread finds input waiting. A
+//! connection thread performs those reads so a blocked read can honor
+//! `--timeout` and the cancellation flag. Frames are decoded on the reading
+//! thread as reads need data: a message is passed to `on_msg` only once all data
+//! before it has been consumed (upstream's read-driven `read_a_msg`).
+//!
+//! Determinism: every decision that depends on whether input is waiting asks the
+//! connection itself (a [`ReadProbe`], upstream's zero-timeout poll), and bytes
+//! only move at those decision points; with the in-process pipe sized like a
+//! socketpair, what one side sees at a refill depends only on what the other side
+//! wrote before it, as between upstream's processes.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -28,11 +35,11 @@ use std::time::{Duration, Instant};
 
 use crate::rsync::flists::lock;
 use crate::rsync::consts::{
-	BIGPATHBUFLEN, CF_INC_RECURSE, IO_BUFFER_SIZE, MAX_FRAME_LEN, MAX_MAP_SIZE, MPLEX_BASE,
+	BIGPATHBUFLEN, CF_INC_RECURSE, IO_BUFFER_SIZE, MAX_FRAME_LEN, MPLEX_BASE,
 	MSG_BLOCK_STATS, MSG_CLIENT, MSG_DATA, MSG_DELETED, MSG_ERROR, MSG_ERROR_EXIT,
 	MSG_ERROR_SOCKET, MSG_ERROR_UTF8, MSG_ERROR_XFER, MSG_INFO, MSG_IO_ERROR, MSG_IO_TIMEOUT,
 	MSG_LOG, MSG_NO_SEND, MSG_NOOP, MSG_REDO, MSG_STATS, MSG_SUCCESS, MSG_WARNING,
-	MSK_ACTIVE_RECEIVER, MSK_ALLOW_FLUSH, msg_code_is_known,
+	MSK_ALLOW_FLUSH, msg_code_is_known,
 };
 use crate::rsync::exit::{RERR_SOCKETIO, RERR_STREAMIO, RERR_TIMEOUT, RsyncError};
 use crate::rsync::log::{Role, syserr_suffix};
@@ -42,10 +49,6 @@ use crate::rsync::wire::{Proto, clone_io_error, is_retryable, put, wire_error};
 const SELECT_TIMEOUT: u64 = 60;
 /// How often a blocked read looks at the cancellation flag.
 const CANCEL_POLL: Duration = Duration::from_millis(100);
-/// Read-ahead bound of undecoded bytes.
-const RAW_CAP: usize = MAX_MAP_SIZE;
-/// Bound of decoded but unconsumed data bytes.
-const DATA_CAP: usize = MAX_MAP_SIZE;
 /// Frame header length.
 const HDR: usize = 4;
 /// Output buffer size (upstream `ROUND_UP_1024(IO_BUFFER_SIZE * 2)`), frame
@@ -254,18 +257,55 @@ struct OutState {
 	closed: bool,
 	/// A spent data buffer for reuse.
 	spare: Option<Vec<u8>>,
+	/// Live [`OutputGrant`]s: the role thread is inside an output pass.
+	grants: usize,
+}
+
+impl OutState {
+	/// Whether the output thread may write now.
+	fn may_write(&self) -> bool {
+		self.grants > 0 || self.closed
+	}
 }
 
 /// Queue between writer handles and the thread that performs the writes, so
 /// a write blocked on the connection never blocks the caller beyond its own
 /// wait (which keeps serving incoming messages, like upstream's
-/// `perform_io`).
+/// `perform_io`). The thread writes only while some role thread holds an
+/// [`OutputGrant`] — upstream writes only inside `perform_io` — so a frame
+/// the connection could take only partly waits for the writer's next pass.
 struct OutPipe {
 	state: Mutex<OutState>,
 	cond: Condvar,
 }
 
+impl OutPipe {
+	/// Blocks until writing is allowed again.
+	fn wait_permission(&self) {
+		let mut o = lock(&self.state);
+		while !o.may_write() {
+			o = self.cond.wait(o).unwrap_or_else(PoisonError::into_inner);
+		}
+	}
+}
+
+/// Permission for the output thread to write, held while a role thread is in
+/// an output pass (a flush, a wait for output room, or a wait for input).
+pub(crate) struct OutputGrant {
+	out: Arc<OutPipe>,
+}
+
+impl Drop for OutputGrant {
+	fn drop(&mut self) {
+		let mut o = lock(&self.out.state);
+		o.grants = o.grants.saturating_sub(1);
+		drop(o);
+		self.out.cond.notify_all();
+	}
+}
+
 fn write_out(
+	pipe: &OutPipe,
 	inner: &mut dyn Write,
 	mut bytes: &[u8],
 	mut bw: Option<&mut BwLimit>,
@@ -274,6 +314,8 @@ fn write_out(
 ) -> io::Result<()> {
 	let mut attempt = 0;
 	while !bytes.is_empty() {
+		// What the connection did not take waits for the writer's next pass.
+		pipe.wait_permission();
 		let max = bw.as_ref().map_or(bytes.len(), |b| b.writemax.min(bytes.len()));
 		let n = match inner.write(&bytes[..max]) {
 			Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
@@ -323,11 +365,13 @@ fn out_loop(
 		let job = {
 			let mut o = lock(&pipe.state);
 			loop {
-				if let Some(job) = o.queue.pop_front() {
+				if o.may_write()
+					&& let Some(job) = o.queue.pop_front()
+				{
 					o.busy = true;
 					break job;
 				}
-				if o.closed {
+				if o.closed && o.queue.is_empty() {
 					return;
 				}
 				o = pipe.cond.wait(o).unwrap_or_else(PoisonError::into_inner);
@@ -335,7 +379,7 @@ fn out_loop(
 		};
 		let (res, done, spent) = match job {
 			OutJob::Data { buf, start, count } => {
-				let res = write_out(&mut *inner, &buf[start..], bw.as_mut(), counters, count);
+				let res = write_out(pipe, &mut *inner, &buf[start..], bw.as_mut(), counters, count);
 				(res, buf.len() - start, Some(buf))
 			}
 			OutJob::Flush => (flush_out(&mut *inner), 0, None),
@@ -383,6 +427,9 @@ struct WShared {
 	out: Arc<OutPipe>,
 	/// The linked reader, served while this writer waits on the connection.
 	peer: Mutex<Option<Arc<RShared>>>,
+	/// A message went out since the last output pass that wrote data (upstream: a
+	/// non-empty `iobuf.msg`, which the next `perform_io` pass writes instead of data).
+	msgs_written: AtomicBool,
 }
 
 impl Drop for WShared {
@@ -404,13 +451,15 @@ impl WState {
 	}
 
 	/// Upstream `write_buf`: when `piece` does not fit beside the pending
-	/// bytes, everything pending goes out first as one frame.
-	fn buffer(&mut self, piece: &[u8], sh: &WShared) -> io::Result<()> {
-		if self.pending() + piece.len() > self.room() {
+	/// bytes, everything pending goes out first as one frame. Returns whether
+	/// that happened (an output pass).
+	fn buffer(&mut self, piece: &[u8], sh: &WShared) -> io::Result<bool> {
+		let flushed = self.pending() + piece.len() > self.room() && self.pending() > 0;
+		if flushed {
 			self.flush_data(sh)?;
 		}
 		self.buf.extend_from_slice(piece);
-		Ok(())
+		Ok(flushed)
 	}
 
 	/// The sticky connection failure, mapped to upstream's diagnostic once.
@@ -459,11 +508,15 @@ impl WState {
 			HDR
 		};
 		let bytes = buf.len() - start;
+		// An output pass writes pending messages before data.
+		sh.msgs_written.store(false, Ordering::Relaxed);
 		self.push(sh, OutJob::Data { buf, start, count: self.counting }, bytes)
 	}
 
-	/// Asks the output thread to flush the underlying writer.
+	/// Asks the output thread to flush the underlying writer (the end of an output
+	/// pass: pending messages are out).
 	fn request_flush(&mut self, sh: &WShared) -> io::Result<()> {
+		sh.msgs_written.store(false, Ordering::Relaxed);
 		self.push(sh, OutJob::Flush, 0)
 	}
 
@@ -522,6 +575,7 @@ impl MuxWriter {
 				failed: None,
 				closed: false,
 				spare: None,
+				grants: 0,
 			}),
 			cond: Condvar::new(),
 		});
@@ -542,33 +596,101 @@ impl MuxWriter {
 				timeout: AtomicU64::new(timeout_secs(cfg.timeout)),
 				out,
 				peer: Mutex::new(None),
+				msgs_written: AtomicBool::new(false),
 			}),
 		}
 	}
 
-	/// Waits for the output thread: until everything queued is written
-	/// (`drained`) or until at most one buffer's worth is queued. While
-	/// waiting it serves the linked reader's messages and checks
-	/// cancellation and `--timeout` (upstream `perform_io` for output).
-	fn settle(&self, drained: bool) -> io::Result<()> {
+	/// Whether data is buffered or still being written (upstream
+	/// `iobuf.out.len > out_empty_len`).
+	pub(crate) fn data_pending(&self) -> bool {
+		self.state().pending() > 0 || lock(&self.shared.out.state).queued > 0
+	}
+
+	/// Whether an output pass has anything to write: buffered data, or messages
+	/// sent since the last pass.
+	pub(crate) fn output_pending(&self) -> bool {
+		self.shared.msgs_written.load(Ordering::Relaxed) || self.data_pending()
+	}
+
+	/// Lets the output thread write until the grant is dropped: the caller is in
+	/// an output pass (upstream's `perform_io`), e.g. waiting for input.
+	pub(crate) fn grant(&self) -> OutputGrant {
+		let out = Arc::clone(&self.shared.out);
+		lock(&out.state).grants += 1;
+		out.cond.notify_all();
+		OutputGrant { out }
+	}
+
+	/// The first output pass of a `perform_io` that needs input (see
+	/// `refill_flush`); the caller then waits for its input holding a [`grant`].
+	///
+	/// [`grant`]: MuxWriter::grant
+	pub(crate) fn output_pass(&self, input_ready: bool) -> io::Result<()> {
+		self.refill_flush(input_ready)
+	}
+
+	/// The output side of upstream `perform_io` when the linked reader must read
+	/// more input: the pass writes the messages sent since the last pass or, when
+	/// there were none, the buffered data; with messages written and input already
+	/// waiting, the data stays buffered. Never waits for the write to finish.
+	fn refill_flush(&self, input_ready: bool) -> io::Result<()> {
 		let sh = &*self.shared;
+		let mut st = lock(&sh.state);
+		st.check_failed(sh)?;
+		let had_msgs = sh.msgs_written.swap(false, Ordering::Relaxed);
+		if had_msgs && input_ready {
+			return Ok(());
+		}
+		st.flush_data(sh)?;
+		st.request_flush(sh)
+	}
+
+	/// The receiving side's receiver is busy on file data (upstream
+	/// `maybe_send_keepalive` with `MSK_ACTIVE_RECEIVER` in the receiver): marks input
+	/// activity for the generator's timeout check. Nothing is written: upstream's
+	/// receiver sends that keepalive to the generator's pipe, never the socket.
+	pub(crate) fn note_active_receiver(&self) {
+		self.shared.counters.last_in.store(clock_ms(), Ordering::Relaxed);
+	}
+
+	/// Upstream `perform_io` reads the input that is waiting in every output pass,
+	/// and dispatches queued messages once more than 512 bytes are buffered.
+	fn after_output_pass(&self) -> io::Result<()> {
+		self.serve_peer(512)
+	}
+
+	/// Waits for the output thread: until everything queued is written (None)
+	/// or until at most `max_queued` bytes are still queued. While waiting it
+	/// lets the output thread write, serves the linked reader's input and
+	/// messages, and checks cancellation and `--timeout` (upstream `perform_io`
+	/// for output). Returns at once, writing nothing, when no wait is needed.
+	fn settle(&self, max_queued: Option<usize>) -> io::Result<()> {
+		let sh = &*self.shared;
+		let mut grant: Option<OutputGrant> = None;
 		let mut next_check: Option<Instant> = None;
 		loop {
 			{
-				let deadline = Instant::now() + Duration::from_millis(10);
+				// Short slices: input that arrives while output waits is read about
+				// as soon as upstream's poll would report it.
+				let deadline = Instant::now() + Duration::from_millis(1);
 				let mut o = lock(&sh.out.state);
 				loop {
 					if o.failed.is_some() {
 						drop(o);
 						return self.state().check_failed(sh);
 					}
-					let done = if drained {
-						o.queue.is_empty() && !o.busy
-					} else {
-						o.queued <= OUT_SIZE
+					let done = match max_queued {
+						None => o.queue.is_empty() && !o.busy,
+						Some(max) => o.queued <= max,
 					};
 					if done {
 						return Ok(());
+					}
+					if grant.is_none() {
+						o.grants += 1;
+						grant = Some(OutputGrant { out: Arc::clone(&sh.out) });
+						sh.out.cond.notify_all();
 					}
 					let now = Instant::now();
 					if now >= deadline {
@@ -585,7 +707,7 @@ impl MuxWriter {
 			if sh.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
 				return Err(RsyncError::cancelled_io());
 			}
-			self.serve_peer()?;
+			self.serve_peer(512)?;
 			if let Some(timing) = self.timing() {
 				let now = Instant::now();
 				let due = *next_check.get_or_insert(now + Duration::from_secs(timing.select));
@@ -598,26 +720,34 @@ impl MuxWriter {
 		}
 	}
 
-	/// Dispatches complete messages at the head of the linked reader's input
-	/// while this thread waits to write (upstream `perform_io` reads messages
-	/// while flushing output). Only on the thread that reads that reader, and
-	/// only when no unconsumed data precedes the message, so dispatch order
-	/// stays the reading order; data frames wait for the next `read`.
-	fn serve_peer(&self) -> io::Result<()> {
+	/// Reads the linked reader's waiting input into its buffer and dispatches the
+	/// complete messages at its head while more than `min_buffered` bytes are
+	/// buffered (upstream `perform_io` reads input in every output pass and runs
+	/// `read_a_msg` while flushing output). Only on the thread that reads that
+	/// reader, and only when no unconsumed data precedes the message, so dispatch
+	/// order stays the reading order; data frames wait for the next `read`. A peer's
+	/// MSG_ERROR_EXIT at the head is dispatched regardless of the minimum, so a
+	/// writer blocked on a dead peer learns of its exit at once.
+	fn serve_peer(&self, min_buffered: usize) -> io::Result<()> {
 		let Some(rs) = lock(&self.shared.peer).clone() else {
 			return Ok(());
 		};
 		let me = thread::current().id();
 		let mut st = rs.lock();
-		if st.closed || st.in_read || st.serving || st.last_reader != Some(me) {
+		if st.closed || st.in_read || st.serving || st.last_reader != Some(me) || st.mode != Mode::Mux {
 			return Ok(());
 		}
+		st = rs.read_now(st);
 		loop {
 			if let Some(err) = &st.fatal {
 				return Err(clone_io_error(err));
 			}
-			if st.mode != Mode::Mux || st.frame_left > 0 || !st.data.is_empty() || st.raw.len() < HDR
-			{
+			let buffered = st.raw.len();
+			if st.frame_left > 0 || !st.data.is_empty() || buffered < HDR {
+				return Ok(());
+			}
+			let error_exit = i32::from(st.raw[3] as i8) - i32::from(MPLEX_BASE) == i32::from(MSG_ERROR_EXIT);
+			if buffered <= min_buffered && !error_exit {
 				return Ok(());
 			}
 			let header = u32::from_le_bytes([st.raw[0], st.raw[1], st.raw[2], st.raw[3]]);
@@ -635,6 +765,7 @@ impl MuxWriter {
 			}
 			st.raw.drain(..HDR);
 			let payload: Vec<u8> = st.raw.drain(..len).collect();
+			st.consume(HDR + len);
 			rs.cond.notify_all();
 			let Some(mut on_msg) = st.on_msg.take() else {
 				continue;
@@ -695,7 +826,7 @@ impl MuxWriter {
 			st.multiplexed = true;
 			st.request_flush(sh)?;
 		}
-		self.settle(true)
+		self.settle(None)
 	}
 
 	/// Flushes pending data as a frame and returns to raw output (upstream
@@ -710,7 +841,7 @@ impl MuxWriter {
 			st.multiplexed = false;
 			st.request_flush(sh)?;
 		}
-		self.settle(true)
+		self.settle(None)
 	}
 
 	/// Sends one out-of-band message at once, ahead of any buffered data
@@ -731,8 +862,9 @@ impl MuxWriter {
 			}
 			st.send_frame(code, payload, sh)?;
 			st.request_flush(sh)?;
+			sh.msgs_written.store(true, Ordering::Relaxed);
 		}
-		self.settle(true)?;
+		self.settle(None)?;
 		Ok(true)
 	}
 
@@ -767,9 +899,6 @@ impl MuxWriter {
 		wait_for_lock: bool,
 	) -> io::Result<()> {
 		let sh = &*self.shared;
-		if flags & MSK_ACTIVE_RECEIVER != 0 {
-			sh.counters.last_in.store(now, Ordering::Relaxed);
-		}
 		if !matches!(role, Some(Role::Sender | Role::Receiver | Role::Generator)) {
 			return Ok(());
 		}
@@ -805,22 +934,7 @@ impl MuxWriter {
 		}
 		st.request_flush(sh)?;
 		drop(st);
-		if wait_for_lock { self.settle(true) } else { Ok(()) }
-	}
-
-	/// Flushes unless another thread holds the writer (it is writing, so the
-	/// output is moving). Returns whether the flush happened.
-	fn try_flush(&self) -> io::Result<bool> {
-		let sh = &*self.shared;
-		let mut st = match sh.state.try_lock() {
-			Ok(guard) => guard,
-			Err(TryLockError::Poisoned(p)) => p.into_inner(),
-			Err(TryLockError::WouldBlock) => return Ok(false),
-		};
-		st.check_failed(sh)?;
-		st.flush_data(sh)?;
-		st.request_flush(sh)?;
-		Ok(true)
+		if wait_for_lock { self.settle(None) } else { Ok(()) }
 	}
 
 	/// Tees every data byte written from now on into a batch file.
@@ -842,18 +956,26 @@ impl Write for MuxWriter {
 				put(batch, data)?;
 			}
 			let mut rest = data;
+			let mut output_pass = false;
 			if rest.len() > st.room() {
 				// Upstream `write_bigbuf`: half-buffer pieces until the
 				// remainder is at most half a buffer plus 1 KiB.
 				let half = st.room() / 2;
 				while rest.len() > half + 1024 {
-					st.buffer(&rest[..half], sh)?;
+					output_pass |= st.buffer(&rest[..half], sh)?;
 					rest = &rest[half..];
 				}
 			}
-			st.buffer(rest, sh)?;
+			output_pass |= st.buffer(rest, sh)?;
+			// Upstream's output ring holds the frame still being written plus the
+			// new data: a write waits until the frame in flight leaves room.
+			let room = OUT_SIZE.saturating_sub(st.pending());
+			drop(st);
+			if output_pass {
+				self.after_output_pass()?;
+			}
+			self.settle(Some(room))?;
 		}
-		self.settle(false)?;
 		Ok(data.len())
 	}
 
@@ -862,10 +984,20 @@ impl Write for MuxWriter {
 		{
 			let mut st = lock(&sh.state);
 			st.check_failed(sh)?;
+			// io_flush with nothing buffered or in flight performs no I/O at all
+			// (in particular it reads no input).
+			let idle = {
+				let o = lock(&sh.out.state);
+				o.queue.is_empty() && !o.busy
+			};
+			if st.pending() == 0 && idle && !sh.msgs_written.load(Ordering::Relaxed) {
+				return Ok(());
+			}
 			st.flush_data(sh)?;
 			st.request_flush(sh)?;
 		}
-		self.settle(true)
+		self.after_output_pass()?;
+		self.settle(None)
 	}
 }
 
@@ -920,6 +1052,13 @@ struct RState {
 	raw: VecDeque<u8>,
 	/// Decoded MSG_DATA payload awaiting `read`.
 	data: VecDeque<u8>,
+	/// Ring position of the first unconsumed byte of upstream's input buffer
+	/// (`iobuf.in.pos`); reads fill only up to the ring's end.
+	in_pos: usize,
+	/// An outstanding read for the connection thread: at most this many bytes.
+	request: Option<usize>,
+	/// Whether the connection would return at once (see [`ReadProbe`]).
+	probe: Option<ReadProbe>,
 	mode: Mode,
 	/// Payload bytes of the current MSG_DATA frame still in `raw`.
 	frame_left: usize,
@@ -975,9 +1114,67 @@ impl RShared {
 	fn wait_for<'a>(&self, guard: MutexGuard<'a, RState>, d: Duration) -> MutexGuard<'a, RState> {
 		self.cond.wait_timeout(guard, d).unwrap_or_else(PoisonError::into_inner).0
 	}
+
+	/// The read of a `perform_io` pass when input is waiting: one read of what the
+	/// connection holds now, up to the input buffer's room. Nothing is read when no
+	/// input is waiting (the pass's poll would not report it).
+	fn read_now<'a>(&self, mut st: MutexGuard<'a, RState>) -> MutexGuard<'a, RState> {
+		if !st.input_waiting() || !st.request_read() {
+			return st;
+		}
+		self.cond.notify_all();
+		while st.request.is_some() && !st.closed && !self.cancel.load(Ordering::Relaxed) {
+			st = self.wait_for(st, CANCEL_POLL);
+		}
+		st
+	}
 }
 
 impl RState {
+	/// Bytes of upstream's input buffer in use: undecoded input plus decoded data
+	/// not yet handed out.
+	fn in_use(&self) -> usize {
+		self.raw.len() + self.data.len()
+	}
+
+	/// The size of one read: the input ring's free space up to its end, exactly as
+	/// upstream's `perform_io` reads into `iobuf.in`.
+	fn read_room(&mut self) -> usize {
+		let used = self.in_use();
+		if used == 0 {
+			self.in_pos = 0;
+		}
+		let end = self.in_pos + used;
+		if end >= IO_BUFFER_SIZE { IO_BUFFER_SIZE.saturating_sub(used) } else { IO_BUFFER_SIZE - end }
+	}
+
+	/// `n` bytes of the input buffer were consumed.
+	fn consume(&mut self, n: usize) {
+		self.in_pos = (self.in_pos + n) % IO_BUFFER_SIZE;
+	}
+
+	/// Asks the connection thread for one read (no-op while one is outstanding);
+	/// false when no read can happen.
+	fn request_read(&mut self) -> bool {
+		if self.request.is_some() {
+			return true;
+		}
+		if self.inner_done() || self.closed {
+			return false;
+		}
+		let room = self.read_room();
+		if room == 0 {
+			return false;
+		}
+		self.request = Some(room);
+		true
+	}
+
+	/// Whether the connection holds input (or its end) right now.
+	fn input_waiting(&self) -> bool {
+		self.probe.as_ref().is_some_and(|probe| probe())
+	}
+
 	fn inc_suffix(&self) -> &'static str {
 		match self.proto {
 			Some(p) if p.version >= 30 && p.has(CF_INC_RECURSE) => "/inc",
@@ -1053,7 +1250,7 @@ impl RState {
 			return false;
 		}
 		if self.frame_left > 0 {
-			return !self.raw.is_empty() && self.data.len() < DATA_CAP;
+			return !self.raw.is_empty();
 		}
 		// The next header is looked at only once the data before it has been
 		// consumed, like upstream.
@@ -1106,7 +1303,7 @@ fn demux<'a>(sh: &'a RShared, mut guard: MutexGuard<'a, RState>) -> MutexGuard<'
 	while guard.can_demux() {
 		let st = &mut *guard;
 		if st.frame_left > 0 {
-			let n = st.frame_left.min(st.raw.len()).min(DATA_CAP - st.data.len());
+			let n = st.frame_left.min(st.raw.len());
 			st.data.extend(st.raw.drain(..n));
 			st.frame_left -= n;
 			sh.cond.notify_all();
@@ -1122,6 +1319,7 @@ fn demux<'a>(sh: &'a RShared, mut guard: MutexGuard<'a, RState>) -> MutexGuard<'
 			break;
 		}
 		st.raw.drain(..HDR);
+		st.consume(HDR);
 		sh.cond.notify_all();
 		if tag == i32::from(MSG_DATA) {
 			st.frame_left = len;
@@ -1129,6 +1327,7 @@ fn demux<'a>(sh: &'a RShared, mut guard: MutexGuard<'a, RState>) -> MutexGuard<'
 			continue;
 		}
 		let payload: Vec<u8> = st.raw.drain(..len).collect();
+		st.consume(len);
 		let Some(mut on_msg) = st.on_msg.take() else {
 			continue;
 		};
@@ -1146,21 +1345,27 @@ fn demux<'a>(sh: &'a RShared, mut guard: MutexGuard<'a, RState>) -> MutexGuard<'
 	guard
 }
 
-/// Drains the connection into `raw` until EOF, an error, or close.
+/// Performs the reads the reading thread requests (one `read()` of at most the
+/// requested size each), so bytes move from the connection only when upstream's
+/// `perform_io` would read them. Exits at EOF, an error, or close.
 fn reader_loop(sh: &RShared, mut inner: Box<dyn Read + Send>) {
 	let mut buf = vec![0u8; IO_BUFFER_SIZE];
 	let mut attempt = 0;
 	loop {
-		{
+		let want = {
 			let mut st = sh.lock();
-			while !st.closed && st.raw.len() >= RAW_CAP {
+			loop {
+				if st.closed {
+					return;
+				}
+				if let Some(want) = st.request {
+					break want;
+				}
 				st = sh.wait(st);
 			}
-			if st.closed {
-				return;
-			}
-		}
-		let res = inner.read(&mut buf);
+		};
+		let want = want.clamp(1, buf.len());
+		let res = inner.read(&mut buf[..want]);
 		if res.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock) {
 			// A non-blocking descriptor: wait and retry (upstream polls).
 			if !sh.pause(&mut attempt) {
@@ -1173,21 +1378,24 @@ fn reader_loop(sh: &RShared, mut inner: Box<dyn Read + Send>) {
 		match res {
 			Ok(0) => {
 				st.eof = true;
+				st.request = None;
 				sh.cond.notify_all();
 				return;
 			}
 			Ok(n) => {
-				let n = n.min(buf.len());
+				let n = n.min(want);
 				st.raw.extend(&buf[..n]);
 				if st.counting {
 					sh.counters.read.fetch_add(n as u64, Ordering::Relaxed);
 				}
 				sh.counters.last_in.store(clock_ms(), Ordering::Relaxed);
+				st.request = None;
 				sh.cond.notify_all();
 			}
 			Err(e) if is_retryable(&e) => {}
 			Err(e) => {
 				st.read_err = Some(e);
+				st.request = None;
 				sh.cond.notify_all();
 				return;
 			}
@@ -1199,18 +1407,35 @@ fn reader_loop(sh: &RShared, mut inner: Box<dyn Read + Send>) {
 /// `read` demultiplexes frames as it needs data: MSG_DATA payloads are returned,
 /// every other message is passed to `on_msg` on the reading thread once all data
 /// before it has been consumed.
-/// Before `read` blocks on an empty queue it flushes the linked writer (deadlock rule).
+///
+/// Input follows upstream's `perform_io`: bytes move from the connection into a
+/// 32 KiB input ring only when a read needs more than the ring holds (a refill) or
+/// an output pass on the reading thread finds input waiting, one `read()` of up to
+/// the ring's free space each. Each refill first runs an output pass — by default
+/// the linked writer's (see [`MuxReader::set_refill_hook`]) — which holds data back
+/// only when it wrote messages and input is already waiting (see
+/// [`MuxReader::set_probe`]); before a read blocks, one more pass writes
+/// everything. So what a refill sees depends only on what the peer wrote before it,
+/// never on a background thread's progress.
 /// `--timeout` with no incoming bytes surfaces as an io::Error carrying RERR_TIMEOUT
 /// (see `exit::RsyncError::from_io`). Cancellation makes a blocked read fail promptly.
 ///
-/// A background thread reads the connection ahead (bounded) from the first
-/// read on; it exits at EOF or, after the reader is dropped, when its pending
+/// A connection thread performs the requested reads (so a blocked read stays
+/// cancellable); it exits at EOF or, after the reader is dropped, when its pending
 /// read returns. Cancellation is reported as [`RsyncError::cancelled_io`].
 pub(crate) struct MuxReader {
 	shared: Arc<RShared>,
-	inner: Option<Box<dyn Read + Send>>,
 	writer: Option<MuxWriter>,
+	refill_hook: Option<RefillHook>,
 }
+
+/// Whether a connection's reader would return at once (data or end waiting)
+/// without reading: upstream's zero-timeout poll.
+pub(crate) type ReadProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// What a refill runs instead of the linked writer's output pass; the argument tells
+/// whether input is already waiting.
+pub(crate) type RefillHook = Box<dyn FnMut(bool) + Send>;
 
 impl MuxReader {
 	/// A raw-mode reader over `inner`.
@@ -1223,6 +1448,9 @@ impl MuxReader {
 		let state = RState {
 			raw: VecDeque::new(),
 			data: VecDeque::new(),
+			in_pos: 0,
+			request: None,
+			probe: None,
 			mode: Mode::Raw,
 			frame_left: 0,
 			frame_uncounted: 0,
@@ -1242,16 +1470,46 @@ impl MuxReader {
 			local_server: false,
 			timing: Timing::new(timeout_secs(cfg.timeout)),
 		};
-		Self {
-			shared: Arc::new(RShared {
-				state: Mutex::new(state),
-				cond: Condvar::new(),
-				counters,
-				cancel,
-				consumed: AtomicU64::new(0),
-			}),
-			inner: Some(inner),
-			writer: None,
+		let shared = Arc::new(RShared {
+			state: Mutex::new(state),
+			cond: Condvar::new(),
+			counters,
+			cancel,
+			consumed: AtomicU64::new(0),
+		});
+		let worker = Arc::clone(&shared);
+		let spawned = thread::Builder::new()
+			.name("rsync-io-read".into())
+			.spawn(move || reader_loop(&worker, inner));
+		if let Err(err) = spawned {
+			shared.lock().read_err = Some(err);
+		}
+		Self { shared, writer: None, refill_hook: None }
+	}
+
+	/// Tells the reader how to see whether the connection holds input right now
+	/// (see [`ReadProbe`]). Without one, input never counts as already waiting.
+	pub(crate) fn set_probe(&self, probe: Option<ReadProbe>) {
+		self.shared.lock().probe = probe;
+	}
+
+	/// Replaces the linked writer's output pass at each multiplexed refill (None
+	/// restores it). The receiving side's receiver uses this: its output is the pipe
+	/// to the generator, never the socket the generator writes (upstream's separate
+	/// receiver process).
+	pub(crate) fn set_refill_hook(&mut self, hook: Option<RefillHook>) {
+		self.refill_hook = hook;
+	}
+
+	/// The output side of one refill pass.
+	fn run_refill(&mut self, input_ready: bool) -> io::Result<()> {
+		match (&mut self.refill_hook, &self.writer) {
+			(Some(hook), _) => {
+				hook(input_ready);
+				Ok(())
+			},
+			(None, Some(writer)) => writer.refill_flush(input_ready),
+			(None, None) => Ok(()),
 		}
 	}
 
@@ -1313,27 +1571,12 @@ impl MuxReader {
 		if self.shared.cancel.load(Ordering::Relaxed) {
 			return Ok(true);
 		}
-		self.ensure_reader()?;
 		let st = self.shared.lock();
 		Ok(st.fatal.is_some()
 			|| st.inner_done()
 			|| !st.raw.is_empty()
-			|| (st.mode == Mode::Mux && !st.data.is_empty()))
-	}
-
-	fn ensure_reader(&mut self) -> io::Result<()> {
-		let Some(inner) = self.inner.take() else {
-			return Ok(());
-		};
-		let worker = Arc::clone(&self.shared);
-		let spawned = thread::Builder::new()
-			.name("rsync-io-read".into())
-			.spawn(move || reader_loop(&worker, inner));
-		if let Err(err) = spawned {
-			self.shared.lock().read_err = Some(clone_io_error(&err));
-			return Err(err);
-		}
-		Ok(())
+			|| (st.mode == Mode::Mux && !st.data.is_empty())
+			|| st.input_waiting())
 	}
 
 	/// Starts demultiplexing at the current stream position.
@@ -1341,7 +1584,6 @@ impl MuxReader {
 		&mut self,
 		on_msg: Box<dyn FnMut(Msg) -> io::Result<()> + Send>,
 	) -> io::Result<()> {
-		self.ensure_reader()?;
 		let mut st = self.shared.lock();
 		st.on_msg = Some(on_msg);
 		if st.mode != Mode::Mux {
@@ -1409,9 +1651,13 @@ impl MuxReader {
 		if sh.cancel.load(Ordering::Relaxed) {
 			return Err(RsyncError::cancelled_io());
 		}
-		self.ensure_reader()?;
+		// Held from the refill on: our own output keeps going out while this read
+		// waits for input (upstream's perform_io writes in every pass).
+		let mut _grant: Option<OutputGrant> = None;
 		let mut st = sh.lock();
-		let mut flush_pending = self.writer.is_some();
+		let mut refilled = false;
+		// Whether this call already ran an output pass that held nothing back.
+		let mut drained = false;
 		let mut next_check: Option<Instant> = None;
 		loop {
 			if st.mode == Mode::Mux {
@@ -1422,6 +1668,7 @@ impl MuxReader {
 				Mode::Mux => st.data.read(buf)?,
 			};
 			if n > 0 {
+				st.consume(n);
 				let counted = match st.mode {
 					Mode::Raw => n as u64,
 					Mode::Mux => std::mem::take(&mut st.frame_uncounted),
@@ -1436,18 +1683,40 @@ impl MuxReader {
 			if let Some(err) = &st.fatal {
 				return Err(clone_io_error(err));
 			}
-			if st.inner_done() && !st.more_possible() {
+			if !refilled {
+				// perform_io: one output pass, then the input that is waiting.
+				let ready = st.input_waiting() || st.inner_done();
+				drop(st);
+				if self.refill_hook.is_none() {
+					_grant = self.writer.as_ref().map(MuxWriter::grant);
+				}
+				self.run_refill(ready)?;
+				st = sh.lock();
+				refilled = true;
+				drained = !ready;
+				st = sh.read_now(st);
+				continue;
+			}
+			if st.inner_done() && !st.more_possible() && st.request.is_none() {
 				return Err(st.end_error(&sh.counters));
 			}
 			if sh.cancel.load(Ordering::Relaxed) {
 				return Err(RsyncError::cancelled_io());
 			}
-			if flush_pending && let Some(writer) = &self.writer {
+			if !drained {
+				// About to block: like upstream's later perform_io passes, write all
+				// output still pending (data a message pass held back; raw mode's
+				// buffered output) so the peer — or the generator, for a hooked
+				// receiver — is never left waiting on us.
 				drop(st);
-				let flushed = writer.try_flush();
+				self.run_refill(false)?;
 				st = sh.lock();
-				flush_pending = !flushed?;
+				drained = true;
 				continue;
+			}
+			// Block for input: one read of whatever arrives first.
+			if st.request_read() {
+				sh.cond.notify_all();
 			}
 			let mut wait = CANCEL_POLL;
 			// A linked writer carries the connection's current --timeout
@@ -1460,16 +1729,17 @@ impl MuxReader {
 				if now >= due {
 					let role = st.role;
 					drop(st);
-					check_timeout(&sh.counters, Some(timing), role, self.writer.as_ref(), 0, false)?;
+					// A hooked reader (the receiving side's receiver) keeps its
+					// keepalives off the socket: upstream's receiver writes them
+					// to the generator's pipe, and the generator sees socket
+					// activity through the shared counters.
+					let writer = if self.refill_hook.is_some() { None } else { self.writer.as_ref() };
+					check_timeout(&sh.counters, Some(timing), role, writer, 0, false)?;
 					st = sh.lock();
 					next_check = Some(Instant::now() + select);
 					continue;
 				}
 				wait = wait.min(due - now);
-			}
-			if flush_pending {
-				// The writer was busy; retry the flush soon.
-				wait = wait.min(Duration::from_millis(10));
 			}
 			st = sh.wait_for(st, wait);
 		}
@@ -1486,7 +1756,6 @@ impl Drop for MuxReader {
 #[cfg(test)]
 mod tests {
 	use std::io::Cursor;
-	use std::sync::mpsc;
 
 	use super::*;
 	use crate::rsync::exit::RERR_SIGNAL;
@@ -1520,7 +1789,7 @@ mod tests {
 	}
 
 	/// A Read that blocks until bytes are sent (EOF once the sender is dropped).
-	struct Blocking(mpsc::Receiver<Vec<u8>>, Vec<u8>);
+	struct Blocking(flume::Receiver<Vec<u8>>, Vec<u8>);
 
 	impl Read for Blocking {
 		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -2015,16 +2284,25 @@ mod tests {
 		assert_eq!(batch.take(), b"abcde");
 	}
 
-	fn blocking_reader(timeout: Option<Duration>) -> (MuxReader, mpsc::Sender<Vec<u8>>, Arc<AtomicBool>) {
-		let (tx, rx) = mpsc::channel();
+	/// A reader fed by the returned sender, with a probe that sees queued chunks
+	/// (and the sender's end) like a zero-timeout poll.
+	fn blocking_reader(timeout: Option<Duration>) -> (MuxReader, flume::Sender<Vec<u8>>, Arc<AtomicBool>) {
+		let (tx, rx) = flume::unbounded();
 		let cancel = Arc::new(AtomicBool::new(false));
+		let probed = rx.clone();
 		let r = MuxReader::new(
 			Box::new(Blocking(rx, Vec::new())),
 			IoCounters::default(),
 			Arc::clone(&cancel),
 			ReadConfig { timeout },
 		);
+		r.set_probe(Some(Arc::new(move || !probed.is_empty() || probed.is_disconnected())));
 		(r, tx, cancel)
+	}
+
+	/// A probe for an in-memory input that is always there.
+	fn always_ready() -> Option<ReadProbe> {
+		Some(Arc::new(|| true))
 	}
 
 	#[test]
@@ -2129,11 +2407,136 @@ mod tests {
 		assert_eq!(err.kind(), io::ErrorKind::TimedOut);
 	}
 
+	/// S / G2: a multiplexed refill is one `perform_io` output pass. Input already
+	/// read ahead past the input buffer does not spare the flush (upstream flushes on
+	/// every refill); input inside the buffer needs no refill and no flush; and a pass
+	/// that writes messages while input is waiting keeps the data back.
+	#[test]
+	fn refills_write_output_like_perform_io() {
+		let mut stream = frame(MSG_DATA, &vec![7u8; 40000]);
+		stream.extend(frame(MSG_DATA, b"x"));
+		stream.extend(frame(MSG_DATA, &vec![8u8; 40000]));
+		let mut r = reader(stream);
+		r.set_probe(always_ready());
+		let sink = Sink::default();
+		let mut w = writer(&sink, WriteConfig::default());
+		w.start_multiplex().unwrap();
+		r.link_writer(w.clone());
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+
+		// Refill 1 writes "A" and buffers 32 KiB of input.
+		w.write_all(b"A").unwrap();
+		r.read_exact(&mut [0u8; 100]).unwrap();
+		// The rest of the first frame lies past the buffer: refill 2 writes "B" even
+		// though those bytes were already waiting.
+		w.write_all(b"B").unwrap();
+		r.read_exact(&mut vec![0u8; 39900]).unwrap();
+		// "x" is inside the buffer: no refill, "C" stays buffered.
+		w.write_all(b"C").unwrap();
+		r.read_exact(&mut [0u8; 1]).unwrap();
+		// A message and waiting input: refill 3 writes the message only.
+		w.write_all(b"D").unwrap();
+		w.send_msg(MSG_INFO, b"m").unwrap();
+		r.read_exact(&mut vec![0u8; 40000]).unwrap();
+		w.flush().unwrap();
+		let (frames, _) = frames_of(&sink.take());
+		assert_eq!(frames, [(MSG_DATA, 1), (MSG_DATA, 1), (MSG_INFO, 1), (MSG_DATA, 2)]);
+	}
+
+	/// G1: with a refill hook (the receiving side's receiver), refills never touch the
+	/// linked writer; the hook learns whether input was already waiting.
+	#[test]
+	fn refill_hook_replaces_the_writer_flush() {
+		let mut stream = frame(MSG_DATA, &vec![1u8; 40000]);
+		stream.extend(frame(MSG_DATA, b"y"));
+		let mut r = reader(stream);
+		r.set_probe(always_ready());
+		let sink = Sink::default();
+		let mut w = writer(&sink, WriteConfig::default());
+		w.start_multiplex().unwrap();
+		r.link_writer(w.clone());
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		let seen = Arc::clone(&calls);
+		r.set_refill_hook(Some(Box::new(move |ready| lock(&seen).push(ready))));
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		w.write_all(b"generator output").unwrap();
+		r.read_exact(&mut vec![0u8; 40001]).unwrap();
+		assert!(w.data_pending(), "the receiver never flushes the generator's output");
+		assert!(sink.take().is_empty());
+		let calls = lock(&calls).clone();
+		assert!(calls.len() >= 2, "{calls:?}");
+		assert!(calls.iter().any(|&ready| ready), "a refill found input read ahead: {calls:?}");
+	}
+
+	/// Deadlock rule: before a read blocks, every output pass it ran must have
+	/// written everything (upstream's later perform_io passes). A hooked reader
+	/// whose refill wrote only messages because input was waiting runs the hook once
+	/// more with no input waiting; so does a raw-mode reader (protocol 29's
+	/// unmultiplexed server input), whose reads never refill.
+	#[test]
+	fn reads_never_block_with_output_held_back() {
+		// Multiplexed: the first refill finds input waiting (half a header), the
+		// same read then has to block for the rest.
+		let (mut r, tx, _) = blocking_reader(None);
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		let seen = Arc::clone(&calls);
+		r.set_refill_hook(Some(Box::new(move |ready| lock(&seen).push(ready))));
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		let mut whole = frame(MSG_DATA, b"abcdef");
+		let rest = whole.split_off(2);
+		tx.send(whole).unwrap();
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !r.data_ready().unwrap() && Instant::now() < deadline {
+			thread::sleep(Duration::from_millis(5));
+		}
+		let probe = Arc::clone(&calls);
+		let t = thread::spawn(move || {
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while !lock(&probe).contains(&false) && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(5));
+			}
+			tx.send(rest).unwrap();
+			tx
+		});
+		let mut got = [0u8; 6];
+		r.read_exact(&mut got).unwrap();
+		drop(t.join().unwrap());
+		assert_eq!(&got, b"abcdef");
+		let calls = lock(&calls).clone();
+		assert_eq!(calls[..2], [true, false], "{calls:?}");
+
+		// Raw mode: the hook runs before the read blocks.
+		let (mut r, tx, _) = blocking_reader(None);
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		let seen = Arc::clone(&calls);
+		r.set_refill_hook(Some(Box::new(move |ready| lock(&seen).push(ready))));
+		let probe = Arc::clone(&calls);
+		let t = thread::spawn(move || {
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while lock(&probe).is_empty() && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(5));
+			}
+			tx.send(b"z".to_vec()).unwrap();
+			tx
+		});
+		let mut byte = [0u8; 1];
+		r.read_exact(&mut byte).unwrap();
+		drop(t.join().unwrap());
+		assert_eq!(*lock(&calls), [false]);
+	}
+
+	/// `--timeout=2`: keepalives go out every second (lull 1), so the idle check at
+	/// each second sees at most 1 s of silence. (At `--timeout=1` lull equals the
+	/// timeout and upstream itself times out on the second check, because a queued
+	/// keepalive stamps `last_io_out` only once it is written.)
 	#[test]
 	fn blocked_sender_sends_keepalives_instead_of_timing_out() {
-		let (mut r, _tx, cancel) = blocking_reader(Some(Duration::from_secs(1)));
+		let (mut r, _tx, cancel) = blocking_reader(Some(Duration::from_secs(2)));
 		let sink = Sink::default();
-		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(1)), ..WriteConfig::default() });
+		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(2)), ..WriteConfig::default() });
 		w.start_multiplex().unwrap();
 		r.set_role(Role::Sender);
 		r.link_writer(w);

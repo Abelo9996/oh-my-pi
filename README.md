@@ -462,7 +462,7 @@ Per crate, code lines only:
 | ------------- | -------------------------------------------------------------------------------------- | -----: |
 | pi-shell      | Embedded bash engine · persistent sessions · in-process coreutils dispatch · minimizer | 38,000 |
 | pi-natives    | The N-API surface — every module in the table below                                    | 25,000 |
-| pi-walker     | Parallel ignore-aware walker + scan cache shared by grep · glob · workspace · shell    |  5,200 |
+| pi-walker       | Parallel walker · listing cache · glob · regex search for natives and shell rg/grep/fd | 11,400 |
 | pi-iso        | Workspace isolation · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy        |  3,300 |
 | pi-ast        | tree-sitter + ast-grep matching, block resolution, structural summaries                |  2,900 |
 | pi-voice      | Audio capture/playback · Opus · live WebRTC                                            |  1,000 |
@@ -676,7 +676,7 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | **[pi-ast](crates/pi-ast)**                        | tree-sitter-based code summarizer and AST utilities (50+ language grammars)                         |
 | **[pi-iso](crates/pi-iso)**                        | Task isolation backend resolver: APFS clones, btrfs/zfs reflinks, overlayfs, projfs, rcopy          |
 | **[pi-voice](crates/pi-voice)**                    | Audio capture/playback, Opus codecs, and live WebRTC streaming primitives                           |
-| **[pi-walker](crates/pi-walker)**                  | Parallel ignore-aware filesystem walker with the scan cache shared by grep, glob, and workspace     |
+| **[pi-walker](crates/pi-walker)**                      | Parallel ignore-aware walker, directory-listing cache, glob, and content search for natives + shell |
 | **[pi-edit](crates/pi-edit)**                      | Edit engine behind the `edit` tool: line-anchored patch/hashline modes, streaming previews, atomic apply |
 | **[brush-core](crates/vendor/brush-core)**         | Vendored fork of [brush-shell](https://github.com/reubeno/brush) for embedded bash execution        |
 | **[pi-builtins](crates/pi-builtins)**              | Bash builtins (cd, echo, test, printf, read, export, …) plus 67 in-process command-line utilities |

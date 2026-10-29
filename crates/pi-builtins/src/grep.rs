@@ -1,8 +1,9 @@
 //! `grep` builtin implemented on top of the ripgrep libraries.
 //!
-//! Matching uses `grep-regex`/`grep-searcher`; recursive walks use `pi-walker`.
-//! Also hosts the plumbing `rg` and pi-natives' grep binding share with it:
-//! [`CompiledMatcher`], the PCRE2 JIT toggle, exit status, and record layout.
+//! Matching uses `grep-regex`/`grep-searcher`; recursive searches walk and
+//! run in parallel through `pi-walker`, printing files in path order. Also hosts
+//! the plumbing `rg` shares with it: exit status, record layout, and the
+//! line-length bound.
 
 
 use std::{
@@ -16,76 +17,20 @@ use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum, parser::ValueSource};
 use globset::{Glob, GlobMatcher};
 use grep_matcher::{LineTerminator, Matcher};
-use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
+use grep_pcre2::RegexMatcherBuilder as PcreMatcherBuilder;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
 	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
+use pi_walker::{
+	FileType,
+	exec::{self, Flow},
+	grep::{Engine, pcre2_jit_enabled},
+	walk,
+};
+use pi_vfs::BlockingFs;
 use crate::bre;
 use crate::host::{Host, Utility, util};
-
-/// PCRE2 JIT toggle for an `OMP_PCRE2_JIT` value: `1` forces JIT on,
-/// `0`/`false` forces it off. Unset or empty, JIT stays on everywhere except
-/// macOS, where PCRE2's SLJIT executable allocator can fault while compiling
-/// patterns (issue #7399). The caller reads the variable from its own
-/// environment: the builtins see the shell's exported variables, which the
-/// host process environment does not carry.
-pub fn pcre2_jit_enabled(setting: Option<&str>) -> bool {
-	match setting {
-		Some(value) if !value.is_empty() => value != "0" && !value.eq_ignore_ascii_case("false"),
-		_ => !cfg!(target_os = "macos"),
-	}
-}
-
-/// A pattern compiled by one of the two engines: Rust `regex`, or PCRE2 for
-/// syntax it lacks (look-around, back-references).
-///
-/// Hot search loops match on the variant and run monomorphized per engine;
-/// the [`Matcher`] impl serves one-shot callers that only need an answer.
-pub enum CompiledMatcher {
-	Rust(RegexMatcher),
-	Pcre(PcreMatcher),
-}
-
-/// Search error from either engine behind a [`CompiledMatcher`].
-#[derive(Debug)]
-pub enum CompiledMatcherError {
-	Rust(grep_matcher::NoError),
-	Pcre(grep_pcre2::Error),
-}
-
-impl fmt::Display for CompiledMatcherError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Rust(err) => err.fmt(formatter),
-			Self::Pcre(err) => err.fmt(formatter),
-		}
-	}
-}
-
-impl Matcher for CompiledMatcher {
-	type Captures = grep_matcher::NoCaptures;
-	type Error = CompiledMatcherError;
-
-	fn find_at(
-		&self,
-		haystack: &[u8],
-		at: usize,
-	) -> Result<Option<grep_matcher::Match>, Self::Error> {
-		match self {
-			Self::Rust(matcher) => matcher
-				.find_at(haystack, at)
-				.map_err(CompiledMatcherError::Rust),
-			Self::Pcre(matcher) => matcher
-				.find_at(haystack, at)
-				.map_err(CompiledMatcherError::Pcre),
-		}
-	}
-
-	fn new_captures(&self) -> Result<Self::Captures, Self::Error> {
-		Ok(grep_matcher::NoCaptures::new())
-	}
-}
 
 /// Exit status of a `grep` or `rg` run: 0 when a line was selected, 1 when
 /// none was, 2 on any error, except that under `-q` a match outranks errors.
@@ -688,28 +633,18 @@ fn resolve_directory_action(cli: &GrepArgs, matches: &ArgMatches) -> DirectoryAc
 	selected.1
 }
 
-fn resolve_follow_links(cli: &GrepArgs, matches: &ArgMatches) -> pi_walker::FollowLinks {
-	let mut selected = (0, pi_walker::FollowLinks::Roots);
-	choose_latest(&mut selected, last_index(matches, "recursive"), pi_walker::FollowLinks::Roots);
-	choose_latest(
-		&mut selected,
-		last_index(matches, "dereference_recursive"),
-		pi_walker::FollowLinks::Always,
-	);
+/// Whether a recursive search follows symbolic links met below its operands
+/// (`-R`, `-S`); a directory operand that is itself a link is always followed.
+fn resolve_follow_links(cli: &GrepArgs, matches: &ArgMatches) -> bool {
+	let mut selected = (0, false);
+	choose_latest(&mut selected, last_index(matches, "recursive"), false);
+	choose_latest(&mut selected, last_index(matches, "dereference_recursive"), true);
 	if cli.directories == Some(DirectoryAction::Recurse) {
-		choose_latest(
-			&mut selected,
-			last_index(matches, "directories"),
-			pi_walker::FollowLinks::Roots,
-		);
+		choose_latest(&mut selected, last_index(matches, "directories"), false);
 	}
-	choose_latest(
-		&mut selected,
-		last_index(matches, "follow_command_line"),
-		pi_walker::FollowLinks::Roots,
-	);
-	choose_latest(&mut selected, last_index(matches, "no_follow"), pi_walker::FollowLinks::Never);
-	choose_latest(&mut selected, last_index(matches, "follow_all"), pi_walker::FollowLinks::Always);
+	choose_latest(&mut selected, last_index(matches, "follow_command_line"), false);
+	choose_latest(&mut selected, last_index(matches, "no_follow"), false);
+	choose_latest(&mut selected, last_index(matches, "follow_all"), true);
 	selected.1
 }
 
@@ -816,7 +751,7 @@ fn build_matcher(
 	cli: &GrepArgs,
 	mode: MatchMode,
 	ignore_case: bool,
-) -> Result<CompiledMatcher, String> {
+) -> Result<Engine, String> {
 	if mode == MatchMode::Perl {
 		let mut builder = PcreMatcherBuilder::new();
 		builder
@@ -828,7 +763,7 @@ fn build_matcher(
 			.jit_if_available(pcre2_jit_enabled(host.var("OMP_PCRE2_JIT")));
 		return builder
 			.build_many(patterns)
-			.map(CompiledMatcher::Pcre)
+			.map(Engine::Pcre)
 			.map_err(|error| error.to_string());
 	}
 
@@ -844,7 +779,7 @@ fn build_matcher(
 		let escaped: Vec<String> = patterns.iter().map(|pattern| regex::escape(pattern)).collect();
 		return builder
 			.build_many(&escaped)
-			.map(CompiledMatcher::Rust)
+			.map(Engine::Rust)
 			.map_err(|error| error.to_string());
 	}
 
@@ -864,7 +799,7 @@ fn build_matcher(
 			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported))
 			.collect::<Result<_, _>>()
 			.map_err(|e: bre::BreError| e.message().to_owned())?;
-		return build_default_matcher(&builder, &translated, patterns).map(CompiledMatcher::Rust);
+		return build_default_matcher(&builder, &translated, patterns).map(Engine::Rust);
 	}
 
 	// A `{` that opens no interval is a literal to GNU and BSD grep, but the
@@ -886,7 +821,7 @@ fn build_matcher(
 
 	builder
 		.build_many(&patterns)
-		.map(CompiledMatcher::Rust)
+		.map(Engine::Rust)
 		.map_err(|error| error.to_string())
 }
 
@@ -1089,8 +1024,8 @@ fn display_path_for_operand(operand: &OsStr, resolved: &Path, path: &Path) -> Pa
 }
 
 #[allow(clippy::too_many_arguments)]
-fn search_file_path<M: Matcher, W: Write>(
-	host: &mut Host,
+fn search_file_path<M: Matcher, W: Write, E: Write>(
+	fs: &BlockingFs,
 	operand: &OsStr,
 	resolved: &Path,
 	path: &Path,
@@ -1098,10 +1033,11 @@ fn search_file_path<M: Matcher, W: Write>(
 	searcher: &mut Searcher,
 	opts: &Options,
 	out: &mut W,
+	err: &mut E,
 	had_error: &mut bool,
 ) -> io::Result<bool> {
 	let display_path = display_path_for_operand(operand, resolved, path);
-	match host.fs().open(path) {
+	match fs.open(path) {
 		Ok(file) => {
 			let display = display_path.as_os_str().as_encoded_bytes();
 			match process_reader(matcher, searcher, file, display, opts, out) {
@@ -1112,7 +1048,7 @@ fn search_file_path<M: Matcher, W: Write>(
 					*had_error = true;
 					if !opts.no_messages {
 						let _ = writeln!(
-							host.stderr,
+							err,
 							"grep: {}: {}",
 							display_path.display(),
 							describe_search_error(&error)
@@ -1125,143 +1061,129 @@ fn search_file_path<M: Matcher, W: Write>(
 		Err(error) => {
 			*had_error = true;
 			if !opts.no_messages {
-				let _ = writeln!(
-					host.stderr,
-					"grep: {}: {error}",
-					display_path.display()
-				);
+				let _ = writeln!(err, "grep: {}: {error}", display_path.display());
 			}
 			Ok(false)
 		},
 	}
 }
 
-fn grep_walk_request(
-	fs: &pi_vfs::BlockingFs,
-	root: &Path,
-	follow_links: pi_walker::FollowLinks,
-) -> pi_walker::WalkRequest {
-	pi_walker::WalkRequest::new(root)
-		.filesystem(fs.clone())
-		.hidden(true)
-		.gitignore(false)
-		.skip_git(false)
-		.skip_node_modules(false)
-		.follow_links(follow_links)
-		.detail(pi_walker::WalkDetail::Minimal)
-		.order(pi_walker::WalkOrder::Unordered)
-		.emit_root(true)
-		.depth(0, usize::MAX)
-		.visit_order(pi_walker::VisitOrder::PreOrder)
-		.directory_errors(pi_walker::DirectoryErrorMode::Visit)
-		.same_file_system(false)
-		.cache(false)
-		.filter(pi_walker::WalkFilter::all())
+/// One searched file's output, handed to the consumer in path order.
+struct FileSearch {
+	out:       Vec<u8>,
+	err:       Vec<u8>,
+	had_error: bool,
+	matched:   io::Result<bool>,
 }
 
-/// Recursively search a directory operand while pruning excluded directories.
+/// Recursively searches a directory operand on parallel workers, pruning
+/// excluded directories and writing each file's output in path order.
 #[allow(clippy::too_many_arguments)]
-fn search_dir<M: Matcher, W: Write>(
+fn search_dir<M: Matcher + Sync, W: Write>(
 	host: &mut Host,
 	operand: &OsStr,
 	resolved: &Path,
 	matcher: &M,
-	searcher: &mut Searcher,
+	searcher: &SearcherBuilder,
 	opts: &Options,
 	rules: &PathRules,
-	follow_links: pi_walker::FollowLinks,
+	follow_links: bool,
 	out: &mut W,
 	had_error: &mut bool,
 ) -> io::Result<bool> {
-	let request = grep_walk_request(host.fs(), resolved, follow_links);
-	let mut any = false;
-	let had_error_state = std::cell::Cell::new(*had_error);
-	let mut walk_err = host.stderr_clone();
-	let walk = request.for_each_entry_with_heartbeat(
-		host.cancel_heartbeat(),
-		|entry: pi_walker::EntryMeta<'_>| {
-			if opts.quiet && any {
-				return Ok(pi_walker::WalkDecision::Stop);
-			}
-			if entry.file_type == pi_walker::FileType::Dir {
-				if entry.depth > 0 && !rules.allows_dir(Path::new(entry.relative_path)) {
-					return Ok(pi_walker::WalkDecision::SkipDescend);
-				}
-				return Ok(pi_walker::WalkDecision::Include);
-			}
-			if entry.file_type != pi_walker::FileType::File
-				|| !rules.allows_file(Path::new(entry.relative_path))
-			{
-				return Ok(pi_walker::WalkDecision::Skip);
-			}
-			let mut entry_had_error = had_error_state.get();
-			let matched = search_file_path(
-				host,
-				operand,
-				resolved,
-				entry.absolute_path.as_ref(),
-				matcher,
-				searcher,
-				opts,
-				out,
-				&mut entry_had_error,
-			)?;
-			had_error_state.set(entry_had_error);
-			any |= matched;
-			if opts.quiet && any {
-				Ok(pi_walker::WalkDecision::Stop)
-			} else {
-				Ok(pi_walker::WalkDecision::Include)
-			}
-		},
-		|error: pi_walker::DirectoryError<'_>| {
-			had_error_state.set(true);
-			if !opts.no_messages {
-				let display_path = display_path_for_operand(operand, resolved, error.path);
-				let _ = writeln!(
-					walk_err,
-					"grep: {}: {}",
-					display_path.display(),
-					error.error
-				);
-			}
-			Ok(pi_walker::WalkDecision::Include)
-		},
-	);
-	*had_error |= had_error_state.get();
-	match walk {
-		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => Ok(any),
-		// Propagate BrokenPipe to stop the walk; the host maps its status.
-		Err(pi_walker::WalkError::Interrupted(error))
-			if error.kind() == io::ErrorKind::BrokenPipe =>
-		{
-			Err(error)
-		},
-		Err(pi_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
-			// The shell wrapper owns the user-visible cancellation status.
+	let layer = pi_walker::Fs::new(host.fs(), resolved);
+	let walk_opts = walk::Options { hidden: true, follow_links, ..walk::Options::default() };
+	let stop = host.cancel_stop();
+	let collected = walk::collect(&layer, resolved, &walk_opts, true, &stop, |_, entry| {
+		let rel = entry.rel_path();
+		match entry.file_type {
+			FileType::Dir if !rules.allows_dir(rel) => walk::Action::SkipDir,
+			FileType::File if rules.allows_file(rel) => walk::Action::Continue,
+			_ => walk::Action::Skip,
+		}
+	});
+	let files = match collected {
+		Ok(files) => files,
+		// The shell wrapper owns the user-visible cancellation status.
+		Err(walk::WalkError::Stopped) => {
 			*had_error = true;
-			Ok(any)
+			return Ok(false);
 		},
-		Err(pi_walker::WalkError::Interrupted(error)) => {
-			*had_error = true;
-			if !opts.no_messages {
-				let _ = writeln!(host.stderr, "grep: {error}");
-			}
-			Ok(any)
-		},
-		Err(pi_walker::WalkError::InvalidData { path, message }) => {
+		Err(walk::WalkError::Root { path, error }) => {
 			*had_error = true;
 			if !opts.no_messages {
 				let display_path = display_path_for_operand(operand, resolved, &path);
-				let _ = writeln!(
-					host.stderr,
-					"grep: {}: {message}",
-					display_path.display()
-				);
+				let _ = writeln!(host.stderr, "grep: {}: {error}", display_path.display());
 			}
-			Ok(any)
+			return Ok(false);
 		},
+	};
+	let mut errors: Vec<_> = files.errors().iter().collect();
+	errors.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+	for error in errors {
+		*had_error = true;
+		if !opts.no_messages {
+			let display_path = display_path_for_operand(operand, resolved, &error.path);
+			let _ = writeln!(host.stderr, "grep: {}: {}", display_path.display(), error.error);
+		}
 	}
+	let fs = host.fs().clone();
+	let workers = if opts.line_buffered { 1 } else { walk_opts.parallelism(&layer) };
+	let mut any = false;
+	let mut failed = None;
+	exec::ordered(
+		files.len(),
+		workers,
+		&stop,
+		|| searcher.build(),
+		|searcher: &mut Searcher, index| {
+			let path = layer.join(resolved, files.get(index).path);
+			let (mut file_out, mut file_err, mut file_error) = (Vec::<u8>::new(), Vec::<u8>::new(), false);
+			let matched = search_file_path(
+				&fs,
+				operand,
+				resolved,
+				&path,
+				matcher,
+				searcher,
+				opts,
+				&mut file_out,
+				&mut file_err,
+				&mut file_error,
+			);
+			FileSearch { out: file_out, err: file_err, had_error: file_error, matched }
+		},
+		|_, found: FileSearch| {
+			let written = out
+				.write_all(&found.out)
+				.and_then(|()| if opts.line_buffered { out.flush() } else { Ok(()) });
+			if let Err(error) = written {
+				failed = Some(error);
+				return Flow::Stop;
+			}
+			let _ = host.stderr.write_all(&found.err);
+			*had_error |= found.had_error;
+			match found.matched {
+				Ok(matched) => any |= matched,
+				Err(error) => {
+					failed = Some(error);
+					return Flow::Stop;
+				},
+			}
+			if opts.quiet && any {
+				Flow::Stop
+			} else {
+				Flow::Continue
+			}
+		},
+	);
+	if let Some(error) = failed {
+		return Err(error);
+	}
+	if host.is_cancelled() {
+		*had_error = true;
+	}
+	Ok(any)
 }
 
 fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String> {
@@ -1474,7 +1396,7 @@ pub(crate) fn read_pattern_source(mut reader: impl Read) -> io::Result<Vec<u8>> 
 	Ok(bytes)
 }
 
-fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> Searcher {
+fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> SearcherBuilder {
 	let binary_detection = if cli.null_data || opts.binary_files == BinaryFiles::Text {
 		BinaryDetection::none()
 	} else if opts.binary_files == BinaryFiles::WithoutMatch {
@@ -1494,22 +1416,24 @@ fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> Sea
 	if cli.null_data {
 		builder.line_terminator(LineTerminator::byte(b'\0'));
 	}
-	builder.build()
+	builder
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_search<M: Matcher>(
+fn execute_search<M: Matcher + Sync>(
 	host: &mut Host,
 	cli: &GrepArgs,
 	matcher: &M,
 	files: &[OsString],
 	directory_action: DirectoryAction,
-	follow_links: pi_walker::FollowLinks,
+	follow_links: bool,
 	rules: &PathRules,
 	opts: &Options,
 	max_count: Option<u64>,
 ) -> i32 {
-	let mut searcher = build_searcher(cli, opts, max_count);
+	let builder = build_searcher(cli, opts, max_count);
+	let mut searcher = builder.build();
+	let fs = host.fs().clone();
 	let mut out = host.stdout_writer();
 	let mut any_match = false;
 	let mut had_error = false;
@@ -1572,7 +1496,7 @@ fn execute_search<M: Matcher>(
 							operand.as_os_str(),
 							&resolved,
 							matcher,
-							&mut searcher,
+							&builder,
 							opts,
 							rules,
 							follow_links,
@@ -1602,7 +1526,7 @@ fn execute_search<M: Matcher>(
 					continue;
 				}
 				match search_file_path(
-					host,
+					&fs,
 					operand.as_os_str(),
 					&resolved,
 					&resolved,
@@ -1610,6 +1534,7 @@ fn execute_search<M: Matcher>(
 					&mut searcher,
 					opts,
 					&mut out,
+					&mut host.stderr,
 					&mut had_error,
 				) {
 					Ok(matched) => any_match |= matched,
@@ -1730,7 +1655,7 @@ impl Utility for Grep {
 	let follow_links = resolve_follow_links(&cli, &matches);
 
 	match matcher {
-		CompiledMatcher::Rust(matcher) => execute_search(
+		Engine::Rust(matcher) => execute_search(
 			host,
 			&cli,
 			&matcher,
@@ -1741,7 +1666,7 @@ impl Utility for Grep {
 			&opts,
 			max_count,
 		),
-		CompiledMatcher::Pcre(matcher) => execute_search(
+		Engine::Pcre(matcher) => execute_search(
 			host,
 			&cli,
 			&matcher,
@@ -1997,6 +1922,24 @@ mod tests {
 		assert!(capture.out().contains("keep.rs:hit"));
 		assert!(!capture.out().contains("drop.txt"));
 		assert!(!capture.out().contains("hidden.rs"));
+	}
+
+	#[test]
+	fn recursive_search_prints_files_in_path_order() {
+		let tree = tempfile::tempdir().unwrap();
+		let files = ["t/z.txt", "t/b/1.txt", "t/a/c/2.txt", "t/a/b/3.txt", "t/a/0.txt", "t/m.txt"];
+		for file in files {
+			let path = tree.path().join(file);
+			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+			std::fs::write(path, "hit\n").unwrap();
+		}
+		let (code, capture) = run_util::<Grep>(&["-rl", "hit", "t"], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		let expected: String = ["t/a/0.txt", "t/a/b/3.txt", "t/a/c/2.txt", "t/b/1.txt", "t/m.txt", "t/z.txt"]
+			.iter()
+			.map(|path| format!("{}\n", path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+			.collect();
+		assert_eq!(capture.out(), expected);
 	}
 
 	#[test]

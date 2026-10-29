@@ -6,7 +6,7 @@ Every builtin the embedded shell installs. Two layers:
    `wait`, … A locally-patched fork of
    [`brush-builtins`](https://github.com/reubeno/brush) (MIT), tracking upstream
    except where noted in `LICENSE`.
-2. **In-process command-line utilities** — `cat`, `grep`/`rg`, `sed`, `ls`,
+2. **In-process command-line utilities** — `cat`, `grep`/`rg`, `ast-grep`/`sg`, `sed`, `ls`,
    `find`, `sort`, `jq`, `fd`, `diff`, `xargs`, `ps`, `top`, `kill`, the
    moreutils set, and ~50 more. One module per command, in `src/<command>.rs`.
 

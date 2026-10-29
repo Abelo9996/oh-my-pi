@@ -5,7 +5,7 @@
 use std::{
 	collections::HashMap,
 	ffi::{OsStr, OsString},
-	io::{self, BufWriter, Write},
+	io::{self, Write},
 	path::{Path, PathBuf},
 	sync::{
 		Arc,
@@ -17,11 +17,15 @@ use std::{
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{ArgAction, Parser, ValueEnum};
 use globset::{GlobBuilder, GlobMatcher};
+use pi_walker::{
+	FileType,
+	ignore::{Match as RuleMatch, Rules},
+	walk::{Action, Event, Follow, TreeOptions, WalkError},
+};
 use pi_vfs::{BlockingFs, Metadata};
-use pi_walker::CollectedEntry;
 use regex::{Regex, RegexBuilder};
 
-use crate::host::{Host, Utility, util};
+use crate::host::{Host, Utility, forward_slash_display, util};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -325,13 +329,31 @@ struct FdIgnoreMatcher {
 	fs:      BlockingFs,
 	enabled: bool,
 	root:    PathBuf,
-	global:  Vec<ignore::gitignore::Gitignore>,
+	global:  Vec<IgnoreFile>,
 	states:  HashMap<PathBuf, Arc<FdIgnoreState>>,
 }
 
 struct FdIgnoreState {
 	parent:  Option<Arc<Self>>,
-	matcher: Option<ignore::gitignore::Gitignore>,
+	matcher: Option<IgnoreFile>,
+}
+
+/// The rules of one ignore file, matched relative to `base`.
+struct IgnoreFile {
+	base:  PathBuf,
+	rules: Rules,
+}
+
+impl IgnoreFile {
+	/// Whether the last rule matching `path` ignores it (`Some(true)`) or
+	/// re-includes it (`Some(false)`).
+	fn matched(&self, path: &Path, is_dir: bool) -> Option<bool> {
+		match self.rules.matched_below(&self.base, path, is_dir) {
+			RuleMatch::Ignore => Some(true),
+			RuleMatch::Whitelist => Some(false),
+			RuleMatch::None => None,
+		}
+	}
 }
 
 impl FdIgnoreMatcher {
@@ -351,15 +373,10 @@ impl FdIgnoreMatcher {
 
 		for ignore_file in &cli.ignore_files {
 			let path = pi_vfs::absolute_path(base_dir, ignore_file);
-			let mut builder = ignore::gitignore::GitignoreBuilder::new(base_dir);
-			if let Some(err) = pi_walker::add_ignore_file(&mut builder, fs, &path) {
-				return Err(io::Error::other(err.to_string()));
-			}
-			let ignore = builder
-				.build()
-				.map_err(|err| io::Error::other(err.to_string()))?;
-			if !ignore.is_empty() {
-				matcher.global.push(ignore);
+			let rules = Rules::read(fs, &path)
+				.map_err(|err| io::Error::other(format!("{}: {err}", path.display())))?;
+			if !rules.is_empty() {
+				matcher.global.push(IgnoreFile { base: base_dir.to_path_buf(), rules });
 			}
 		}
 
@@ -386,7 +403,7 @@ impl FdIgnoreMatcher {
 		self
 			.global
 			.iter()
-			.find_map(|ignore| fdignore_match(ignore, &path, is_dir))
+			.find_map(|ignore| ignore.matched(&path, is_dir))
 			.unwrap_or(false)
 	}
 
@@ -445,13 +462,12 @@ fn load_fdignore_state(
 	parent: Option<Arc<FdIgnoreState>>,
 ) -> Arc<FdIgnoreState> {
 	let file = pi_vfs::join_path(dir, Path::new(".fdignore"));
-	let matcher = if fs.is_file(&file) {
-		let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
-		let _ = pi_walker::add_ignore_file(&mut builder, fs, &file);
-		builder.build().ok().filter(|ignore| !ignore.is_empty())
-	} else {
-		None
-	};
+	let matcher = fs
+		.is_file(&file)
+		.then(|| Rules::read(fs, &file).ok())
+		.flatten()
+		.filter(|rules| !rules.is_empty())
+		.map(|rules| IgnoreFile { base: dir.to_path_buf(), rules });
 	Arc::new(FdIgnoreState { parent, matcher })
 }
 
@@ -459,25 +475,13 @@ fn fdignore_state_match(state: &Arc<FdIgnoreState>, path: &Path, is_dir: bool) -
 	let mut current = Some(state.as_ref());
 	while let Some(frame) = current {
 		if let Some(matcher) = &frame.matcher
-			&& let Some(ignored) = fdignore_match(matcher, path, is_dir)
+			&& let Some(ignored) = matcher.matched(path, is_dir)
 		{
 			return Some(ignored);
 		}
 		current = frame.parent.as_deref();
 	}
 	None
-}
-
-fn fdignore_match(
-	matcher: &ignore::gitignore::Gitignore,
-	path: &Path,
-	is_dir: bool,
-) -> Option<bool> {
-	match matcher.matched(path, is_dir) {
-		ignore::Match::Ignore(_) => Some(true),
-		ignore::Match::Whitelist(_) => Some(false),
-		ignore::Match::None => None,
-	}
 }
 
 #[derive(Clone, Default)]
@@ -666,21 +670,8 @@ fn search(
 		prune: cli.prune,
 	};
 
-	let heartbeat = host.cancel_heartbeat();
-	if let Some(state) = try_search_fast(
-		&cli,
-		&search_paths,
-		&config,
-		max_results,
-		&mut host.stdout,
-		&mut host.stderr,
-		cancelled,
-		&heartbeat,
-	)? {
-		return Ok(state);
-	}
-
-	let use_gitignore = !(no_ignore(&cli) || no_ignore_vcs(&cli));
+	let opts = fd_tree_options(&cli);
+	let stop = host.cancel_stop();
 	let mut out = host.stdout_writer();
 	let mut state = SearchState { matches: 0, had_error: false };
 	for search_path in &search_paths {
@@ -689,187 +680,111 @@ fn search(
 		}
 		let mut fd_ignores =
 			FdIgnoreMatcher::new(&config.fs, &config.base_dir, &search_path.resolved, &cli)?;
-		let request = fd_walk_request(
-			&config.fs,
-			&search_path.resolved,
-			&cli,
-			use_gitignore,
-			cli.one_file_system,
-		);
-		let outcome = match request.collect_with_heartbeat(&heartbeat) {
-			Ok(outcome) => outcome,
-			Err(pi_walker::WalkError::Interrupted(_)) if cancelled.load(Ordering::Relaxed) => break,
-			Err(err) => return Err(walker_collect_error_to_io(err)),
-		};
-		let mut pruned_dirs = Vec::new();
-		for entry in &outcome.entries {
-			if cancelled.load(Ordering::Relaxed) || max_results.is_some_and(|max| state.matches >= max)
-			{
-				break;
-			}
-			process_collected_entry(
-				&config,
-				&cli.ignore_contains,
-				&mut fd_ignores,
-				&search_path.resolved,
-				entry,
-				&mut out,
-				&mut state,
-				&mut pruned_dirs,
-			)?;
+		let layer = pi_walker::Fs::new(&config.fs, &search_path.resolved);
+		let mut failed = None;
+		let walked = pi_walker::walk::tree(&layer, &search_path.resolved, &opts, &stop, |event| match event {
+			Event::Entry(entry) => {
+				if max_results.is_some_and(|max| state.matches >= max) {
+					return Action::Stop;
+				}
+				let action = match visit_entry(
+					&config,
+					&cli.ignore_contains,
+					&mut fd_ignores,
+					entry.abs,
+					entry.depth,
+					entry.file_type,
+					&mut out,
+					&mut state,
+				) {
+					Ok(action) => action,
+					Err(error) => {
+						failed = Some(error);
+						return Action::Stop;
+					},
+				};
+				if max_results.is_some_and(|max| state.matches >= max) {
+					Action::Stop
+				} else {
+					action
+				}
+			},
+			Event::Error(error) => {
+				if config.show_errors {
+					state.had_error = true;
+					let _ = writeln!(host.stderr, "fd: {}", error.error);
+				}
+				Action::Continue
+			},
+		});
+		if let Some(error) = failed {
+			return Err(error);
+		}
+		match walked {
+			Ok(_) => {},
+			Err(WalkError::Stopped) => break,
+			Err(WalkError::Root { path, error }) => {
+				return Err(io::Error::other(format!("{}: {error}", path.display())));
+			},
 		}
 	}
 	out.flush()?;
 	Ok(state)
 }
 
-fn fd_walk_request(
-	fs: &BlockingFs,
-	root: &Path,
-	cli: &FdCli,
-	use_gitignore: bool,
-	same_file_system: bool,
-) -> pi_walker::WalkRequest {
-	let min_depth = cli.exact_depth.or(cli.min_depth).unwrap_or(0);
-	let max_depth = cli.exact_depth.or(cli.max_depth).unwrap_or(usize::MAX);
-	pi_walker::WalkRequest::new(root)
-		.filesystem(fs.clone())
-		.hidden(include_hidden(cli))
-		.gitignore(use_gitignore)
-		.skip_git(false)
-		.skip_node_modules(false)
-		// fd walks a path operand that is itself a symlink; `-L` extends that to
-		// links found during the walk.
-		.follow_links(if cli.follow { pi_walker::FollowLinks::Always } else { pi_walker::FollowLinks::Roots })
-		.detail(pi_walker::WalkDetail::Minimal)
-		.order(pi_walker::WalkOrder::Path)
-		.emit_root(true)
-		.depth(min_depth, max_depth)
-		.directory_errors(pi_walker::DirectoryErrorMode::Visit)
-		.same_file_system(same_file_system)
-		.cache(false)
-		.visit_order(pi_walker::VisitOrder::PreOrder)
-}
-
-fn try_search_fast(
-	cli: &FdCli,
-	search_paths: &[SearchPath],
-	config: &SearchConfig,
-	max_results: Option<usize>,
-	stdout: &mut impl Write,
-	stderr: &mut impl Write,
-	cancelled: &AtomicBool,
-	heartbeat: &(impl Fn() -> io::Result<()> + Sync),
-) -> io::Result<Option<SearchState>> {
-	if !can_use_fast_search(cli, config) {
-		return Ok(None);
+fn fd_tree_options(cli: &FdCli) -> TreeOptions {
+	TreeOptions {
+		hidden: include_hidden(cli),
+		gitignore: !(no_ignore(cli) || no_ignore_vcs(cli)),
+		// fd walks a path operand that is itself a symlink; `-L` extends that
+		// to links found during the walk.
+		follow: if cli.follow { Follow::Always } else { Follow::Roots },
+		sorted: true,
+		emit_root: true,
+		min_depth: cli.exact_depth.or(cli.min_depth).unwrap_or(0),
+		max_depth: cli.exact_depth.or(cli.max_depth),
+		same_file_system: cli.one_file_system,
+		..TreeOptions::default()
 	}
-
-	let mut out = BufWriter::new(Vec::new());
-	let mut err = Vec::new();
-	let mut state = SearchState { matches: 0, had_error: false };
-	for search_path in search_paths {
-		if cancelled.load(Ordering::Relaxed) || max_results.is_some_and(|max| state.matches >= max) {
-			break;
-		}
-		let mut matches = state.matches;
-		let mut had_error = state.had_error;
-		let request = fd_walk_request(&config.fs, &search_path.resolved, cli, false, false);
-		let status = request.for_each_entry_with_heartbeat(
-			heartbeat,
-			|entry| {
-				if cancelled.load(Ordering::Relaxed) || max_results.is_some_and(|max| matches >= max) {
-					return Ok(pi_walker::WalkDecision::Stop);
-				}
-				let decision = process_walker_entry(
-					config,
-					&cli.ignore_contains,
-					entry.absolute_path.as_ref(),
-					entry.depth,
-					entry.file_type,
-					&mut out,
-					&mut matches,
-				)?;
-				if cancelled.load(Ordering::Relaxed) || max_results.is_some_and(|max| matches >= max) {
-					Ok(pi_walker::WalkDecision::Stop)
-				} else {
-					Ok(decision)
-				}
-			},
-			|error| {
-				if config.show_errors {
-					had_error = true;
-					let _ = writeln!(err, "fd: {}", error.error);
-				}
-				Ok(pi_walker::WalkDecision::Include)
-			},
-		);
-		state.matches = matches;
-		state.had_error = had_error;
-		match status {
-			Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => {},
-			Err(pi_walker::WalkError::Interrupted(_)) if cancelled.load(Ordering::Relaxed) => break,
-			Err(err) => return Err(walker_error_to_io(err)),
-		}
-	}
-	out.flush()?;
-	let output = out.into_inner().map_err(|err| err.into_error())?;
-	stdout.write_all(&output)?;
-	stderr.write_all(&err)?;
-	Ok(Some(state))
 }
 
-const fn can_use_fast_search(cli: &FdCli, config: &SearchConfig) -> bool {
-	no_ignore(cli)
-		&& cli.ignore_files.is_empty()
-		&& !cli.one_file_system
-		&& fast_type_filter_supported(&config.types)
-}
-
-const fn fast_type_filter_supported(filter: &TypeFilter) -> bool {
-	!filter.socket && !filter.pipe && !filter.block && !filter.character
-}
-
-fn process_walker_entry<W: Write>(
+/// Decides one walked entry: prunes ignored and excluded directories, prints
+/// a match.
+#[allow(clippy::too_many_arguments)]
+fn visit_entry<W: Write>(
 	config: &SearchConfig,
 	ignore_contains: &[OsString],
+	fd_ignores: &mut FdIgnoreMatcher,
 	path: &Path,
 	depth: usize,
-	file_type: pi_walker::FileType,
+	file_type: FileType,
 	out: &mut W,
-	matches: &mut usize,
-) -> io::Result<pi_walker::WalkDecision> {
-	let is_directory = file_type == pi_walker::FileType::Dir;
+	state: &mut SearchState,
+) -> io::Result<Action> {
+	let is_directory = file_type == FileType::Dir;
 	if depth == 0 && is_directory {
-		return Ok(pi_walker::WalkDecision::Skip);
+		return Ok(Action::Continue);
 	}
-	if config.excludes.matches(path, &config.base_dir) {
-		return Ok(if is_directory {
-			pi_walker::WalkDecision::SkipDescend
-		} else {
-			pi_walker::WalkDecision::Skip
-		});
+	if fd_ignores.is_ignored(path, is_directory) || config.excludes.matches(path, &config.base_dir) {
+		return Ok(if is_directory { Action::SkipDir } else { Action::Skip });
 	}
-	if is_directory {
-		if contains_ignore_marker(&config.fs, path, ignore_contains) {
-			return Ok(pi_walker::WalkDecision::SkipDescend);
-		}
-		if config.prune
-			&& config
-				.matcher
-				.matches(&match_target(path, &config.base_dir, config.full_path))
-		{
-			return Ok(pi_walker::WalkDecision::SkipDescend);
-		}
+	if is_directory
+		&& (contains_ignore_marker(&config.fs, path, ignore_contains)
+			|| (config.prune
+				&& config
+					.matcher
+					.matches(&match_target(path, &config.base_dir, config.full_path))))
+	{
+		return Ok(Action::SkipDir);
 	}
 
 	if !matches_entry(config, path, file_type) {
-		return Ok(pi_walker::WalkDecision::Skip);
+		return Ok(Action::Continue);
 	}
 
-	*matches = (*matches).saturating_add(1);
+	state.matches = state.matches.saturating_add(1);
 	if config.quiet {
-		return Ok(pi_walker::WalkDecision::Include);
+		return Ok(Action::Continue);
 	}
 	let display = display_path(config, path);
 	let text = if let Some(format) = config.format.as_deref() {
@@ -878,23 +793,19 @@ fn process_walker_entry<W: Write>(
 		display
 	};
 	out.write_all(text.as_bytes())?;
-	if config.print0 {
-		out.write_all(b"\0")?;
-	} else {
-		out.write_all(b"\n")?;
-	}
-	Ok(pi_walker::WalkDecision::Include)
+	out.write_all(if config.print0 { b"\0" } else { b"\n" })?;
+	Ok(Action::Continue)
 }
 
 /// Whether an entry passes every filter: the ones the listing answers (kind,
 /// extension, the pattern) first, then, only if the command asked for one,
 /// those that need the entry's metadata, so a plain `fd foo` stats nothing.
-fn matches_entry(config: &SearchConfig, path: &Path, file_type: pi_walker::FileType) -> bool {
+fn matches_entry(config: &SearchConfig, path: &Path, file_type: FileType) -> bool {
 	let filter = &config.types;
 	if filter.has_kind()
-		&& !((filter.regular && file_type == pi_walker::FileType::File)
-			|| (filter.directory && file_type == pi_walker::FileType::Dir)
-			|| (filter.symlink && file_type == pi_walker::FileType::Symlink))
+		&& !((filter.regular && file_type == FileType::File)
+			|| (filter.directory && file_type == FileType::Dir)
+			|| (filter.symlink && file_type == FileType::Symlink))
 	{
 		return false;
 	}
@@ -936,93 +847,6 @@ fn matches_entry(config: &SearchConfig, path: &Path, file_type: pi_walker::FileT
 		return false;
 	}
 	true
-}
-
-fn walker_error_to_io(err: pi_walker::WalkError<io::Error>) -> io::Error {
-	match err {
-		pi_walker::WalkError::Interrupted(err) => err,
-		pi_walker::WalkError::InvalidData { path, message } => {
-			io::Error::other(format!("{}: {message}", path.display()))
-		},
-	}
-}
-
-fn walker_collect_error_to_io(err: pi_walker::WalkError<String>) -> io::Error {
-	match err {
-		pi_walker::WalkError::Interrupted(err) => io::Error::other(err),
-		pi_walker::WalkError::InvalidData { path, message } => {
-			io::Error::other(format!("{}: {message}", path.display()))
-		},
-	}
-}
-
-fn process_collected_entry<W: Write>(
-	config: &SearchConfig,
-	ignore_contains: &[OsString],
-	fd_ignores: &mut FdIgnoreMatcher,
-	root: &Path,
-	entry: &CollectedEntry,
-	out: &mut W,
-	state: &mut SearchState,
-	pruned_dirs: &mut Vec<PathBuf>,
-) -> io::Result<()> {
-	let path = entry.absolute_path(root);
-	if pruned_dirs.iter().any(|dir| path.starts_with(dir)) {
-		return Ok(());
-	}
-	let depth = entry.depth();
-	let is_directory = entry.file_type == pi_walker::FileType::Dir;
-	if depth == 0 && is_directory {
-		return Ok(());
-	}
-	if fd_ignores.is_ignored(&path, is_directory) {
-		if is_directory {
-			pruned_dirs.push(path);
-		}
-		return Ok(());
-	}
-	if config.excludes.matches(&path, &config.base_dir) {
-		if is_directory {
-			pruned_dirs.push(path);
-		}
-		return Ok(());
-	}
-	if is_directory {
-		if contains_ignore_marker(&config.fs, &path, ignore_contains) {
-			pruned_dirs.push(path);
-			return Ok(());
-		}
-		if config.prune
-			&& config
-				.matcher
-				.matches(&match_target(&path, &config.base_dir, config.full_path))
-		{
-			pruned_dirs.push(path);
-			return Ok(());
-		}
-	}
-
-	if !matches_entry(config, &path, entry.file_type) {
-		return Ok(());
-	}
-
-	state.matches = state.matches.saturating_add(1);
-	if config.quiet {
-		return Ok(());
-	}
-	let display = display_path(config, &path);
-	let text = if let Some(format) = config.format.as_deref() {
-		format_path(format, &path, &display)
-	} else {
-		display
-	};
-	out.write_all(text.as_bytes())?;
-	if config.print0 {
-		out.write_all(b"\0")?;
-	} else {
-		out.write_all(b"\n")?;
-	}
-	Ok(())
 }
 
 /// Whether directory `path` contains any `--ignore-contains` marker entry.
@@ -1481,7 +1305,11 @@ fn root_was_absolute(path: &Path, roots: &[PathBuf]) -> bool {
 }
 
 fn normalize_display_path(path: &Path) -> String {
-	pi_walker::normalize_path(path).into_owned()
+	forward_slash_display(path)
+		.as_deref()
+		.unwrap_or(path)
+		.to_string_lossy()
+		.into_owned()
 }
 
 fn normalize_os_str(value: &OsStr) -> String {
@@ -1553,7 +1381,9 @@ mod tests {
 
 	use tempfile::{Builder, TempDir};
 
-	use super::FdCli;
+	use clap::Parser;
+
+	use super::{FdCli, fd_tree_options};
 	use crate::host::{Host, run_util};
 
 	/// Build a fresh temp directory containing a single matchable file plus a
@@ -1572,84 +1402,40 @@ mod tests {
 		tree
 	}
 
-	/// Build the same `WalkRequest` `search`/`try_search_fast` build for the
-	/// seeded tree: hidden entries included, gitignore disabled, root emitted.
-	/// Keeping the shape in one place so both walker-level regressions exercise
-	/// what fd actually asks the walker to do.
-	fn walk_request(tree: &std::path::Path) -> pi_walker::WalkRequest {
-		pi_walker::WalkRequest::new(tree)
-			.hidden(true)
-			.gitignore(false)
-			.emit_root(true)
-	}
-
-	/// A host whose cancellation has already fired.
-	fn cancelled_host(tree: &std::path::Path) -> Host {
-		let (host, _) = Host::for_test("fd", "", tree);
-		host.cancel_for_test();
-		host
-	}
-
-	// Regression note (#3949): both call sites in this file feed the walker
-	// `Host::cancel_heartbeat` — one via `collect_with_heartbeat` in the
-	// gitignore-respecting fallback path, one via `for_each_entry_with_heartbeat`
-	// in the fast path. `search`/`try_search_fast` also carry an outer
-	// pre-loop `if cancelled { break }` guard that fires when the flag is
-	// already set before search runs, so a pre-set-flag test at the `search()`
-	// level never reaches the walker (the outer guard short-circuits first) and
-	// therefore does not protect the regression. The tests below drive both
-	// walker APIs directly with the host heartbeat so a revert to a no-op
-	// heartbeat fails immediately.
-
+	// Regression note (#3949): `search` feeds the walk `Host::cancel_stop`.
+	// `search` also carries an outer pre-loop `if cancelled { break }` guard
+	// that fires when the flag is already set before search runs, so a
+	// pre-set-flag test at the `search()` level never reaches the walker and
+	// does not protect the regression. This test drives the walk fd builds
+	// directly with the host's stop predicate, so a revert to a predicate that
+	// never fires fails immediately.
 	#[test]
-	fn cancel_heartbeat_aborts_collect_with_heartbeat() {
-		// Covers the fallback path's walker call: without the cancel heartbeat,
-		// `collect_with_heartbeat` returns `Ok(outcome)` even after
-		// cancellation and the fd builtin drains the whole tree before
-		// observing the flag — the exact bug #3949 reports.
-		let tree = seeded_tree("collect");
-		let host = cancelled_host(tree.path());
-		let err = walk_request(tree.path())
-			.collect_with_heartbeat(host.cancel_heartbeat())
-			.expect_err("walker must surface the cancel flag as an error");
-		assert!(
-			matches!(err, pi_walker::WalkError::Interrupted(_)),
-			"heartbeat interruption should surface as WalkError::Interrupted, got {err:?}"
-		);
-	}
-
-	#[test]
-	fn cancel_heartbeat_aborts_for_each_entry_with_heartbeat() {
-		// Symmetric coverage for the fast path's walker API: the streaming
-		// variant must also surface `WalkError::Interrupted`, and the visitor
-		// must never see any entry (proving the abort happened at the
-		// heartbeat, not after entries were already delivered).
+	fn cancel_stop_aborts_the_walk_before_any_entry() {
 		let tree = seeded_tree("stream");
-		let host = cancelled_host(tree.path());
-		let visited = std::cell::Cell::new(0_usize);
-		let result = walk_request(tree.path()).for_each_entry_with_heartbeat(
-			host.cancel_heartbeat(),
-			|_entry| {
-				visited.update(|v| v + 1);
-				Ok::<_, std::io::Error>(pi_walker::WalkDecision::Include)
+		let (host, _) = Host::for_test("fd", "", tree.path());
+		host.cancel_for_test();
+		let cli = FdCli::try_parse_from(["fd", "-u"]).expect("fd args parse");
+		let mut visited = 0_usize;
+		let result = pi_walker::walk::tree(
+			&pi_walker::Fs::native(),
+			tree.path(),
+			&fd_tree_options(&cli),
+			&host.cancel_stop(),
+			|_event| {
+				visited += 1;
+				pi_walker::walk::Action::Continue
 			},
-			|_error| Ok::<_, std::io::Error>(pi_walker::WalkDecision::Include),
 		);
-		let err = result.expect_err("streaming walker must surface the cancel flag as an error");
 		assert!(
-			matches!(err, pi_walker::WalkError::Interrupted(_)),
-			"heartbeat interruption should surface as WalkError::Interrupted, got {err:?}"
+			matches!(result, Err(pi_walker::walk::WalkError::Stopped)),
+			"cancellation should end the walk with WalkError::Stopped, got {result:?}"
 		);
-		assert_eq!(
-			visited.get(),
-			0,
-			"visitor must not receive any entry once the heartbeat has aborted the walk",
-		);
+		assert_eq!(visited, 0, "no entry may be visited once the host has cancelled");
 	}
 
 	#[test]
 	fn walk_completes_normally_when_cancel_flag_is_unset() {
-		// Pin the non-cancelled contract: adding the cancel-observing heartbeat
+		// Pin the non-cancelled contract: the cancel-observing stop predicate
 		// must not affect a normal walk. `fd` still exercises both `search()`
 		// and its walker call (the outer pre-loop guard passes with
 		// cancelled=false), then finds the seeded match.

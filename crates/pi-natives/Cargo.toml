@@ -26,21 +26,15 @@ wayland-pipewire = ["dep:pipewire"]
 anyhow.workspace = true
 async-trait.workspace = true
 arboard.workspace = true
-ast-grep-core.workspace = true
 base64.workspace = true
 clap.workspace = true
-globset.workspace = true
 heapless.workspace = true
 fontdue.workspace = true
 grep-matcher.workspace = true
 futures.workspace = true
-grep-pcre2.workspace = true
-grep-regex.workspace = true
-grep-searcher.workspace = true
 html-escape.workspace = true
 html-to-markdown-rs.workspace = true
 icy_sixel.workspace = true
-ignore.workspace = true
 image = { workspace = true, features = ["bmp"] }
 resvg.workspace = true
 # Feature activation only (see workspace manifest): zune-jpeg needs `log` to compile.
@@ -61,15 +55,15 @@ pdf-inspector.workspace = true
 phf.workspace = true
 flume.workspace = true
 pi-ast = { workspace = true, features = ["wasm"] }
-pi-builtins = { workspace = true, features = ["util.grep"] }
+pi-builtins.workspace = true
 pi-diff.workspace = true
 pi-edit.workspace = true
+pi-walker.workspace = true
 pi-iso.workspace = true
 pi-predict.workspace = true
 pi-shell.workspace = true
 pi-vfs.workspace = true
 pi-voice.workspace = true
-pi-walker.workspace = true
 portable-pty.workspace = true
 png.workspace = true
 rayon.workspace = true

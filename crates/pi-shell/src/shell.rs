@@ -4681,6 +4681,7 @@ mod tests {
 		// contain: a loop over the registry cannot notice a name missing from it.
 		// Adding a utility is expected to update this list.
 		let expected = [
+			"ast-grep",
 			"b2sum",
 			"base32",
 			"base64",
@@ -4733,6 +4734,7 @@ mod tests {
 			"rsync",
 			"sed",
 			"seq",
+			"sg",
 			"sha1sum",
 			"sha224sum",
 			"sha256sum",
@@ -4776,12 +4778,14 @@ mod tests {
 			let help = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
 			let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
 			assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
-			// Two builtins are registered under the familiar command name but keep
+			// Some builtins are registered under the familiar command name but keep
 			// their implementation's own help text, exactly as the standalone
-			// versions did: `rg` is ripgrep, `jq` is jaq.
+			// versions did: `rg` is ripgrep, `jq` is jaq, `sg` is ast-grep (whose
+			// help names itself only through its usage line, here `sg`).
 			let expected = match name {
 				"rg" => "ripgrep",
 				"jq" => "jaq",
+				"sg" => "using AST pattern",
 				other => other,
 			};
 			assert!(
@@ -5448,7 +5452,7 @@ mod tests {
 	/// Mirrors busybox applet probing: `grep -qx "$applet" <(strings bin)`.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn grep_quiet_and_line_regexp() {
-		let tmp = std::env::temp_dir().join(format!("pi-grepq-{}", std::process::id()));
+		let tmp = std::env::temp_dir().join(format!("pi-walkerq-{}", std::process::id()));
 		let _ = std::fs::remove_dir_all(&tmp);
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		std::fs::write(tmp.join("data.txt"), "foo\nbar\nbaz\n").expect("data");

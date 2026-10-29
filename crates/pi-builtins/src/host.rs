@@ -186,6 +186,18 @@ fn output_metadata(file: &OpenFile) -> Option<Metadata> {
 	}
 }
 
+/// Metadata of the regular file backing a utility's stdout (see
+/// [`Host::stdout_file`]).
+#[derive(Clone, Debug)]
+pub(crate) struct StdoutFile(Metadata);
+
+impl StdoutFile {
+	/// Whether `path` on `fs` is this file.
+	pub fn is(&self, fs: &BlockingFs, path: &Path) -> bool {
+		fs.metadata(path).is_ok_and(|candidate| self.0.same_file(&candidate))
+	}
+}
+
 /// Exit status of a process killed by SIGPIPE (128 + 13).
 pub(crate) const SIGPIPE_EXIT_CODE: i32 = 141;
 
@@ -595,12 +607,18 @@ impl Host {
 	/// Whether `path` identifies the regular file currently backing stdout.
 	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
 	pub fn path_is_stdout(&self, path: &Path) -> bool {
+		self.stdout_file().is_some_and(|stdout| stdout.is(self.fs(), path))
+	}
+
+	/// The regular file backing stdout, as a `Sync` value worker threads can
+	/// test paths against; `None` when stdout is no regular file or the
+	/// utility did not set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn stdout_file(&self) -> Option<StdoutFile> {
 		self.stdout_metadata
 			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
 			.as_ref()
-			.is_some_and(|stdout| {
-				stdout.is_file() && self.fs().metadata(path).is_ok_and(|candidate| stdout.same_file(&candidate))
-			})
+			.filter(|stdout| stdout.is_file())
+			.map(|stdout| StdoutFile(stdout.clone()))
 	}
 
 	/// Looks up an exported shell variable.
@@ -638,23 +656,16 @@ impl Host {
 		self.reported_error.clone()
 	}
 
-	/// A `pi_walker` heartbeat that fails with `Interrupted` once the host
-	/// cancels. Without it the walker's per-entry heartbeat never sees the
-	/// flag, and a cancelled walk traverses the whole tree before the utility
-	/// notices (#3949, #3933). The walker surfaces the error as
-	/// `WalkError::Interrupted`; `grep`, `rg`, and `fd` tell it from a real
-	/// failure with [`Host::is_cancelled`], since the shell adapter owns the
-	/// cancellation status (130). Whatever a utility prints once cancelled is
-	/// dropped anyway (see [`SigpipeGuard`]).
-	pub fn cancel_heartbeat(&self) -> impl Fn() -> io::Result<()> + Send + Sync + 'static {
+	/// A `pi_walker` stop predicate that fires once the host cancels. Without
+	/// it a cancelled walk traverses the whole tree before the utility
+	/// notices (#3949, #3933). Walks end with `WalkError::Stopped`; `grep`,
+	/// `rg`, `fd`, and `find` tell it from a real failure with
+	/// [`Host::is_cancelled`], since the shell adapter owns the cancellation
+	/// status (130). Whatever a utility prints once cancelled is dropped
+	/// anyway (see [`SigpipeGuard`]).
+	pub fn cancel_stop(&self) -> impl Fn() -> bool + Send + Sync + 'static {
 		let cancel = Arc::clone(&self.cancel);
-		move || {
-			if cancel.load(Ordering::Relaxed) {
-				Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
-			} else {
-				Ok(())
-			}
-		}
+		move || cancel.load(Ordering::Relaxed)
 	}
 
 	/// Whether stdin is a shell pipe, virtual file, or custom stream, and so should be treated
@@ -1596,13 +1607,16 @@ fn posix_strerror(kind: io::ErrorKind) -> Option<&'static str> {
 /// render them the way the bash they emulate does, with `/` separators, so
 /// output does not change spelling with the host platform.
 pub(crate) fn forward_slash_display(path: &Path) -> Option<PathBuf> {
-	if !cfg!(windows) || path.to_str().is_none() {
+	if !cfg!(windows) {
 		return None;
 	}
-	match pi_walker::normalize_path(path) {
-		std::borrow::Cow::Owned(text) => Some(PathBuf::from(text)),
-		std::borrow::Cow::Borrowed(_) => None,
-	}
+	let text = path.to_str()?;
+	let literal = matches!(
+		path.components().next(),
+		Some(std::path::Component::Prefix(prefix))
+			if prefix.kind().is_verbatim() || matches!(prefix.kind(), std::path::Prefix::DeviceNS(_))
+	);
+	(text.contains('\\') && !literal).then(|| PathBuf::from(text.replace('\\', "/")))
 }
 
 /// Borrows an `OsStr` as raw bytes.

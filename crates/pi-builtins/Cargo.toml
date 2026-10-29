@@ -89,8 +89,9 @@ num-traits = "0.2"
 onig = { version = "6.4", default-features = false }
 os_display = "0.1.4"
 parse_datetime = "0.16"
+pi-ast = { workspace = true, optional = true }
+pi-walker.workspace = true
 pi-vfs.workspace = true
-pi-walker = { path = "../pi-walker" }
 platform-info = "2.0.3"
 rand = { version = "0.10.0", features = ["std_rng"] }
 rayon = "1.10"
@@ -313,6 +314,7 @@ base = [
 # ── Utility builtins ──────────────────────────────────────────────────────────
 # One feature per ported utility so a single utility can be built (and checked)
 # in isolation. `utils` turns on the whole set and is part of `default`.
+"util.ast-grep" = ["dep:pi-ast"]
 "util.b2sum" = ["util.cksum"]
 "util.base32" = []
 "util.base64" = ["util.base32"]
@@ -372,7 +374,7 @@ base = [
 "util.printenv" = []
 "util.readlink" = []
 "util.realpath" = []
-# Shares the PCRE2 JIT probe with `grep`.
+# Shares the record layout and line-length bound with `grep`.
 "util.rg" = ["util.grep"]
 "util.rm" = []
 "util.rmdir" = []
@@ -403,6 +405,7 @@ base = [
 "util.yes" = []
 
 utils = [
+  "util.ast-grep",
   "util.b2sum",
   "util.base32",
   "util.base64",

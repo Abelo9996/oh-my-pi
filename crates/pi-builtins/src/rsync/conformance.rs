@@ -12,12 +12,18 @@
 //!   permission bits, owners, mtimes (to the nanosecond when not set by the
 //!   run itself), symlink targets, hard-link groups, empty directories.
 //!
-//! The reference's three local processes (and a remote peer) report through
-//! one stream, so a few scenarios interleave sender, generator, and receiver
-//! lines differently from run to run. When ours differs from the reference
-//! only in the order of output lines, the reference is rerun (on a fresh
-//! fixture) up to [`REFERENCE_RETRIES`] times and any exact match passes;
-//! scenarios whose reference output is stable stay strictly ordered.
+//! The reference itself is not deterministic run to run: its three local
+//! processes (and a remote peer) report through one stream, so sender,
+//! generator, and receiver lines interleave differently, and its byte totals
+//! (`Total bytes sent/received`, the `sent … received …` summary) depend on
+//! how many multiplexed frames each run happened to flush. Rather than mask
+//! those values, the comparison stays exact and samples the reference: when
+//! ours differs from the reference in any way, the reference is rerun on a
+//! fresh fixture up to [`REFERENCE_RETRIES`] times, and the scenario passes if
+//! ours exactly equals (exit code, normalized stdout and stderr, tree) any
+//! one reference outcome. A real bug still fails because ours matches none of
+//! them; the failure report names how many distinct reference outcomes were
+//! seen and diffs ours against the first.
 //!
 //! The reference runs with an empty environment (plus `TZ` when set, so
 //! local-time output uses one zone on both sides), matching the test host's
@@ -49,8 +55,8 @@ use self::snapshot::Snapshot;
 use crate::host::run_util;
 use crate::rsync::Rsync;
 
-/// How many extra reference runs an ordering-only mismatch gets.
-const REFERENCE_RETRIES: usize = 4;
+/// How many extra reference runs a mismatch gets.
+const REFERENCE_RETRIES: usize = 8;
 
 /// One scenario: see [`cases`] for the field conventions.
 struct Case {
@@ -211,11 +217,6 @@ fn sorted_lines(data: &[u8]) -> Vec<&[u8]> {
 	lines
 }
 
-/// Whether `a` and `b` hold the same lines, in any order.
-fn same_lines(a: &[u8], b: &[u8]) -> bool {
-	sorted_lines(a) == sorted_lines(b)
-}
-
 /// Runs one scenario; `Err` carries the report.
 fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 	let dir = tempfile::tempdir().unwrap();
@@ -224,21 +225,28 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 	let base = fs::canonicalize(dir.path()).unwrap();
 	let bench = Bench::new(&base, reference, mode);
 	let ours = bench.run(case, "ours", Client::Ours);
-	let mut theirs = bench.run(case, "theirs", Client::Reference);
-	let mut retries = 0;
-	while ours != theirs
-		&& retries < REFERENCE_RETRIES
-		&& (ours.code, &ours.tree) == (theirs.code, &theirs.tree)
-		&& same_lines(&ours.out, &theirs.out)
-		&& same_lines(&ours.err, &theirs.err)
-	{
-		retries += 1;
-		theirs = bench.run(case, &format!("theirs{retries}"), Client::Reference);
+	// Distinct reference outcomes seen so far, first run first.
+	let mut seen: Vec<Outcome> = Vec::new();
+	for attempt in 0..=REFERENCE_RETRIES {
+		let outcome = bench.run(case, &format!("theirs{attempt}"), Client::Reference);
+		if outcome == ours {
+			if ours.code == case.exit {
+				return Ok(());
+			}
+			seen.insert(0, outcome);
+			break;
+		}
+		if !seen.contains(&outcome) {
+			seen.push(outcome);
+		}
 	}
-	if ours == theirs && theirs.code == case.exit {
-		return Ok(());
-	}
-	let mut report = format!("{} {:?}\n", case.name, bench.argv(case, 0));
+	let theirs = &seen[0];
+	let verdict = if ours == *theirs {
+		format!("ours matched one of {} distinct reference outcome(s)", seen.len())
+	} else {
+		format!("ours matched none of {} distinct reference outcome(s); diff against the first", seen.len())
+	};
+	let mut report = format!("{} {:?}\n  {verdict}\n", case.name, bench.argv(case, 0));
 	if theirs.code != case.exit {
 		writeln!(report, "  reference exited {} (table expects {})", theirs.code, case.exit).unwrap();
 	}

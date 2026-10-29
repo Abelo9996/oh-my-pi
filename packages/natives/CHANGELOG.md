@@ -6,6 +6,12 @@
 
 - The bash tool's built-in `rsync` behaves like rsync 3.5.1 on Linux, macOS, and Windows without an installed binary: local copies, `-e`/ssh remote shells, and `rsync://` daemons, interoperating with real rsync peers speaking protocol 29–33. Serving as a daemon (`--daemon`) is not supported; `PI_DISABLE_UUTILS_DESTRUCTIVE` falls back to the system `rsync`
 
+### Changed
+
+- Native `grep`, `glob`, `fuzzyFind`, `listWorkspace`, and ast-grep file discovery run on the new `pi-walker` walker and search engine: up to 2–3× faster on large trees, with identical results across runs
+- The bash tool's built-in `rg` and recursive `grep` search files in parallel and print them in path order
+- The scan cache behind `cache: true` now reuses unchanged directory listings validated against their timestamps, so it never serves stale results; `invalidateFsScanCache` only frees memory early, and `FS_SCAN_CACHE_TTL_MS`, `FS_SCAN_EMPTY_RECHECK_MS`, `FS_SCAN_CACHE_MAX_ENTRIES`, and `FS_SCAN_CACHE_MAX_BYTES` are no longer read
+
 ### Fixed
 
 - Fixed `wrapTextWithAnsi` continuing a wrapped styled underline (`4:3`, `4:4`) as a background colour, `4:0` setting background `40`, and colon-form colours (`38:2::r:g:b`) being dropped ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))

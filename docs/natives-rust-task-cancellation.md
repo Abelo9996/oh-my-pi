@@ -141,7 +141,7 @@ Aborted
 
 Observed patterns:
 
-- `glob` and `fuzzyFind` pass heartbeat callbacks into `pi-walker` traversal and also check result-processing loops.
+- `grep`, `glob`, and `fuzzyFind` pass `Stop` closures backed by the cancel token into `pi-walker`, which polls them during traversal and search; result-processing loops also check the token.
 - `grep` checks before and during expensive search and passes the token through its scan/search workers.
 - `run_pty_sync` checks every loop tick with a maximum 16ms wait cadence.
 - `listWorkspace` checks during traversal.

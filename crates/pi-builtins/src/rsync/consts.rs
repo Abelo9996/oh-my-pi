@@ -296,8 +296,6 @@ pub(crate) const fn msg_code_is_known(code: u8) -> bool {
 
 /// `maybe_send_keepalive` flags: the keepalive may flush output.
 pub(crate) const MSK_ALLOW_FLUSH: u32 = 1 << 0;
-/// `maybe_send_keepalive` flags: the receiver is busy on file data.
-pub(crate) const MSK_ACTIVE_RECEIVER: u32 = 1 << 1;
 
 // ---------------------------------------------------------------------------
 // File-list index values.

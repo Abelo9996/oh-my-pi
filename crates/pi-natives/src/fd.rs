@@ -8,7 +8,7 @@ use std::{cmp::Ordering, collections::BinaryHeap, path::Path};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use crate::{iofs, task};
+use crate::task;
 
 /// Options for fuzzy file path search.
 #[napi(object)]
@@ -21,7 +21,7 @@ pub struct FuzzyFindOptions<'env> {
 	pub hidden:      Option<bool>,
 	/// Respect .gitignore (default: true).
 	pub gitignore:   Option<bool>,
-	/// Enable walker scan caching (default: false).
+	/// Reuse unchanged directory listings across calls (default: false).
 	pub cache:       Option<bool>,
 	/// Maximum number of matches to return (default: 100).
 	pub max_results: Option<u32>,
@@ -320,33 +320,30 @@ struct FuzzyFindConfig {
 	cache:       Option<bool>,
 }
 
-fn score_entries<'a>(
-	entries: impl IntoIterator<Item = &'a pi_walker::CollectedEntry>,
+fn score_entries(
+	entries: &pi_walker::walk::Collection,
 	query: &FuzzyQuery,
 	max_results: usize,
 	ct: &task::CancelToken,
 ) -> Result<TopMatches> {
 	let mut scored = TopMatches::new(max_results);
 	let mut scratch = ScoreScratch::default();
-	for entry in entries {
+	for entry in entries.iter() {
 		ct.heartbeat()?;
-		if entry.file_type == pi_walker::FileType::Symlink {
-			continue;
-		}
-
 		let is_directory = entry.file_type == pi_walker::FileType::Dir;
-		let score = score_fuzzy_path(&entry.path, is_directory, query, &mut scratch);
+		let path = entry.path_lossy();
+		let score = score_fuzzy_path(&path, is_directory, query, &mut scratch);
 		if score > 0 {
-			scored.push(&entry.path, is_directory, score);
+			scored.push(&path, is_directory, score);
 		}
 	}
 	Ok(scored)
 }
 
 fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<FuzzyFindResult> {
-	let root = pi_walker::resolve_search_path(&config.path).map_err(iofs::map_walker_error)?;
-	let include_hidden = config.hidden.unwrap_or(false);
-	let respect_gitignore = config.gitignore.unwrap_or(true);
+	let root =
+		pi_walker::fs::resolve_dir(&pi_vfs::BlockingFs::native(), std::path::Path::new(&config.path))
+			.map_err(|err| ct.walk_failure(err))?;
 	let max_results = config.max_results.unwrap_or(100) as usize;
 	if max_results == 0 {
 		return Ok(FuzzyFindResult { matches: Vec::new(), total_matches: 0 });
@@ -357,26 +354,24 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 		return Ok(FuzzyFindResult { matches: Vec::new(), total_matches: 0 });
 	}
 
-	// Scored in place: a cached scan is borrowed, not copied, and only the
-	// retained matches allocate their paths.
-	let scored = pi_walker::WalkRequest::new(root)
-		.hidden(include_hidden)
-		.gitignore(respect_gitignore)
-		.skip_git(true)
-		.skip_node_modules(true)
-		.follow_links(pi_walker::FollowLinks::Always)
-		.detail(pi_walker::WalkDetail::Minimal)
-		.order(pi_walker::WalkOrder::Path)
-		.emit_root(false)
-		.depth(1, usize::MAX)
-		.directory_errors(pi_walker::DirectoryErrorMode::SkipSkippable)
-		.cache(config.cache.unwrap_or(false))
-		.empty_recheck(pi_walker::EmptyRecheck::Configured)
-		.with_collected_with_heartbeat(
-			|| ct.heartbeat(),
-			|entries| score_entries(entries, &query, max_results, &ct),
-		)
-		.map_err(iofs::map_walker_error)??;
+	let opts = pi_walker::walk::Options {
+		hidden: config.hidden.unwrap_or(false),
+		gitignore: config.gitignore.unwrap_or(true),
+		skip_git: true,
+		skip_node_modules: true,
+		follow_links: true,
+		cache: config.cache.unwrap_or(false),
+		..Default::default()
+	};
+	let entries =
+		pi_walker::walk::collect(&pi_walker::Fs::Native, &root, &opts, false, &ct, |_, entry| {
+			match entry.file_type {
+				pi_walker::FileType::File | pi_walker::FileType::Dir => pi_walker::walk::Action::Continue,
+				pi_walker::FileType::Symlink => pi_walker::walk::Action::Skip,
+			}
+		})
+		.map_err(|err| ct.walk_failure(err))?;
+	let scored = score_entries(&entries, &query, max_results, &ct)?;
 
 	let total_matches = scored.total_matches();
 	let matches = scored.into_sorted_matches();

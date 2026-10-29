@@ -14,6 +14,7 @@ use std::{
 	collections::HashMap,
 	ffi::OsString,
 	path::{Component, Path, PathBuf, Prefix},
+	sync::atomic::{AtomicUsize, Ordering},
 	time::{Duration, Instant},
 };
 
@@ -178,30 +179,33 @@ impl PathPolicy {
 			return None;
 		}
 		let escaped = escape_glob_metachars(normalized);
-		let glob = pi_walker::CompiledWalkGlob::new([format!("**/{escaped}")]).ok()?;
+		let glob = pi_walker::pattern::Glob::new(&format!("**/{escaped}")).ok()?;
 		let started = Instant::now();
-		let request = pi_walker::WalkRequest::new(&self.cwd)
-			.hidden(true)
-			.gitignore(true)
-			.skip_git(true)
-			.skip_node_modules(false)
-			.emit_root(false)
-			.cache(false)
-			.limit(2)
-			.filter(pi_walker::WalkFilter::all().glob(glob));
-		let result = request
-			.collect_with_heartbeat(|| {
-				if started.elapsed() >= Duration::from_secs(5) {
-					Err("workspace suffix search timed out")
-				} else {
-					Ok(())
+		let stop = || started.elapsed() >= Duration::from_secs(5);
+		let kept = AtomicUsize::new(0);
+		let opts = pi_walker::walk::Options {
+			hidden: true,
+			gitignore: true,
+			skip_git: true,
+			..Default::default()
+		};
+		let result =
+			pi_walker::walk::collect(&pi_walker::Fs::Native, &self.cwd, &opts, false, &stop, |_, entry| {
+				if !matches!(entry.file_type, pi_walker::FileType::File | pi_walker::FileType::Dir)
+					|| !glob.is_match_base(entry.path, entry.name())
+				{
+					return pi_walker::walk::Action::Skip;
 				}
+				if kept.fetch_add(1, Ordering::Relaxed) >= 1 {
+					return pi_walker::walk::Action::Stop;
+				}
+				pi_walker::walk::Action::Continue
 			})
 			.ok()?;
-		if result.entries.len() != 1 {
+		if kept.load(Ordering::Relaxed) != 1 || result.len() != 1 {
 			return None;
 		}
-		let display = result.entries.into_iter().next()?.path;
+		let display = result.get(0).path_lossy().into_owned();
 		Some(Resolved { absolute: self.cwd.join(&display), display })
 	}
 

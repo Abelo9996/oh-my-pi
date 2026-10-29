@@ -26,16 +26,22 @@ use grep_searcher::{
 	BinaryDetection, Encoding, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
 use crate::grep::{
-	BoundedSearchReader, CompiledMatcher, RecordFormat, SEARCH_HEAP_LIMIT, describe_search_error,
-	exit_status, for_each_nonempty_match, pcre2_jit_enabled, read_pattern_source,
+	BoundedSearchReader, RecordFormat, SEARCH_HEAP_LIMIT, describe_search_error, exit_status,
+	for_each_nonempty_match, read_pattern_source,
 };
-use crate::host::{Host, StreamWriter, Utility, forward_slash_display};
+use crate::host::{Host, StdoutFile, StreamWriter, Utility, forward_slash_display};
 
 use ignore::{
 	Match,
-	gitignore::{Gitignore, GitignoreBuilder},
 	overrides::{Override, OverrideBuilder},
 	types::{Types, TypesBuilder},
+};
+use pi_walker::{
+	Detail, FileType,
+	exec::{self, Flow},
+	grep::{Engine, pcre2_jit_enabled},
+	ignore::{Match as RuleMatch, Rules},
+	walk,
 };
 
 #[derive(Parser, Debug)]
@@ -483,10 +489,9 @@ pub(crate) struct Rg {
 	#[arg(long = "no-config")]
 	_no_config: bool,
 
-	/// Number of search threads (accepted; this builtin searches in-process,
-	/// serially).
+	/// Number of walk and search threads (0 or absent: the default).
 	#[arg(short = 'j', long = "threads", value_name = "NUM")]
-	_threads: Option<usize>,
+	threads: Option<usize>,
 
 	/// Print SEPARATOR instead of '/' in printed file paths.
 	#[arg(long = "path-separator", value_name = "SEPARATOR")]
@@ -865,7 +870,7 @@ fn build_pcre_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<Pcre
 		.map_err(|error| error.to_string())
 }
 
-fn build_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<CompiledMatcher, String> {
+fn build_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<Engine, String> {
 	let engine = cli.engine.unwrap_or(if cli.pcre2 {
 		RegexEngine::Pcre2
 	} else {
@@ -873,12 +878,12 @@ fn build_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<CompiledM
 	});
 	match engine {
 		RegexEngine::Default => build_rust_matcher(patterns, cli)
-			.map(CompiledMatcher::Rust)
+			.map(Engine::Rust)
 			.map_err(|error| error.to_string()),
-		RegexEngine::Pcre2 => build_pcre_matcher(host, patterns, cli).map(CompiledMatcher::Pcre),
+		RegexEngine::Pcre2 => build_pcre_matcher(host, patterns, cli).map(Engine::Pcre),
 		RegexEngine::Auto => match build_rust_matcher(patterns, cli) {
-			Ok(matcher) => Ok(CompiledMatcher::Rust(matcher)),
-			Err(_) => build_pcre_matcher(host, patterns, cli).map(CompiledMatcher::Pcre),
+			Ok(matcher) => Ok(Engine::Rust(matcher)),
+			Err(_) => build_pcre_matcher(host, patterns, cli).map(Engine::Pcre),
 		},
 	}
 }
@@ -900,7 +905,11 @@ fn binary_detection(cli: &Rg, mode: BinaryMode) -> BinaryDetection {
 	}
 }
 
-fn build_searcher(cli: &Rg, opts: &SearchOptions, mode: BinaryMode) -> Result<Searcher, String> {
+fn build_searcher(
+	cli: &Rg,
+	opts: &SearchOptions,
+	mode: BinaryMode,
+) -> Result<SearcherBuilder, String> {
 	let (encoding, bom_sniffing) = match cli.encoding.as_deref() {
 		None | Some("auto") => (None, true),
 		Some("none") => (None, false),
@@ -924,7 +933,7 @@ fn build_searcher(cli: &Rg, opts: &SearchOptions, mode: BinaryMode) -> Result<Se
 	} else if cli.crlf && !cli.no_crlf {
 		builder.line_terminator(LineTerminator::crlf());
 	}
-	Ok(builder.build())
+	Ok(builder)
 }
 
 fn read_pattern_file(host: &mut Host, path: &OsStr) -> Result<Vec<String>, String> {
@@ -1052,22 +1061,19 @@ fn print_type_list<W: Write>(cli: &Rg, out: &mut W) -> Result<(), String> {
 	Ok(())
 }
 
-struct RgWalk {
-	request: pi_walker::WalkRequest,
-	filters: PathFilters,
-}
-
 struct PathFilters {
 	fs:           pi_vfs::BlockingFs,
 	overrides:    Option<Override>,
-	explicit:     Option<Gitignore>,
+	/// `--ignore-file` rules in command-line order, matched relative to `cwd`.
+	explicit:     Vec<Rules>,
+	cwd:          PathBuf,
 	types:        Option<Types>,
 	max_filesize: Option<u64>,
 }
 
 impl PathFilters {
-	fn includes(&self, path: &Path, file_type: pi_walker::FileType, size: Option<f64>) -> bool {
-		let is_dir = file_type == pi_walker::FileType::Dir;
+	fn includes(&self, path: &Path, file_type: FileType, size: Option<u64>) -> bool {
+		let is_dir = file_type == FileType::Dir;
 		let override_match = self
 			.overrides
 			.as_ref()
@@ -1081,15 +1087,10 @@ impl PathFilters {
 		let explicitly_included = override_match
 			.as_ref()
 			.is_some_and(|matched| matches!(matched, Match::Whitelist(_)));
-		if !explicitly_included
-			&& self
-				.explicit
-				.as_ref()
-				.is_some_and(|ignore| matches!(ignore.matched(path, is_dir), Match::Ignore(_)))
-		{
+		if !explicitly_included && self.explicitly_ignored(path, is_dir) {
 			return false;
 		}
-		if file_type != pi_walker::FileType::File {
+		if file_type != FileType::File {
 			return true;
 		}
 		if !explicitly_included
@@ -1101,12 +1102,25 @@ impl PathFilters {
 			return false;
 		}
 		if let Some(limit) = self.max_filesize {
-			let size = size.or_else(|| self.fs.metadata(path).ok().map(|meta| meta.len() as f64));
-			if size.is_some_and(|size| size > limit as f64) {
+			let size = size.or_else(|| self.fs.metadata(path).ok().map(|meta| meta.len()));
+			if size.is_some_and(|size| size > limit) {
 				return false;
 			}
 		}
 		true
+	}
+
+	/// Whether the last `--ignore-file` rule matching `path` ignores it.
+	fn explicitly_ignored(&self, path: &Path, is_dir: bool) -> bool {
+		if self.explicit.is_empty() {
+			return false;
+		}
+		self.explicit
+			.iter()
+			.rev()
+			.map(|rules| rules.matched_below(&self.cwd, path, is_dir))
+			.find(|matched| *matched != RuleMatch::None)
+			== Some(RuleMatch::Ignore)
 	}
 }
 
@@ -1143,18 +1157,14 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 		}
 		Some(overrides.build().map_err(|error| format!("rg: {error}"))?)
 	};
-	let explicit = if cli.ignore_files.is_empty() {
-		None
-	} else {
-		let mut builder = GitignoreBuilder::new(&cwd);
-		for path in &cli.ignore_files {
-			let resolved = host.resolve(path);
-			if let Some(error) = pi_walker::add_ignore_file(&mut builder, host.fs(), &resolved) {
-				return Err(format!("rg: {}: {error}", path.display()));
-			}
-		}
-		Some(builder.build().map_err(|error| format!("rg: {error}"))?)
-	};
+	let explicit = cli
+		.ignore_files
+		.iter()
+		.map(|path| {
+			Rules::read(host.fs(), &host.resolve(path))
+				.map_err(|error| format!("rg: {}: {error}", path.display()))
+		})
+		.collect::<Result<Vec<_>, _>>()?;
 	let types = if cli.types.is_empty() && cli.type_nots.is_empty() {
 		None
 	} else {
@@ -1164,45 +1174,90 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 				.map_err(|error| format!("rg: {error}"))?,
 		)
 	};
-	Ok(PathFilters { fs: host.fs().clone(), overrides, explicit, types, max_filesize })
+	Ok(PathFilters { fs: host.fs().clone(), overrides, explicit, cwd, types, max_filesize })
 }
 
-fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> {
-	let filters = build_path_filters(host, cli)?;
-	let unrestricted_no_ignore = cli.unrestricted >= 1;
-	let include_hidden = (cli.hidden || cli.unrestricted >= 2) && !cli.no_hidden;
-	let no_ignore = (cli.no_ignore || unrestricted_no_ignore) && !cli.ignore;
-	let order = if cli.sort_files || cli.sort.as_deref() == Some("path") {
-		pi_walker::WalkOrder::Path
-	} else {
-		pi_walker::WalkOrder::Unordered
-	};
-	let request = pi_walker::WalkRequest::new(root)
-		.filesystem(host.fs().clone())
-		.hidden(include_hidden)
-		.gitignore(!no_ignore)
-		.skip_git(!no_ignore)
-		.skip_node_modules(false)
-		// ripgrep always follows a path operand that is itself a symlink (even with
-		// `--no-follow`); `-L` extends that to links found during the walk.
-		.follow_links(if cli.follow && !cli.no_follow {
-			pi_walker::FollowLinks::Always
+fn walk_options(cli: &Rg, filters: &PathFilters) -> walk::Options {
+	let no_ignore = (cli.no_ignore || cli.unrestricted >= 1) && !cli.ignore;
+	walk::Options {
+		hidden: (cli.hidden || cli.unrestricted >= 2) && !cli.no_hidden,
+		gitignore: !no_ignore,
+		skip_git: !no_ignore,
+		// The walk root is always resolved through symlinks, as ripgrep follows
+		// a path operand that is itself a symlink (even with `--no-follow`);
+		// `-L` extends that to links found during the walk.
+		follow_links: cli.follow && !cli.no_follow,
+		detail: if filters.max_filesize.is_some() {
+			Detail::Full
 		} else {
-			pi_walker::FollowLinks::Roots
-		})
-		.detail(if filters.max_filesize.is_some() {
-			pi_walker::WalkDetail::Full
+			Detail::Minimal
+		},
+		max_depth: cli.max_depth,
+		same_file_system: cli.one_file_system && !cli.no_one_file_system,
+		workers: cli.threads,
+		..walk::Options::default()
+	}
+}
+
+/// The files below `root` that rg searches or lists, in path order, with the
+/// walk layer that reads them. Unreadable directories are reported and set
+/// `had_error`; `None` when the walk failed (reported) or was cancelled
+/// (silent).
+fn collect_files(
+	host: &mut Host,
+	cli: &Rg,
+	filters: &PathFilters,
+	root: &Path,
+	no_messages: bool,
+	had_error: &mut bool,
+) -> Option<(pi_walker::Fs, walk::Collection)> {
+	let layer = pi_walker::Fs::new(host.fs(), root);
+	let stop = host.cancel_stop();
+	let collected = walk::collect(&layer, root, &walk_options(cli, filters), true, &stop, |worker, entry| {
+		if !filters.includes(worker.abs(entry), entry.file_type, entry.size) {
+			return if entry.file_type == FileType::Dir {
+				walk::Action::SkipDir
+			} else {
+				walk::Action::Skip
+			};
+		}
+		if entry.file_type == FileType::File {
+			walk::Action::Continue
 		} else {
-			pi_walker::WalkDetail::Minimal
-		})
-		.order(order)
-		.emit_root(false)
-		.depth(1, cli.max_depth.unwrap_or(usize::MAX))
-		.visit_order(pi_walker::VisitOrder::PreOrder)
-		.directory_errors(pi_walker::DirectoryErrorMode::Visit)
-		.same_file_system(cli.one_file_system && !cli.no_one_file_system)
-		.cache(false);
-	Ok(RgWalk { request, filters })
+			walk::Action::Skip
+		}
+	});
+	match collected {
+		Ok(files) => {
+			for error in files.errors() {
+				*had_error = true;
+				if !no_messages {
+					let _ = writeln!(host.stderr, "rg: {}: {}", error.path.display(), error.error);
+				}
+			}
+			Some((layer, files))
+		},
+		// Harness cancellation: the shell wrapper owns the exit status, and no
+		// spurious diagnostic is printed.
+		Err(walk::WalkError::Stopped) => {
+			*had_error = true;
+			None
+		},
+		Err(error) => {
+			*had_error = true;
+			if !no_messages {
+				let _ = writeln!(host.stderr, "rg: {error}");
+			}
+			None
+		},
+	}
+}
+
+/// Index into a collection of `len` files of the `index`th file to report:
+/// path order, or its reverse under `--sortr path`.
+fn file_order(cli: &Rg, len: usize) -> impl Fn(usize) -> usize + Sync {
+	let reverse = cli.sortr.as_deref() == Some("path");
+	move |index| if reverse { len - 1 - index } else { index }
 }
 
 /// Display spelling of a walked `path` under the `operand` it was found from
@@ -1268,26 +1323,43 @@ fn process_reader<M: Matcher, R: Read, W: Write>(
 	Ok(sink.any_match)
 }
 
+/// What searching one file needs besides the searcher, shared by the
+/// workers of a directory search.
+struct FileContext<'a> {
+	fs:         &'a pi_vfs::BlockingFs,
+	/// The file backing stdout, never searched.
+	stdout:     Option<&'a StdoutFile>,
+	search_zip: bool,
+	opts:       &'a SearchOptions,
+}
+
+/// One searched file's output, handed to the consumer in path order.
+struct FileSearch {
+	out:     Vec<u8>,
+	err:     Vec<u8>,
+	stats:   Stats,
+	outcome: io::Result<SearchOutcome>,
+}
+
 #[allow(
 	clippy::too_many_arguments,
 	reason = "file processing needs the matcher, searcher, output state, and path metadata"
 )]
-fn process_file<M: Matcher, W: Write>(
-	host: &mut Host,
-	cli: &Rg,
+fn process_file<M: Matcher, W: Write, E: Write>(
+	ctx: &FileContext<'_>,
 	matcher: &M,
 	searcher: &mut Searcher,
 	path: &Path,
 	display: Option<&[u8]>,
-	opts: &SearchOptions,
 	stats: &mut Stats,
 	out: &mut W,
+	err: &mut E,
 ) -> io::Result<SearchOutcome> {
-	if host.path_is_stdout(path) {
+	let (fs, opts) = (ctx.fs, ctx.opts);
+	if ctx.stdout.is_some_and(|stdout| stdout.is(fs, path)) {
 		return Ok(SearchOutcome { any_match: false, had_error: false });
 	}
-	let fs = host.fs();
-	let result = if cli.search_zip && !cli.no_search_zip {
+	let result = if ctx.search_zip {
 		let builder = DecompressionReaderBuilder::new();
 		if !builder.get_matcher().has_command(path) {
 			fs.open(path)
@@ -1312,7 +1384,7 @@ fn process_file<M: Matcher, W: Write>(
 			let message = describe_search_error(&error);
 			Ok(SearchOutcome {
 				any_match: false,
-				had_error: report_path_error(host, display, path, &message, opts),
+				had_error: report_path_error(err, display, path, &message, opts),
 			})
 		},
 	}
@@ -1383,7 +1455,7 @@ fn open_provider_decompression(
 }
 
 fn report_path_error(
-	host: &mut Host,
+	err_out: &mut impl Write,
 	display: Option<&[u8]>,
 	fallback: &Path,
 	err: &str,
@@ -1393,20 +1465,23 @@ fn report_path_error(
 		let name = display
 			.map(|bytes| String::from_utf8_lossy(bytes).into_owned())
 			.unwrap_or_else(|| fallback.display().to_string());
-		let _ = writeln!(host.stderr, "rg: {name}: {err}");
+		let _ = writeln!(err_out, "rg: {name}: {err}");
 	}
 	true
 }
 
+/// Searches the files below `root` on parallel workers, writing each file's
+/// output in path order.
 #[allow(
 	clippy::too_many_arguments,
 	reason = "required by standard walk/configure interfaces and search parameters"
 )]
-fn search_collected_files<M: Matcher, W: Write>(
+fn search_dir<M: Matcher + Sync, W: Write>(
 	host: &mut Host,
 	cli: &Rg,
+	filters: &PathFilters,
 	matcher: &M,
-	searcher: &mut Searcher,
+	searcher: &SearcherBuilder,
 	operand: &OsStr,
 	root: &Path,
 	show_names: bool,
@@ -1414,175 +1489,82 @@ fn search_collected_files<M: Matcher, W: Write>(
 	stats: &mut Stats,
 	out: &mut W,
 ) -> io::Result<SearchOutcome> {
-	let mut files = match collect_filtered_files(host, cli, root) {
-		Ok(files) => files,
-		Err(_) if host.is_cancelled() => {
-			return Ok(SearchOutcome { any_match: false, had_error: true });
-		},
-		Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Err(err),
-		Err(err) => {
-			if !opts.no_messages {
-				let _ = writeln!(host.stderr, "{err}");
-			}
-			return Ok(SearchOutcome { any_match: false, had_error: true });
-		},
-	};
-	files.sort_unstable_by(|a, b| b.cmp(a));
-	let mut any_match = false;
 	let mut had_error = false;
-	let mut processed_file = false;
-	for path in files {
-		if opts.quiet && any_match {
-			break;
-		}
-		if processed_file && host.is_cancelled() {
-			had_error = true;
-			break;
-		}
-		processed_file = true;
-		let display_path = display_path(operand, root, &path);
-		let display_bytes = display_path.as_os_str().as_encoded_bytes().to_vec();
-		let display = (show_names || opts.json).then_some(display_bytes.as_slice());
-		let outcome = process_file(host, cli, matcher, searcher, &path, display, opts, stats, out)?;
-		any_match |= outcome.any_match;
-		had_error |= outcome.had_error;
-		if host.is_cancelled() {
-			had_error = true;
-			break;
-		}
+	let Some((layer, files)) = collect_files(host, cli, filters, root, opts.no_messages, &mut had_error)
+	else {
+		return Ok(SearchOutcome { any_match: false, had_error });
+	};
+	let fs = host.fs().clone();
+	let stdout = host.stdout_file();
+	let ctx = FileContext {
+		fs:         &fs,
+		stdout:     stdout.as_ref(),
+		search_zip: cli.search_zip && !cli.no_search_zip,
+		opts,
+	};
+	let workers = if cli.line_buffered && !cli.no_line_buffered {
+		1
+	} else {
+		walk_options(cli, filters).parallelism(&layer)
+	};
+	let order = file_order(cli, files.len());
+	let stop = host.cancel_stop();
+	let mut any_match = false;
+	let mut failed = None;
+	exec::ordered(
+		files.len(),
+		workers,
+		&stop,
+		|| searcher.build(),
+		|searcher: &mut Searcher, index| {
+			let path = layer.join(root, files.get(order(index)).path);
+			let display_path = display_path(operand, root, &path);
+			let display = (show_names || opts.json).then_some(display_path.as_os_str().as_encoded_bytes());
+			let (mut file_out, mut file_err, mut file_stats) =
+				(Vec::<u8>::new(), Vec::<u8>::new(), Stats::new());
+			let outcome = process_file(
+				&ctx,
+				matcher,
+				searcher,
+				&path,
+				display,
+				&mut file_stats,
+				&mut file_out,
+				&mut file_err,
+			);
+			FileSearch { out: file_out, err: file_err, stats: file_stats, outcome }
+		},
+		|_, found: FileSearch| {
+			*stats += &found.stats;
+			if let Err(error) = out.write_all(&found.out) {
+				failed = Some(error);
+				return Flow::Stop;
+			}
+			let _ = host.stderr.write_all(&found.err);
+			match found.outcome {
+				Ok(outcome) => {
+					any_match |= outcome.any_match;
+					had_error |= outcome.had_error;
+				},
+				Err(error) => {
+					failed = Some(error);
+					return Flow::Stop;
+				},
+			}
+			if opts.quiet && any_match {
+				Flow::Stop
+			} else {
+				Flow::Continue
+			}
+		},
+	);
+	if let Some(error) = failed {
+		return Err(error);
+	}
+	if host.is_cancelled() {
+		had_error = true;
 	}
 	Ok(SearchOutcome { any_match, had_error })
-}
-
-#[allow(
-	clippy::too_many_arguments,
-	reason = "required by standard walk/configure interfaces and search parameters"
-)]
-fn search_dir<M: Matcher, W: Write>(
-	host: &mut Host,
-	cli: &Rg,
-	matcher: &M,
-	searcher: &mut Searcher,
-	operand: &OsStr,
-	root: &Path,
-	show_names: bool,
-	opts: &SearchOptions,
-	stats: &mut Stats,
-	out: &mut W,
-) -> io::Result<SearchOutcome> {
-	if cli.sortr.as_deref() == Some("path") {
-		return search_collected_files(
-			host, cli, matcher, searcher, operand, root, show_names, opts, stats, out,
-		);
-	}
-	let walk = match build_walk(host, cli, root) {
-		Ok(walk) => walk,
-		Err(err) => {
-			if !opts.no_messages {
-				let _ = writeln!(host.stderr, "{err}");
-			}
-			return Ok(SearchOutcome { any_match: false, had_error: true });
-		},
-	};
-	let any_match = std::cell::Cell::new(false);
-	let had_error = std::cell::Cell::new(false);
-	let mut walk_err = host.stderr_clone();
-	let streamed = match walk.request.for_each_entry_with_heartbeat(
-		host.cancel_heartbeat(),
-		|entry| {
-			if opts.quiet && any_match.get() {
-				return Ok(pi_walker::WalkDecision::Stop);
-			}
-			let path = entry.absolute_path.as_ref();
-			if !walk.filters.includes(path, entry.file_type, entry.size) {
-				return Ok(if entry.file_type == pi_walker::FileType::Dir {
-					pi_walker::WalkDecision::SkipDescend
-				} else {
-					pi_walker::WalkDecision::Skip
-				});
-			}
-			if entry.file_type != pi_walker::FileType::File {
-				return Ok(pi_walker::WalkDecision::Skip);
-			}
-			let display_path = display_path(operand, root, path);
-			let display_bytes = display_path.as_os_str().as_encoded_bytes().to_vec();
-			let display = (show_names || opts.json).then_some(display_bytes.as_slice());
-			let outcome = process_file(host, cli, matcher, searcher, path, display, opts, stats, out)?;
-			any_match.update(|v| v || outcome.any_match);
-			had_error.update(|v| v || outcome.had_error);
-			Ok(if opts.quiet && any_match.get() {
-				pi_walker::WalkDecision::Stop
-			} else {
-				pi_walker::WalkDecision::Include
-			})
-		},
-		|error| {
-			had_error.set(true);
-			if !opts.no_messages {
-				let _ =
-					writeln!(walk_err, "rg: {}: {}", error.path.display(), error.error);
-			}
-			Ok(pi_walker::WalkDecision::Include)
-		},
-	) {
-		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => {
-			Some(Ok(SearchOutcome { any_match: any_match.get(), had_error: had_error.get() }))
-		},
-		Err(pi_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
-			// Harness cancellation; the shell wrapper overrides the exit code
-			// and stay-silent on stderr — no spurious "interrupted" diagnostic.
-			had_error.set(true);
-			Some(Ok(SearchOutcome { any_match: any_match.get(), had_error: true }))
-		},
-		Err(pi_walker::WalkError::Interrupted(error))
-			if error.kind() == io::ErrorKind::BrokenPipe =>
-		{
-			Some(Err(error))
-		},
-		Err(err) => {
-			had_error.set(true);
-			if !opts.no_messages {
-				let _ = writeln!(host.stderr, "rg: {err}");
-			}
-			Some(Ok(SearchOutcome {
-				any_match: any_match.get(),
-				had_error: had_error.get(),
-			}))
-		},
-	};
-	streamed.unwrap_or_else(|| {
-		search_collected_files(host, cli, matcher, searcher, operand, root, show_names, opts, stats, out)
-	})
-}
-
-fn collect_filtered_files(host: &mut Host, cli: &Rg, root: &Path) -> io::Result<Vec<PathBuf>> {
-	let walk = build_walk(host, cli, root).map_err(io::Error::other)?;
-	let mut files = Vec::new();
-	let result = walk.request.for_each_entry_with_heartbeat(
-		host.cancel_heartbeat(),
-		|entry| {
-			if entry.file_type == pi_walker::FileType::File {
-				let path = entry.absolute_path.as_ref();
-				if walk.filters.includes(path, entry.file_type, entry.size) {
-					files.push(path.to_path_buf());
-				}
-			}
-			Ok(pi_walker::WalkDecision::Include)
-		},
-		|_| Ok(pi_walker::WalkDecision::Include),
-	);
-	match result {
-		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => Ok(files),
-		Err(pi_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
-			Err(io::Error::other("rg: cancelled"))
-		},
-		Err(pi_walker::WalkError::Interrupted(error))
-			if error.kind() == io::ErrorKind::BrokenPipe =>
-		{
-			Err(error)
-		},
-		Err(err) => Err(io::Error::other(format!("rg: {err}"))),
-	}
 }
 
 fn list_files<W: Write>(
@@ -1592,6 +1574,8 @@ fn list_files<W: Write>(
 	record: &RecordFormat,
 	out: &mut W,
 ) -> SearchOutcome {
+	let no_messages = cli.no_messages && !cli.messages;
+	let filters = build_path_filters(host, cli);
 	let mut any = false;
 	let mut had_error = false;
 	let mut processed_operand = false;
@@ -1604,22 +1588,25 @@ fn list_files<W: Write>(
 		let resolved = host.resolve(operand);
 		match host.fs().metadata(&resolved) {
 			Ok(meta) if meta.is_dir() => {
-				let mut files = match collect_filtered_files(host, cli, &resolved) {
-					Ok(files) => files,
-					Err(_) if host.is_cancelled() => {
-						had_error = true;
-						break;
-					},
-					Err(err) => {
-						let _ = writeln!(host.stderr, "{err}");
+				let filters = match &filters {
+					Ok(filters) => filters,
+					Err(error) => {
+						let _ = writeln!(host.stderr, "{error}");
 						had_error = true;
 						continue;
 					},
 				};
-				if cli.sortr.as_deref() == Some("path") {
-					files.sort_unstable_by(|a, b| b.cmp(a));
-				}
-				for path in files {
+				let Some((layer, files)) =
+					collect_files(host, cli, filters, &resolved, no_messages, &mut had_error)
+				else {
+					if host.is_cancelled() {
+						break;
+					}
+					continue;
+				};
+				let order = file_order(cli, files.len());
+				for index in 0..files.len() {
+					let path = layer.join(&resolved, files.get(order(index)).path);
 					if host.path_is_stdout(&path) {
 						continue;
 					}
@@ -1694,7 +1681,7 @@ fn write_json_summary<W: Write>(out: &mut W, stats: &Stats) -> io::Result<()> {
 	out.write_all(b"\n")
 }
 
-fn execute_search<M: Matcher, W: Write>(
+fn execute_search<M: Matcher + Sync, W: Write>(
 	host: &mut Host,
 	cli: &Rg,
 	matcher: &M,
@@ -1702,7 +1689,7 @@ fn execute_search<M: Matcher, W: Write>(
 	opts: &SearchOptions,
 	out: &mut W,
 ) -> i32 {
-	let mut auto_searcher = match build_searcher(cli, opts, BinaryMode::Automatic) {
+	let auto_searcher = match build_searcher(cli, opts, BinaryMode::Automatic) {
 		Ok(searcher) => searcher,
 		Err(error) => {
 			let _ = writeln!(host.stderr, "rg: {error}");
@@ -1710,7 +1697,7 @@ fn execute_search<M: Matcher, W: Write>(
 		},
 	};
 	let mut explicit_searcher = match build_searcher(cli, opts, BinaryMode::Explicit) {
-		Ok(searcher) => searcher,
+		Ok(searcher) => searcher.build(),
 		Err(error) => {
 			let _ = writeln!(host.stderr, "rg: {error}");
 			return 2;
@@ -1721,6 +1708,15 @@ fn execute_search<M: Matcher, W: Write>(
 			&& host.fs().metadata(&host.resolve(path)).is_ok_and(|meta| meta.is_dir())
 	});
 	let show_names = show_names_for(paths, recursive, cli, opts);
+	let mut filters = None;
+	let fs = host.fs().clone();
+	let stdout = host.stdout_file();
+	let ctx = FileContext {
+		fs:         &fs,
+		stdout:     stdout.as_ref(),
+		search_zip: cli.search_zip && !cli.no_search_zip,
+		opts,
+	};
 	let mut stats = Stats::new();
 	let mut any_match = false;
 	let mut had_error = false;
@@ -1765,18 +1761,28 @@ fn execute_search<M: Matcher, W: Write>(
 		let resolved = host.resolve(operand);
 		match host.fs().metadata(&resolved) {
 			Ok(meta) if meta.is_dir() => {
-				match search_dir(
-					host,
-					cli,
-					matcher,
-					&mut auto_searcher,
-					operand.as_os_str(),
-					&resolved,
-					show_names,
-					opts,
-					&mut stats,
-					out,
-				) {
+				let searched = match filters.get_or_insert_with(|| build_path_filters(host, cli)) {
+					Ok(filters) => search_dir(
+						host,
+						cli,
+						filters,
+						matcher,
+						&auto_searcher,
+						operand.as_os_str(),
+						&resolved,
+						show_names,
+						opts,
+						&mut stats,
+						out,
+					),
+					Err(error) => {
+						if !opts.no_messages {
+							let _ = writeln!(host.stderr, "{error}");
+						}
+						Ok(SearchOutcome { any_match: false, had_error: true })
+					},
+				};
+				match searched {
 					Ok(outcome) => {
 						any_match |= outcome.any_match;
 						had_error |= outcome.had_error;
@@ -1796,15 +1802,14 @@ fn execute_search<M: Matcher, W: Write>(
 				let display =
 					(show_names || opts.json).then_some(operand.as_os_str().as_encoded_bytes());
 				match process_file(
-					host,
-					cli,
+					&ctx,
 					matcher,
 					&mut explicit_searcher,
 					&resolved,
 					display,
-					opts,
 					&mut stats,
 					out,
+					&mut host.stderr,
 				) {
 					Ok(outcome) => {
 						any_match |= outcome.any_match;
@@ -1922,8 +1927,8 @@ impl Utility for Rg {
 		},
 	};
 	match &matcher {
-		CompiledMatcher::Rust(matcher) => execute_search(host, &cli, matcher, &paths, &opts, &mut out),
-		CompiledMatcher::Pcre(matcher) => execute_search(host, &cli, matcher, &paths, &opts, &mut out),
+		Engine::Rust(matcher) => execute_search(host, &cli, matcher, &paths, &opts, &mut out),
+		Engine::Pcre(matcher) => execute_search(host, &cli, matcher, &paths, &opts, &mut out),
 	}
 }
 }
@@ -2035,6 +2040,24 @@ mod tests {
 			files(&["-l", "-L", "hit", "parent"]),
 			(0, vec!["parent/inner/a.txt".to_owned(), "parent/inner/sub/b.txt".to_owned()])
 		);
+	}
+
+	#[test]
+	fn recursive_search_prints_files_in_path_order() {
+		let tree = tempfile::tempdir().unwrap();
+		for file in ["z.txt", "b/1.txt", "a/c/2.txt", "a/b/3.txt", "a/0.txt", "m.txt"] {
+			let path = tree.path().join(file);
+			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+			std::fs::write(path, "hit\n").unwrap();
+		}
+		let sorted = "a/0.txt\na/b/3.txt\na/c/2.txt\nb/1.txt\nm.txt\nz.txt\n";
+		let (code, capture) = run_util::<Rg>(&["-l", "hit", "."], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), sorted);
+		let (code, capture) = run_util::<Rg>(&["--sortr", "path", "-l", "hit", "."], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		let reversed: String = sorted.lines().rev().map(|line| format!("{line}\n")).collect();
+		assert_eq!(capture.out(), reversed);
 	}
 
 	#[test]

@@ -12,7 +12,6 @@
   - `packages/coding-agent/src/internal-urls/router.ts` / `packages/coding-agent/src/tools/xdev.ts` — writable internal resources and `xd://` tool-device dispatch.
   - `packages/coding-agent/src/lsp/writethrough.ts` — format-on-write and diagnostics writethrough.
   - `packages/coding-agent/src/tools/auto-generated-guard.ts` — block overwriting generated files.
-  - `packages/coding-agent/src/tools/fs-cache-invalidation.ts` — invalidate shared FS scan caches after writes.
   - `packages/coding-agent/src/tools/plan-mode-guard.ts` — resolve paths and enforce plan-mode write policy.
 
 ## Inputs
@@ -66,20 +65,19 @@ Single-shot result.
    - Empty writes to missing selector-shaped members are refused. Replacing an existing text member with an incomplete read projection is also refused.
    - The replacement is written to a sibling temporary path and renamed over the destination. Existing archive symlinks are resolved first so the target is updated rather than replacing the symlink.
    - ZIP-format aliases remain ZIP. Tar gzip compression is selected for `.tar.gz`/`.tgz`, zstd for `.tar.zst`/`.tzst`; `.asar` containers are rewritten through the same boundary. Read-only formats (`.7z`, `.rar`, …) are rejected.
-   - `invalidateFsScanAfterWrite()` runs on the archive file path.
 8. If not an archive, it tries SQLite candidates. Existing non-SQLite files suppress SQLite interpretation; candidates that are neither regular files nor directories (FIFO, device, socket) are rejected before the SQLite header is read.
 9. SQLite writes call `enforcePlanModeWrite(..., { op: "update" })`, then `#writeSqliteRow()`.
    - The database must already exist.
    - It opens Bun SQLite with `{ create: false, strict: true }` and `PRAGMA busy_timeout = 3000`.
    - Whitespace-only `content` with a row key deletes a row.
    - Non-empty `content` is parsed with `Bun.JSON5.parse()`, must be an object, and is routed to insert/update helpers.
-   - The scan cache is invalidated and the connection closes in `finally`.
+   - The connection closes in `finally`.
 10. Otherwise it treats `path` as a plain filesystem file.
    - It rejects high-confidence mis-dispatched read targets: a missing selector-shaped filename with empty content, or a missing semicolon-joined list of selector paths. Existing literal paths win; non-empty content is the escape hatch for a single deliberate selector-shaped filename.
    - Plan-mode policy and path resolution run before mutation. An existing target that is neither a regular file nor a directory (including through a symlink) is refused; existing regular files then pass the generated-file guard, which opens and reads the file head on the main thread and could block forever on such a target.
    - If submitted content ends in an OMP read-truncation notice and covers less than the current source, the overwrite is refused. This also applies to text handler-owned resources; tool-device arguments are exempt.
    - ACP bridge `writeTextFile` is tried first when available; otherwise the session writethrough writes the content. LSP settings may format, synchronize, and diagnose the write.
-   - A leading shebang may add execute bits. The filesystem scan cache is invalidated.
+   - A leading shebang may add execute bits.
 11. The tool returns text plus optional diagnostics, executable, resolved-path, or device-dispatch metadata.
 
 ## Modes / Variants
@@ -175,7 +173,6 @@ content: ""
   - Uses the unified archive utilities in `packages/utils/src/ar`: tar serialization plus gzip/zstd framing for compressed tars, `node:zlib`-backed DEFLATE framing for ZIP, and an ASAR encoder.
   - May talk to configured LSP servers through `packages/coding-agent/src/lsp/index.ts`.
 - Session state
-  - Invalidates shared filesystem scan cache entries through `invalidateFsScanAfterWrite()`.
   - Enforces plan-mode write restrictions before mutating the target.
   - Updates file mutation/snapshot state for plain files and conflict resolutions; resolved conflict ids are invalidated.
   - `xd://` dispatches a mounted tool and may therefore have that tool's documented side effects.

@@ -78,9 +78,10 @@ Beyond the bash builtins, session creation registers the in-process command-line
 
 Three search-related builtins are worth calling out:
 
-- `grep` is implemented on the ripgrep libraries (`grep-regex`/`grep-searcher`), with recursive directory walks served by `pi-walker`.
+- `grep` is implemented on the ripgrep libraries (`grep-regex`/`grep-searcher`), with directory walks and ordered parallel search served by `pi-walker` (`rg`/`grep` output stays in path order).
 - `rg` is a sibling builtin with ripgrep defaults (recursive search, ignore/hidden filtering, binary suppression) — a separate module and argument model, not an alias of `grep`.
-- `fd` is backed by `pi-walker`, `globset`, and `regex`.
+- `fd` is backed by `pi-walker`'s ordered `walk::tree` traversal, `globset`, and `regex`.
+- `ast-grep` (also `sg`) runs ast-grep 0.50's `run` command (`-p`/`-r`/`-U`, `--json`, context, `--heading`, `--files-with-matches`, `--stdin`) on the `pi-ast` search engine with ast-grep's piped (uncolored) output; `scan`, `test`, `new`, `lsp`, `outline`, `--config`, `--interactive`, `--kind`, `--debug-query`, and `--inspect` exit 2 as unsupported.
 
 Each builtin runs inside the shell process (no `fork`/`exec`) against the `pi-builtins` `Host` view of the shell (`src/host.rs`): stdio routes through the command's (possibly piped/redirected) file descriptors, path operands resolve against the shell working directory, the shell's exported environment is visible, and abort/timeout cancellation is honored. Because these builtins shadow system binaries, registration is gated in `crates/pi-shell/src/shell.rs`:
 

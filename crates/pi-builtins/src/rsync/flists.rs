@@ -23,11 +23,8 @@
 //! `with_segment*`/`update` run under the state lock and must not call back into
 //! `Flists` or lock `hlinks`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::rsync::exit::RsyncError;
 use crate::rsync::flist::{FileEntry, FileList};
 use crate::rsync::hlink::HlinkMatcher;
 
@@ -36,9 +33,6 @@ use crate::rsync::hlink::HlinkMatcher;
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 	mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
-
-/// How often a blocked [`Flists::wait_for`] re-checks the cancel flag.
-const WAIT_SLICE: Duration = Duration::from_millis(50);
 
 /// One published list.
 struct Segment {
@@ -108,36 +102,19 @@ impl State {
 /// The file-list registry shared by sender/generator/receiver threads.
 pub(crate) struct Flists {
 	state: Mutex<State>,
-	changed: Condvar,
 	hlinks: Mutex<HlinkMatcher>,
-	watchers: Mutex<Vec<flume::Sender<()>>>,
 }
 
 impl Flists {
 	pub(crate) fn new() -> Arc<Self> {
 		Arc::new(Self {
 			state: Mutex::new(State::default()),
-			changed: Condvar::new(),
 			hlinks: Mutex::new(HlinkMatcher::new()),
-			watchers: Mutex::new(Vec::new()),
 		})
 	}
 
 	fn lock(&self) -> MutexGuard<'_, State> {
 		lock(&self.state)
-	}
-
-	/// A channel that receives one token per change published after this call (every
-	/// [`Flists::push_full`] and [`Flists::set_eof`]). Tokens queue up, so a change between
-	/// a caller's check and its wait is never lost.
-	pub(crate) fn watch(&self) -> flume::Receiver<()> {
-		let (tx, rx) = flume::unbounded();
-		lock(&self.watchers).push(tx);
-		rx
-	}
-
-	fn notify_watchers(&self) {
-		lock(&self.watchers).retain(|tx| tx.send(()).is_ok());
 	}
 
 	/// Test fixture shorthand for [`Flists::push_full`]: the active directory entries join
@@ -174,18 +151,14 @@ impl Flists {
 		});
 		st.segments.push(Segment { list, len, released: false, kept_dirs: Vec::new(), wire_order });
 		st.dirs.extend(dirs);
-		let seg = st.segments.len() - 1;
-		drop(st);
-		self.changed.notify_all();
-		self.notify_watchers();
-		seg
+		st.segments.len() - 1
 	}
 
-	/// No more segments (NDX_FLIST_EOF / non-inc).
+	/// No more segments (NDX_FLIST_EOF / non-inc). Other threads learn of new segments
+	/// through their own channels (the generator: its receiver pipe), never by polling
+	/// the registry.
 	pub(crate) fn set_eof(&self) {
 		self.lock().eof = true;
-		self.changed.notify_all();
-		self.notify_watchers();
 	}
 
 	/// The entry index `ndx` stands for: itself when it is an entry, the segment's parent
@@ -203,27 +176,6 @@ impl Flists {
 	/// Segments published so far.
 	pub(crate) fn len(&self) -> usize {
 		self.lock().segments.len()
-	}
-
-	/// Blocks until `count` segments exist (true) or EOF came first (false); cancel-aware.
-	pub(crate) fn wait_for(&self, count: usize, cancel: &AtomicBool) -> Result<bool, RsyncError> {
-		let mut st = self.lock();
-		loop {
-			if st.segments.len() >= count {
-				return Ok(true);
-			}
-			if st.eof {
-				return Ok(false);
-			}
-			if cancel.load(Ordering::Relaxed) {
-				return Err(RsyncError::cancelled());
-			}
-			st = self
-				.changed
-				.wait_timeout(st, WAIT_SLICE)
-				.unwrap_or_else(std::sync::PoisonError::into_inner)
-				.0;
-		}
 	}
 
 	/// Global ndx → clone (a gap index `ndx_start - 1` yields that segment's parent dir).
@@ -378,9 +330,6 @@ impl Flists {
 
 #[cfg(test)]
 mod tests {
-	use std::sync::Arc as StdArc;
-	use std::thread;
-
 	use super::*;
 
 	fn entry(name: &str, dir: bool) -> FileEntry {
@@ -445,42 +394,6 @@ mod tests {
 	}
 
 	#[test]
-	fn wait_for_sees_push_eof_and_cancel() {
-		let fl = Flists::new();
-		let cancel = AtomicBool::new(false);
-		fl.push(list(0, -1, &[("a", false)]));
-		assert!(fl.wait_for(1, &cancel).unwrap());
-
-		let fl2 = StdArc::clone(&fl);
-		let t = thread::spawn(move || {
-			thread::sleep(Duration::from_millis(30));
-			fl2.push(list(2, -1, &[("b", false)]));
-		});
-		assert!(fl.wait_for(2, &cancel).unwrap());
-		t.join().unwrap();
-
-		let fl3 = StdArc::clone(&fl);
-		let t = thread::spawn(move || {
-			thread::sleep(Duration::from_millis(30));
-			fl3.set_eof();
-		});
-		assert!(!fl.wait_for(3, &cancel).unwrap());
-		t.join().unwrap();
-		assert!(fl.is_eof());
-
-		let fresh = Flists::new();
-		let flag = StdArc::new(AtomicBool::new(false));
-		let f2 = StdArc::clone(&flag);
-		let t = thread::spawn(move || {
-			thread::sleep(Duration::from_millis(30));
-			f2.store(true, Ordering::Relaxed);
-		});
-		let err = fresh.wait_for(1, &flag).unwrap_err();
-		assert_eq!(err.code, RsyncError::cancelled().code);
-		t.join().unwrap();
-	}
-
-	#[test]
 	fn wire_order_maps_both_ways() {
 		let fl = Flists::new();
 		// Sent as c, a, b; sorted a, b, c.
@@ -493,21 +406,6 @@ mod tests {
 		let plain = Flists::new();
 		plain.push(list(0, -1, &[("a", false), ("b", false)]));
 		assert_eq!(plain.to_wire(1), 1);
-	}
-
-	#[test]
-	fn watchers_get_a_token_per_change() {
-		let fl = Flists::new();
-		let rx = fl.watch();
-		assert!(rx.try_recv().is_err());
-		fl.push(list(1, -1, &[("a", true)]));
-		fl.set_eof();
-		assert!(rx.try_recv().is_ok());
-		assert!(rx.try_recv().is_ok());
-		assert!(rx.try_recv().is_err());
-		drop(rx);
-		// A dropped watcher is forgotten, not an error.
-		fl.set_eof();
 	}
 
 	#[test]
