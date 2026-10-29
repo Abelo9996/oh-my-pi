@@ -1166,8 +1166,9 @@ impl Tree {
 	/// Runs `f` with an O_NOFOLLOW-pinned raw fd of `rel` (for ACL syscalls); Unsupported on virtual trees.
 	///
 	/// The fd is `O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY`: a FIFO never
-	/// blocks, and a final symlink fails with `ELOOP`.
-	#[cfg(unix)]
+	/// blocks, and a final symlink fails with `ELOOP`. Only the Apple ACL
+	/// backend (`acl::platform`) needs it; Linux ACLs go through xattrs.
+	#[cfg(any(target_vendor = "apple", all(unix, test)))]
 	pub(crate) fn with_fd<T>(
 		&self,
 		rel: &Path,
