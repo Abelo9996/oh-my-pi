@@ -219,20 +219,17 @@ export class STTController {
 
 	async #startWith(editor: SttTarget, options: SttCallbacks, signal: AbortSignal): Promise<void> {
 		const first = this.#resolveCandidate();
-		const configuredRole = this.#settings.getModelRole("dictation")?.trim();
-		// The first provider-qualified pattern the role expands to (aliases and lists).
-		const configured = configuredRole
-			? (resolveConfiguredModelPatterns(configuredRole, this.#settings) ?? [configuredRole]).find(pattern =>
-					pattern.includes("/"),
-				)
-			: undefined;
 		if (first?.replaces) {
 			options.showWarning(
 				`Dictation model ${first.replaces} not found; using ${first.model.provider}/${first.model.id}`,
 			);
-		} else if (!first && this.#registry && configured?.includes("/")) {
+		} else if (!first && this.#registry) {
 			// Empty chain: nothing replaced the configured selector, so the built-in local model runs.
-			options.showWarning(`Dictation model ${configured} not found; using the built-in local model`);
+			const role = this.#settings.getModelRole("dictation")?.trim();
+			const qualified = role
+				? (resolveConfiguredModelPatterns(role, this.#settings) ?? [role]).find(pattern => pattern.includes("/"))
+				: undefined;
+			if (qualified) options.showWarning(`Dictation model ${qualified} not found; using the built-in local model`);
 		}
 		let model = first?.model;
 		if (model?.api === "openai-transcriptions") {

@@ -74,6 +74,7 @@ import {
 	type ModelMatchPreferences,
 	parseModelPattern,
 	pickDefaultAvailableModel,
+	providerModelHint,
 	resolveAllowedModels,
 	resolveCliModel,
 	type ResolveCliModelResult,
@@ -82,7 +83,6 @@ import {
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
-import { providerModelHint } from "./config/model-resolver";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
