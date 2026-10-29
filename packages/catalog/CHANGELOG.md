@@ -7,6 +7,9 @@
 - Added `retainModelCacheConnection(dbPath)`, which keeps one connection to a non-default model cache path open until disposed, so batched reads and writes stop reopening the database each time
 - Added `nextBuildPriceChange(cost, now)`, the next instant at which `buildModel` would pick a different dated price card, so callers can safely reuse earlier builds until then
 - Added the `selector-revision-suffix` catalog axis, set to `@default` on Google Vertex, so `google-vertex/claude-opus-4-8` names `claude-opus-4-8@default` exactly ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
+### Changed
+
+- Made Factory Droid's image models the last `image` role defaults, so `generate_image` works with only a Factory login; they run only after earlier candidates are unavailable or fail with an HTTP error, including behind an `image` role set without its own fallback chain ([#17351](https://github.com/can1357/oh-my-pi/pull/17351) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

@@ -364,6 +364,75 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.imageCount).toBe(1);
 	});
 
+	describe("Factory Droid image models at the end of the image defaults", () => {
+		const factory = factoryDroidRegistry()
+			.filter(({ spec }) => spec.id === "kimi-k3" || buildModel(spec).kind === "image")
+			.map(entry => buildModel(buildFactoryDroidModel(entry)));
+		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const FACTORY_GENERATE = "https://api.factory.ai/api/llm/o/v1/images/generations";
+		const XAI_GENERATE = "https://xai.example/v1/images/generations";
+
+		/** Run the tool once; xAI answers `xaiStatus`, Factory always succeeds. Returns the result or the thrown error. */
+		async function run(models: Model<Api>[], settings = Settings.isolated(), xaiStatus = 200) {
+			const urls: string[] = [];
+			const ctx = createContext({
+				models,
+				settings,
+				fetch: async input => {
+					const url = input.toString();
+					urls.push(url);
+					if (url.startsWith("https://xai.example") && xaiStatus !== 200) {
+						return Response.json({ error: { message: "upstream down" } }, { status: xaiStatus });
+					}
+					return imageResponse();
+				},
+				activeModel: factory.find(model => model.id === "kimi-k3"),
+			});
+			try {
+				const result = await imageGenTool.execute("default", { subject: "a lighthouse" }, undefined, ctx);
+				collectPaths(result);
+				return { urls, result };
+			} catch (error) {
+				return { urls, error };
+			}
+		}
+
+		it("generates with only a Factory login, starting from the CLI's preferred model", async () => {
+			const { urls, result } = await run(factory);
+			expect(urls).toEqual([FACTORY_GENERATE]);
+			expect(result?.details?.model).toBe("gpt-image-2.5-sunburst");
+		});
+
+		it("keeps another default image provider ahead of Factory", async () => {
+			const { urls, result } = await run([...factory, xai]);
+			expect(urls).toEqual([XAI_GENERATE]);
+			expect(result?.details?.provider).toBe("xai");
+		});
+
+		it("reaches Factory after an earlier default fails with an HTTP error", async () => {
+			const { urls, result } = await run([...factory, xai], Settings.isolated(), 500);
+			expect(urls).toEqual([XAI_GENERATE, FACTORY_GENERATE]);
+			expect(result?.details?.provider).toBe("factory-droid");
+		});
+
+		it("adds Factory behind an image role set without its own fallback chain", async () => {
+			const settings = Settings.isolated({ modelRoles: { image: "xai/grok-imagine-image" } });
+			const { urls, result } = await run([...factory, xai], settings, 500);
+			expect(urls).toEqual([XAI_GENERATE, FACTORY_GENERATE]);
+			expect(result?.details?.provider).toBe("factory-droid");
+		});
+
+		it("leaves a configured image fallback chain unchanged", async () => {
+			const settings = Settings.isolated({
+				modelRoles: { image: "xai/grok-imagine-image" },
+				"retry.fallbackChains": { image: [] },
+			});
+			const { urls, error } = await run([...factory, xai], settings, 500);
+			expect(urls).toEqual([XAI_GENERATE]);
+			expect(error).toBeInstanceOf(AggregateError);
+		});
+	});
+
 	it("falls back to the selected Antigravity id when discovery advertises no image model", async () => {
 		const model = catalogModel("google-antigravity", "gemini-selected-image", "google-gemini-cli");
 		const requestBodies: Array<Record<string, unknown>> = [];
