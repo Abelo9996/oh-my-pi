@@ -758,6 +758,7 @@ describe("InputController keybinding setup", () => {
 			handleCompactCommand,
 			queueCompactionMessage,
 			runYieldCompaction: vi.fn(),
+			sessionManager: { getSessionId: () => "session-1", getLeafId: () => "entry-7" },
 		});
 		return { handleCompactCommand, queueCompactionMessage };
 	}
@@ -784,6 +785,8 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showError).not.toHaveBeenCalled();
 		expect(ctx.yieldCompaction).toEqual({
 			text: "/compact keep the API notes",
+			sessionId: "session-1",
+			leafId: "entry-7",
 			instructions: "keep the API notes",
 			mode: undefined,
 		});

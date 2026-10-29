@@ -1950,10 +1950,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
-		// A view switch leaves the main session, and the input queued for it, in place.
+		// A view switch leaves the main session, and the input queued for it, in place. A session reset
+		// hands a queued `/compact` and the follow-ups held behind it back to the editor.
 		if (!options?.viewOnly) {
+			if (this.yieldCompaction) this.#inputController.restoreYieldCompactionToEditor();
 			this.compactionQueuedMessages = [];
-			this.yieldCompaction = undefined;
 		}
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -8835,12 +8836,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.clearPinnedError();
 		this.#hidePlanReview();
-		// A queued `/compact`, and the follow-ups held behind it, belong to the conversation being left.
-		if (this.yieldCompaction) {
-			this.yieldCompaction = undefined;
-			this.compactionQueuedMessages = [];
-			this.updatePendingMessagesDisplay();
-		}
 	}
 
 	async handleClearCommand(): Promise<void> {
@@ -9248,6 +9243,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleDequeue(): void {
 		this.#inputController.handleDequeue();
+	}
+
+	restoreYieldCompactionToEditor(): void {
+		this.#inputController.restoreYieldCompactionToEditor();
 	}
 
 	handleImagePaste(): Promise<boolean> {

@@ -2222,6 +2222,20 @@ export class InputController {
 	}
 
 	/**
+	 * Hand a queued `/compact` and the follow-ups held behind it back to the editor: the
+	 * conversation it was queued in is no longer the one that will yield.
+	 */
+	restoreYieldCompactionToEditor(): void {
+		const request = this.ctx.yieldCompaction;
+		if (!request) return;
+		this.ctx.yieldCompaction = undefined;
+		const held = this.ctx.compactionQueuedMessages;
+		this.ctx.compactionQueuedMessages = [];
+		this.#restoreEntriesToEditor([{ text: request.text }, ...held.map(e => ({ text: e.text, images: e.images }))]);
+		this.ctx.showStatus("Conversation changed: queued compaction returned to the editor");
+	}
+
+	/**
 	 * Merge queued entries (oldest→newest) ahead of the current draft, folding
 	 * their images back into the pending-image buffer and refreshing the pending
 	 * bar. Shared by the Alt+Up dequeue (one entry) and the Esc restore-all path.

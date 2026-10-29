@@ -277,7 +277,13 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			}
 			const { ctx } = runtime;
 			if (runtime.followUp && ctx.session.isStreaming) {
-				ctx.yieldCompaction = { text: command.text, instructions: parsed.instructions, mode: parsed.mode };
+				ctx.yieldCompaction = {
+					text: command.text,
+					sessionId: ctx.sessionManager.getSessionId(),
+					leafId: ctx.sessionManager.getLeafId(),
+					instructions: parsed.instructions,
+					mode: parsed.mode,
+				};
 				ctx.updatePendingMessagesDisplay();
 				ctx.showStatus("Queued compaction for when the agent yields");
 				// A prompt still in setup may bail without an agent run, and so without the settle that runs this.

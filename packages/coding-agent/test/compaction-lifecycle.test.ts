@@ -167,19 +167,26 @@ describe("compaction queued for the next yield", () => {
 		const flushCompactionQueue = vi.fn(async () => {
 			compactingAtFlush.push(state.compactingChecks > 0);
 		});
+		const sessionManager = {
+			branch: [{ id: "e1" }, { id: "e2" }],
+			getSessionId: () => "s1",
+			getBranch: () => sessionManager.branch,
+			getEntries: () => [{ type: "message" }],
+		};
 		const ctx = {
 			session,
-			sessionManager: { getEntries: () => [{ type: "message" }] },
-			yieldCompaction: { text: "/compact soft", mode: "soft" },
+			sessionManager,
+			yieldCompaction: { text: "/compact soft", sessionId: "s1", leafId: "e1", mode: "soft" },
 			compactionQueuedMessages: [],
 			updatePendingMessagesDisplay: vi.fn(),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
+			restoreYieldCompactionToEditor: vi.fn(),
 			flushCompactionQueue,
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
 		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand");
-		return { state, ctx, controller, handleCompactCommand, flushCompactionQueue, compactingAtFlush };
+		return { state, ctx, sessionManager, controller, handleCompactCommand, flushCompactionQueue, compactingAtFlush };
 	}
 
 	it("runs the queued compaction once the session is idle", async () => {
@@ -188,7 +195,7 @@ describe("compaction queued for the next yield", () => {
 
 		await controller.runYieldCompaction();
 
-		expect(handleCompactCommand).toHaveBeenCalledWith(undefined, "soft");
+		expect(handleCompactCommand).toHaveBeenCalledWith(undefined, "soft", expect.any(Function));
 		expect(ctx.yieldCompaction).toBeUndefined();
 	});
 
@@ -200,7 +207,7 @@ describe("compaction queued for the next yield", () => {
 		await controller.runYieldCompaction();
 
 		expect(handleCompactCommand).not.toHaveBeenCalled();
-		expect(ctx.yieldCompaction).toEqual({ text: "/compact soft", mode: "soft" });
+		expect(ctx.yieldCompaction).toEqual({ text: "/compact soft", sessionId: "s1", leafId: "e1", mode: "soft" });
 	});
 
 	it("runs once a prompt still in setup bails without starting a run", async () => {
@@ -214,7 +221,7 @@ describe("compaction queued for the next yield", () => {
 
 		await controller.runYieldCompaction();
 
-		expect(handleCompactCommand).toHaveBeenCalledWith(undefined, "soft");
+		expect(handleCompactCommand).toHaveBeenCalledWith(undefined, "soft", expect.any(Function));
 	});
 
 	it("releases held follow-ups when there is nothing to compact", async () => {
@@ -224,6 +231,31 @@ describe("compaction queued for the next yield", () => {
 
 		expect(ctx.showWarning).toHaveBeenCalledWith("Nothing to compact (no messages yet)");
 		expect(flushCompactionQueue).toHaveBeenCalled();
+	});
+
+	it("leaves the flush to a compaction that ran", async () => {
+		const { controller, handleCompactCommand, flushCompactionQueue } = buildYieldCtx();
+		// `executeCompaction` runs the before-flush hook, then flushes (and on failure re-queues) the batch.
+		handleCompactCommand.mockImplementation(async (_instructions, _mode, beforeFlush) => {
+			await beforeFlush?.("ok");
+			return "ok";
+		});
+
+		await controller.runYieldCompaction();
+
+		expect(flushCompactionQueue).not.toHaveBeenCalled();
+	});
+
+	it("hands the request back after the tree moved to another branch", async () => {
+		const { ctx, sessionManager, controller, handleCompactCommand, flushCompactionQueue } = buildYieldCtx();
+		// Tree navigation reuses the session: the leaf the request was queued at is off the new branch.
+		sessionManager.branch = [{ id: "e3" }];
+
+		await controller.runYieldCompaction();
+
+		expect(ctx.restoreYieldCompactionToEditor).toHaveBeenCalledTimes(1);
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(flushCompactionQueue).not.toHaveBeenCalled();
 	});
 
 	it("releases held follow-ups after a compaction started elsewhere ends", async () => {
