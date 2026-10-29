@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - `WebMcpController` (`tools/browser/webmcp`) now takes the Puppeteer `Page` instead of a host and options; `installWebMcp` (construct `WebMcpController` instead), `installWebMcpPageHook`, `uninstallWebMcpPageHook`, `webMcpSnapshotInPage`, `webMcpInvokeInPage`, `WEBMCP_BRIDGE_KEY` and the page-hook types are removed ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
+- `provider/model` selectors in `--model`, settings, roles and task agents now need the exact id or alias: retired or renamed ids (`openai-codex/gpt-5.5`), dated ids written without their date, and `-latest` shorthands (`openai/gpt-5-latest` for `gpt-5-chat-latest`) no longer match a sibling; use the id `omp models <provider>` lists, or drop the provider prefix to keep fuzzy matching. An id written without its `@revision` (`google-vertex/claude-opus-4-8`) still resolves while the provider has a single revision of it ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Added
 
@@ -74,6 +75,7 @@
 - Fixed live job widgets on subagent and background-job cards filling with words from files, web pages and search results the subagent read (for example a grid of dots labelled `Given`, `Never`, `[x]`): wildcard rules no longer read a subagent's tool results, a widget is checked against all output before it shows and dropped as soon as it stops fitting, and grid statuses only colour a cell when they start a word
 - Fixed `webmcpInvoke` returning an empty error when a page's tool throws, and leaving a timed-out invocation running in the page ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed HTTP 413 failures on Factory Droid GPT and Grok models after switching from an OpenAI computer-use session: older computer screenshots are now dropped to fit Factory's request limit, as other images already were ([#16564](https://github.com/can1357/oh-my-pi/pull/16564) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a `provider/model` selector for a model that provider doesn't have silently running a similarly named model (`anthropic/claude-haiku-5-5` ran `claude-haiku-4-5`); it now fails with `Model "…" not found` and suggests up to three close ids from that provider, a configured default (without a retry fallback chain) or dictation model that no longer resolves now warns with the model used instead, and bare selectors such as `opus` still fuzzy-match ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.13.3] - 2026-10-28
 
