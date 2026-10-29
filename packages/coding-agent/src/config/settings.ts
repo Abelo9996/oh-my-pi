@@ -3488,6 +3488,28 @@ export class Settings {
 		}
 		migrateKindRoleSettings();
 
+		// The old web-provider migration persisted this pair of fuzzy defaults.
+		// Qualified selectors are now exact, so replace the pair without changing
+		// independently configured selectors or other role chains.
+		{
+			const retry = isRecord(raw.retry) ? raw.retry : undefined;
+			const chains = retry && isRecord(retry.fallbackChains) ? retry.fallbackChains : undefined;
+			const web = chains?.web;
+			if (chains && Array.isArray(web)) {
+				const index = web.findIndex(
+					(selector, i) =>
+						selector === "openai-codex/gpt-5.6" && web[i + 1] === "openai-codex/gpt-5.5",
+				);
+				if (index !== -1) {
+					chains.web = [
+						...web.slice(0, index),
+						"openai-codex/gpt-5.6-sol",
+						...web.slice(index + 2),
+					];
+				}
+			}
+		}
+
 		// Consolidate the retired Exa suite toggles onto the sole remaining
 		// provider switch. The old runtime required both `enabled` and
 		// `enableSearch`, so preserve that AND semantics when both are present.
