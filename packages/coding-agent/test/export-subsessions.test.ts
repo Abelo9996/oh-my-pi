@@ -198,17 +198,16 @@ describe("collectSubSessions", () => {
 				Bun.gzipSync(timedSession("advisor", 2500)),
 			);
 
-			const exportWith = async (outputPath: string, includeSubSessions: boolean) => {
-				const options = { outputPath, includeSubSessions };
+			const exportWith = async (options: { outputPath: string; includeSubSessions: boolean }) => {
 				if (source === "file") await exportFromFile(mainFile, options);
 				else {
 					const sm = await SessionManager.open(mainFile, undefined, undefined, { suppressBreadcrumb: true });
 					await exportSessionToHtml(sm, undefined, options);
 				}
-				return readExportData(outputPath);
+				return readExportData(options.outputPath);
 			};
 
-			const data = await exportWith(path.join(root, `${source}.html`), true);
+			const data = await exportWith({ outputPath: path.join(root, `${source}.html`), includeSubSessions: true });
 			expect(data.trace?.tracks.map(track => [track.id, track.parentId, track.file])).toEqual([
 				["main", null, "main"],
 				["Alpha", "main", "Alpha"],
@@ -236,7 +235,10 @@ describe("collectSubSessions", () => {
 			]);
 			expect(JSON.stringify(data.trace)).not.toContain(root);
 
-			const mainOnly = await exportWith(path.join(root, `${source}-main.html`), false);
+			const mainOnly = await exportWith({
+				outputPath: path.join(root, `${source}-main.html`),
+				includeSubSessions: false,
+			});
 			expect(mainOnly.subSessions).toBeUndefined();
 			expect(mainOnly.trace?.tracks.map(track => track.id)).toEqual(["main"]);
 			expect(mainOnly.trace?.summary).toMatchObject({ requests: 1, toolCalls: 1, subagents: 0, totalTokens: 15 });

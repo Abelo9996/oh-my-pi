@@ -11,7 +11,7 @@
       --sidebar-max-width: 840px;
       --sidebar-resizer-width: 6px;
       --content-max-width: 1100px;
-      --hairline: color-mix(in srgb, var(--text) 10%, transparent);
+      --hairline: var(--border);
       --hairline-soft: color-mix(in srgb, var(--text) 7%, transparent);
       --hairline-strong: color-mix(in srgb, var(--text) 18%, transparent);
       --hover-wash: color-mix(in srgb, var(--text) 5%, transparent);
@@ -25,7 +25,7 @@
       --ink-1: var(--text);
       --ink-2: var(--muted);
       --ink-3: var(--dim);
-      --ink-4: color-mix(in srgb, var(--dim) 70%, var(--body-bg));
+      --ink-4: var(--dim);
       --accent-a: var(--mdLink);
       --accent-b: var(--accent);
     }
@@ -288,16 +288,8 @@
       background: var(--selectedBg);
     }
 
-    .tree-node:not(.in-path) {
-      opacity: 0.45;
-    }
-
-    .tree-node:not(.in-path):hover {
-      opacity: 1;
-    }
-
     .tree-prefix {
-      color: color-mix(in srgb, var(--muted) 65%, transparent);
+      color: var(--dim);
       flex-shrink: 0;
       font-family: var(--font-mono);
       white-space: pre;
@@ -599,7 +591,6 @@
     .message-timestamp {
       font-size: 10px;
       color: var(--dim);
-      opacity: 0.85;
     }
 
     .user-message,

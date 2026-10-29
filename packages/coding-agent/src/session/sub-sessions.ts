@@ -34,6 +34,7 @@ export interface SubSession {
 /** Receives the key of a subagent transcript that exists but has no readable session header. */
 export type UnreadableSubSessionHandler = (key: string) => void;
 
+/** Read-only discovery scope and malformed-transcript reporting for child collectors. */
 export interface CollectSubSessionsOptions {
 	onUnreadable?: UnreadableSubSessionHandler;
 	/** Include advisor transcripts for read-only exports, never task restoration. */
@@ -63,8 +64,8 @@ export async function collectSubSessions(
 }
 
 /** Decompress archives before handing their JSONL to the central session parser. */
-async function loadCollectedSession(file: string, compressed: boolean): Promise<SessionLoadResult | null> {
-	if (!compressed) return loadSessionFile(file);
+async function loadCollectedSession(file: string): Promise<SessionLoadResult | null> {
+	if (!file.endsWith(".jsonl.gz")) return loadSessionFile(file);
 	try {
 		return parseSessionContent(utf8Decoder.decode(Bun.gunzipSync(await Bun.file(file).bytes())));
 	} catch (err) {
@@ -107,7 +108,7 @@ async function collectSubSessionsFromDir(
 		if (compressed && fileNames.has(transcriptName)) continue;
 		const agentId = transcriptName.slice(0, -6);
 		const key = parentKey ? `${parentKey}/${agentId}` : agentId;
-		const loaded = await loadCollectedSession(path.join(dir, name), compressed);
+		const loaded = await loadCollectedSession(path.join(dir, name));
 		if (!loaded) continue;
 		const { entries: fileEntries, malformedRecords, invalidHeader } = loaded;
 		// Empty files load as [] and are skipped; a corrupt or missing header is reported so exports do

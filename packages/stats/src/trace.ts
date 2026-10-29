@@ -19,7 +19,6 @@ import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from
 import { getSessionRollups } from "./rollup";
 import type {
 	SessionEntry,
-	SessionHeader,
 	SessionSummary,
 	SessionTrace,
 	TraceMarker,
@@ -283,7 +282,7 @@ function scanTranscript(
 	trackId: string,
 	parentTrackId: string | null,
 	file: string,
-	header?: SessionHeader | null,
+	header?: TraceSnapshotHeader | null,
 ): TrackScan {
 	// Boundary cast: persisted JSONL entries are re-validated field-by-field below.
 	const views = entries as readonly EntryView[];
@@ -895,9 +894,16 @@ export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFi
 	return trace;
 }
 
+/** Header metadata used by snapshot traces, including journals without a schema version. */
+export interface TraceSnapshotHeader {
+	timestamp?: string;
+	cwd?: string;
+	title?: string;
+}
+
 /** The journal data for one embedded transcript; its header may be stored separately. */
 export interface SessionTraceSnapshot {
-	header?: SessionHeader | null;
+	header?: TraceSnapshotHeader | null;
 	entries: readonly SessionEntry[];
 }
 

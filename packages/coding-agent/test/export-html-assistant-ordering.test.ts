@@ -248,7 +248,9 @@ describe("HTML export assistant content ordering", () => {
 			["", "Main"],
 		]) {
 			rendered.document.querySelector(`.session-link[data-session="${key}"]`)!.click();
-			expect(rendered.document.querySelector("#messages .assistant-text")?.textContent).toBe(`${text} response`);
+			expect(rendered.document.querySelector("#messages .assistant-text")?.textContent?.trim()).toBe(
+				`${text} response`,
+			);
 			expect(renderedSidebarOrder(rendered)).toEqual([`user: ${text}`, `assistant: ${text} response`]);
 			expect(
 				rendered.document.querySelector('.session-link[aria-current="page"]')?.getAttribute("data-session"),

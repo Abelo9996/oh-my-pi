@@ -14,7 +14,8 @@
 
 ### Changed
 
-- HTML exports now match the `/stats` design, with an offline timeline drawer, full trace view, and sidebar navigation for nested subagents and advisors
+- Sub-session collector now determines compression from filename extension instead of a boolean flag
+- HTML exports now match the `/stats` design, with a higher-contrast light theme, offline timeline drawer, full trace view, and sidebar navigation for nested subagents and advisors
 - `tui.autoGraph` defaults to the new `auto`: charts are refined by the judge whenever the judge role resolves to a native TypeSafe jev model, and drawn from the built-in guess otherwise
 - Removed manual scan cache invalidation triggers after file modifications; filesystem changes are now automatically detected via timestamp validation in the new `pi-walker` architecture
 - A muted `/live` call now stays shown as muted when the voice model starts a task or the session starts, instead of switching to "working" or "listening" while the microphone is still off ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
