@@ -809,7 +809,6 @@ const streamOpenAICompletionsOnce = (
 	(async () => {
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
-		const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
 		let rawRequestDump: RawHttpRequestDump | undefined;
@@ -851,6 +850,7 @@ const streamOpenAICompletionsOnce = (
 		let finishOpenBlocksOnError: () => void = () => {};
 
 		try {
+			const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const idleTimeoutFallbackMs = model.compat.streamIdleTimeoutMs;
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(idleTimeoutFallbackMs);
