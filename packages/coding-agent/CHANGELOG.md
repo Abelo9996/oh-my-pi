@@ -2,18 +2,26 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `WebMcpController` (`tools/browser/webmcp`) now takes the Puppeteer `Page` instead of a host and options; `installWebMcp` (construct `WebMcpController` instead), `installWebMcpPageHook`, `uninstallWebMcpPageHook`, `webMcpSnapshotInPage`, `webMcpInvokeInPage`, `WEBMCP_BRIDGE_KEY` and the page-hook types are removed ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
+- `provider/model` selectors in `--model`, settings, roles and task agents must now name an exact id or alias; a near miss (`anthropic/claude-haiku-5-5`, a retired `openai-codex/gpt-5.5`) fails with `Model "…" not found` and suggests close ids from that provider instead of silently running a sibling. Bare selectors such as `opus` still fuzzy-match, and `google-vertex/claude-opus-4-8` still names `claude-opus-4-8@default` ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Added
 
 - The agent can reply mid-task without ending its turn by writing Markdown to `out://` (`write`, or `> out://` from bash, up to 64 KiB): the reply shows like a response, streaming as it is written, so answering a question you ask during work or a requested progress report no longer cuts the task short. On by default in the interactive TUI and off in print, RPC, and ACP sessions; set `out.enabled` to force it either way
+- `tools.approval["computer.control"]: allow` lets the `computer` tool take foreground control on a machine with nobody to confirm it, such as a dedicated VM, and `deny` refuses it without asking; the approval mode alone never grants it ([#16917](https://github.com/can1357/oh-my-pi/pull/16917) by [@will-bogusz](https://github.com/will-bogusz))
 - Added opt-in `taskFile` input (`task.file=true`) to dispatch subagent instructions from a UTF-8 file via an absolute path or `local://` URL, recording the submitted path and SHA-256 ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal)).
 - Pin and unpin sessions from the resume picker with `Alt+K` / `Alt+Shift+K` (remappable as `app.session.pin` / `app.session.unpin`); pinned sessions move to the top at once and also lead search results ([#9837](https://github.com/can1357/oh-my-pi/pull/9837) by [@zhang17-24](https://github.com/zhang17-24))
 - Set `PI_LINK_SCHEME` (and optionally `PI_LINK_HOST`) to make file links in SSH/tmux sessions open through a desktop protocol handler such as `ompfile://<host>/<path>?line=N&col=M` ([#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu))
 - Extensions can start `/live` voice sessions with the audio on their own WebRTC peer, such as a phone browser, through `ctx.startLive({ sdpOffer })`; the RPC `live_connect` command does the same for RPC clients ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
 - Added opt-in extension reply renderers: with `extensionRenderers.assistantText` on, `pi.registerAssistantTextRenderer()` changes how assistant text is drawn (terminal and Tern native view) without touching the session or model context, and `ctx.ui.rerenderMessage(timestamp)` redraws one reply in place ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
 - Added extension link schemes behind the same setting: links using a scheme claimed with `pi.registerLinkScheme()` draw as a dotted-underlined label and raise `link_activate` for that extension when picked with Alt+O (`app.links.hint`) or clicked with `tui.mouse` on; `ctx.ui.getLinkClicksAvailable()` lets a renderer fall back to inline content ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+- `/debug` report bundles now include `session-logs.txt`: every log record written today by the reporting session and its subagents, including records older than the last 1,000 lines of each process log that `logs.txt` keeps ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
+- The source-checkout launcher skips recreating its isolated Bun startup directory when it already exists.
 - OpenAI live steering (`providers.openaiLiveSteering`) is now off by default for GPT models; typed messages wait for the next tool boundary unless you enable it, avoiding `unsupported_native_inflight_message` errors
 
 - Sub-session collector now determines compression from filename extension instead of a boolean flag
@@ -28,6 +36,10 @@
 - Eval shows printed JSON text (`print(json.dumps(…))`, `console.log(JSON.stringify(…))`) as a collapsible JSON tree, like printed dicts and objects
 - The warning that a saved Codex or Claude rate-limit reset is about to expire now shows once per reset across all conversations and omp windows, and only in its final 6 hours instead of from 24 hours out; the status line keeps counting it down meanwhile
 - The `.`/`c` continue shortcut no longer adds a hidden "continue" directive when your last message is still unanswered (for example after pressing Esc before the model replied); the agent simply answers that message again
+- With `bash.gitGuard` on, `git checkout`, `switch`, `restore`, `reset` and `stash` now run in a linked worktree instead of being refused, saving any uncommitted changes they discard to `refs/omp/discarded` first; stash commands still refuse another branch's entries, and a repository's main checkout keeps every refusal ([#17349](https://github.com/can1357/oh-my-pi/pull/17349) by [@will-bogusz](https://github.com/will-bogusz))
+- Browser `webmcp*` helpers read Chrome's native WebMCP when called instead of injecting a script and `modelContext` polyfill into every page omp drives, and say why when Chrome offers a page none; Tern tabs no longer support them ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
+- Log records written during a session's turns and compaction now carry its `sessionId`, so a subagent's records are told apart from its parent's in the same process log; records that named another kind of id `sessionId` now call it `titleSessionId`, `debugSessionId`, `kernelSessionId`, `acpSessionId` or `providerSessionId` ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
+- Sessions started with computer use enabled receive the desktop guide before their first call, avoiding a separate documentation read before starting a desktop task ([#16918](https://github.com/can1357/oh-my-pi/pull/16918) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -36,6 +48,7 @@
 
 ### Fixed
 
+- Fixed `omp auth-gateway serve` routing a bare model id (e.g. Claude Code's `claude-opus-5-5`) to a mirror provider such as Cursor after a catalog refresh; a bare id now goes to the highest-priority credentialed provider (`modelProviderOrder`, then the built-in native-first order), and among equally ranked providers prefers one speaking the route's wire format
 - Fixed table charts marking the worse value "best" when a column or row name suggests the wrong direction (a GPU's memory bandwidth and L2 cache read as costs). Charts no longer guess which way is better from header wording; under `tui.autoGraph: smart` the judge decides, for single-measure tables and every metric row too, and can decline a chart of page numbers, step numbers or figures quoted in prose
 - Fixed background bash job widgets showing binary mojibake as the stage and counting it as hundreds of thousands of lines when a pipe carries binary data (`git archive | tar -x`, `curl | gunzip`); such pipes are now left out of the widget
 - Fixed closing a browser tab while omp reattaches it after its worker exited taking most of a second longer than needed
@@ -72,6 +85,11 @@
 - Fixed a `models.yml` `thinking` override on prefix-bound Claude models dropping the catalog's prefix binding, which disabled bound-prefix preservation during pruning/compaction and the retry after a prefix-mismatch 400 ([#17276](https://github.com/can1357/oh-my-pi/issues/17276))
 - Fixed failed JSON queries on large values showing pages of the rejected value instead of the error reason and key ([#17269](https://github.com/can1357/oh-my-pi/issues/17269))
 - Fixed <kbd>F5</kbd> reporting "Nothing to retry" under the "F5 to retry" hint when a background job's result arrived after you cancelled `ask` or interrupted a tool call ([#17266](https://github.com/can1357/oh-my-pi/issues/17266))
+- Fixed `webmcpInvoke` returning an empty error when a page's tool throws, and leaving a timed-out invocation running in the page ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed HTTP 413 failures on Factory Droid GPT and Grok models after switching from an OpenAI computer-use session: older computer screenshots are now dropped to fit Factory's request limit, as other images already were ([#16564](https://github.com/can1357/oh-my-pi/pull/16564) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a configured default or dictation model that no longer resolves being replaced silently; omp now warns and names the model it uses instead ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `lsp` finding no references for Rust files in another checkout than the session's, such as a sibling git worktree: that checkout is now added to the running language server's workspace, without starting another server ([#16271](https://github.com/can1357/oh-my-pi/pull/16271) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS computer-use tasks now open apps that may have no window and inspect the returned window in one call, while known-open windows and read-only work keep window lookup ([#16925](https://github.com/can1357/oh-my-pi/pull/16925) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.13.3] - 2026-10-28
 

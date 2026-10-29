@@ -69,7 +69,6 @@ import type {
 	ToolChoiceDirective,
 } from "./types";
 import { isSoftToolRequirement } from "./types";
-import { EventLoopKeepalive } from "./utils/yield";
 
 /**
  * Default convertToLlm: Keep only LLM-compatible replay messages.
@@ -642,6 +641,12 @@ export class Agent {
 	set promptCacheKey(value: string | undefined) {
 		this.#promptCacheKey = value;
 	}
+
+	/**
+	 * Fields added to every log record written while this agent runs (the
+	 * owning session's `sessionId`), so in-process agents' records stay apart.
+	 */
+	logContext: Readonly<Record<string, unknown>> | undefined;
 
 	/**
 	 * Static metadata forwarded to every API request when no resolver is installed
@@ -1668,7 +1673,7 @@ export class Agent {
 			promptOptions = imagesOrOptions as AgentPromptOptions | undefined;
 		}
 
-		await this.#runLoop(msgs, promptOptions);
+		await this.#inLogContext(() => this.#runLoop(msgs, promptOptions));
 	}
 
 	/**
@@ -1692,7 +1697,12 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
-	async continue(signal?: AbortSignal) {
+	continue(signal?: AbortSignal): Promise<void> {
+		// Queued-message hooks run before the loop and are this agent's work too.
+		return this.#inLogContext(() => this.#continue(signal));
+	}
+
+	async #continue(signal?: AbortSignal) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
@@ -1774,6 +1784,11 @@ export class Agent {
 		}
 	}
 
+	/** Run `fn` with {@link logContext} on every record it logs. */
+	#inLogContext<T>(fn: () => T): T {
+		return this.logContext ? logger.withContext(this.logContext, fn) : fn();
+	}
+
 	/**
 	 * Run the agent loop.
 	 * If messages are provided, starts a new conversation turn with those messages.
@@ -1789,7 +1804,6 @@ export class Agent {
 		if (!model) throw new Error("No model configured");
 
 		let skipInitialSteeringPoll = options?.skipInitialSteeringPoll === true;
-		using _ = new EventLoopKeepalive();
 		if (!runStateClaimed) {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			this.#runningPrompt = promise;

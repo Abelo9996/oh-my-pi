@@ -38,7 +38,6 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
-	EventLoopKeepalive,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -2319,40 +2318,27 @@ export class AgentSession implements SettingsScope {
 				}
 			},
 			scheduleIdleFlush: run => {
-				const keepalive = new EventLoopKeepalive();
-				try {
-					this.#schedulePostPromptTask(
-						async signal => {
+				this.#schedulePostPromptTask(
+					async signal => {
+						// Idle compaction rewrites history without owning a turn; flush into the compacted context.
+						// Cancellation (abort, session change, disposal) stops the wait at once instead of holding
+						// their post-prompt drain behind the compaction; abort re-requests the flush once it settles.
+						const idleCompaction = this.#maintenance.waitForIdleCompaction();
+						if (idleCompaction) {
 							try {
-								// Idle compaction rewrites history without owning a turn; flush into the compacted context.
-								// Cancellation (abort, session change, disposal) stops the wait at once instead of holding
-								// their post-prompt drain behind the compaction; abort re-requests the flush once it settles.
-								const idleCompaction = this.#maintenance.waitForIdleCompaction();
-								if (idleCompaction) {
-									try {
-										await untilAborted(signal, idleCompaction);
-									} catch {
-										this.yieldQueue.cancelIdleFlushScheduling();
-										return;
-									}
-								}
-								await run();
-							} finally {
-								keepalive[Symbol.dispose]();
-							}
-						},
-						{
-							delayMs: 1,
-							onSkip: () => {
-								keepalive[Symbol.dispose]();
+								await untilAborted(signal, idleCompaction);
+							} catch {
 								this.yieldQueue.cancelIdleFlushScheduling();
-							},
-						},
-					);
-				} catch (error) {
-					keepalive[Symbol.dispose]();
-					throw error;
-				}
+								return;
+							}
+						}
+						await run();
+					},
+					{
+						delayMs: 1,
+						onSkip: () => this.yieldQueue.cancelIdleFlushScheduling(),
+					},
+				);
 			},
 		});
 		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
@@ -2535,7 +2521,7 @@ export class AgentSession implements SettingsScope {
 		if (this.#asyncJobManager && this.#agentId) {
 			const manager = this.#asyncJobManager;
 			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
-				this.#deliverAsyncJobResult(manager, jobId, text, job),
+				this.#inLogContext(() => this.#deliverAsyncJobResult(manager, jobId, text, job)),
 			);
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId),
@@ -2552,6 +2538,14 @@ export class AgentSession implements SettingsScope {
 		// tool_execution_start, and the wrapper's approval gate.
 		this.agent.beforeToolCall = (ctx, signal) => this.#beforeToolCall(ctx, signal);
 		this.agent.providerSessionState = this.#providerSessionState;
+		// Records this session's work writes name it; the getter follows every
+		// re-key (new session, resume, fork, relocation off a contended file).
+		const sessionManager = this.sessionManager;
+		this.agent.logContext = {
+			get sessionId() {
+				return sessionManager.getSessionId();
+			},
+		};
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
 		this.#modelMentions.syncFromBranch();
@@ -3535,11 +3529,16 @@ export class AgentSession implements SettingsScope {
 		return this.#admittedSubmissionsSettled.promise;
 	}
 
+	/** Run session work outside an agent run (prompt setup, manual maintenance) under the agent's log context. */
+	#inLogContext<T>(work: () => T): T {
+		return this.agent.logContext ? logger.withContext(this.agent.logContext, work) : work();
+	}
+
 	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
 		this.#admittedSubmissionCount++;
 		try {
 			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
-			return await work();
+			return await this.#inLogContext(work);
 		} finally {
 			if (--this.#admittedSubmissionCount === 0 && this.#admittedSubmissionsSettled) {
 				const settled = this.#admittedSubmissionsSettled;
@@ -5768,7 +5767,7 @@ export class AgentSession implements SettingsScope {
 		}
 		if (result?.decision !== "block" && this.#sessionStopContinuationCount >= SESSION_STOP_CONTINUATION_CAP) {
 			logger.warn("session_stop continuation cap reached", {
-				sessionId: this.sessionId,
+				providerSessionId: this.sessionId,
 				cap: SESSION_STOP_CONTINUATION_CAP,
 			});
 			this.#resetSessionStopContinuationState();
@@ -7295,12 +7294,12 @@ export class AgentSession implements SettingsScope {
 
 	/** Reduce stored context with the selected shake strategy. */
 	shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
-		return this.#maintenance.shake(mode, opts);
+		return this.#inLogContext(() => this.#maintenance.shake(mode, opts));
 	}
 
 	/** Compact the active session history. */
 	compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
-		return this.#maintenance.compact(customInstructions, options);
+		return this.#inLogContext(() => this.#maintenance.compact(customInstructions, options));
 	}
 
 	/** Cancel active manual, automatic, and handoff maintenance, preserving an optional source reason. */
@@ -7322,7 +7321,7 @@ export class AgentSession implements SettingsScope {
 		// history; a warm replay racing a slow summary would be paid for nothing.
 		// A streaming session owns a live run whose warming must survive.
 		if (!this.isStreaming && !this.isCompacting) this.#cacheWarmer?.cancel();
-		await this.#maintenance.runIdleCompaction();
+		await this.#inLogContext(() => this.#maintenance.runIdleCompaction());
 	}
 
 	/** Override cache warming for this session only, never writing config.yml; returns the effective mode. */
@@ -10914,7 +10913,7 @@ export class AgentSession implements SettingsScope {
 			})
 			.catch(err => {
 				logger.warn("title-generator: uncaught auto-title error", {
-					sessionId: this.sessionId,
+					providerSessionId: this.sessionId,
 					reason: "uncaught-auto-title-error",
 					error: err instanceof Error ? err.message : String(err),
 				});
@@ -11931,7 +11930,7 @@ export class AgentSession implements SettingsScope {
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
 	handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
-		return this.#maintenance.handoff(customInstructions, options);
+		return this.#inLogContext(() => this.#maintenance.handoff(customInstructions, options));
 	}
 
 	#isTerminalYieldToolResult(event: { toolName: string; isError?: boolean; result?: { details?: unknown } }): boolean {
@@ -12536,7 +12535,8 @@ export class AgentSession implements SettingsScope {
 
 	/** Delivers an IRC message into this recipient session. */
 	deliverIrcMessage(msg: IrcMessage): Promise<"injected" | "woken"> {
-		return this.#irc.deliver(msg);
+		// The sender's context is active here; the delivery is the recipient's work.
+		return this.#inLogContext(() => this.#irc.deliver(msg));
 	}
 
 	/** Recognizes parent IRC steering at message consumption, without promoting queued requests. */

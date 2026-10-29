@@ -2,10 +2,15 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the Bun event-loop workarounds `EventLoopKeepalive`, `YieldGate`, `yieldIfDue`, and `ExponentialYield` (`@oh-my-pi/pi-agent-core/utils/yield`); the agent loop no longer inserts cooperative sleeps while streaming or between tool calls
+
 ### Added
 
 - `PI_INTENT_DESC` replaces the schema description of the injected `i` intent field
 - `AgentTool.approvalRestrictionPaths` reports paths a call reads, so restricted folders cover them without the approval being remembered per path ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal))
+- Added `Agent.logContext`, fields added to every log record written during the agent's runs ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.13.3] - 2026-10-28
 
