@@ -724,7 +724,7 @@ return {
 					action: "run",
 					name: tabName,
 					code: `let refused = "";
-try { await tab.fill("#editor", ""); } catch (error) { refused = error.message; }
+try { await tab.fill("#editor", "new"); } catch (error) { refused = error.message; }
 return { refused, other: await tab.value("#other"), editor: await tab.text("#editor") };`,
 					timeout: 25,
 				},
@@ -733,6 +733,42 @@ return { refused, other: await tab.value("#other"), editor: await tab.text("#edi
 			const outcome = valueFrom<{ refused: string; other: string; editor: string }>(result);
 			expect(outcome.refused).toContain("does not keep focus");
 			expect(outcome).toMatchObject({ other: "keep", editor: "old" });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
+	test("fills and clears a contenteditable inside a closed shadow root through its observed handle", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-closed-${crypto.randomUUID()}`;
+		const closedHtml = `<!doctype html><div id="host"></div>
+<script>
+const root = document.querySelector("#host").attachShadow({ mode: "closed" });
+root.innerHTML = '<div contenteditable role="textbox" aria-label="Closed editor">old</div>';
+window.closedEditor = root.firstChild;
+</script>`;
+		const context = { session, toolCallId: "browser-editable-closed" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(closedHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const { elements } = await tab.observe();
+const editor = await tab.id(elements.find(element => element.name === "Closed editor").id);
+await editor.fill("new");
+const filled = await tab.evaluate(() => window.closedEditor.textContent);
+await editor.fill("");
+return { filled, cleared: await tab.evaluate(() => window.closedEditor.textContent) };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<{ filled: string; cleared: string }>(result)).toEqual({ filled: "new", cleared: "" });
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
