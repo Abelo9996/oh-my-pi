@@ -16,16 +16,16 @@ The equivalent YAML in `~/.omp/agent/config.yml` or a project `.omp/config.yml` 
 
 ```yaml
 prewalk:
-  enabled: true
+   enabled: true
 ```
 
 The configured setting arms new sessions, not resumed/imported sessions. Explicit session flags can arm either:
 
-| Flag | Effect |
-| --- | --- |
-| `--prewalk` | Arm prewalk for the new session. |
-| `--no-prewalk` | Leave prewalk disabled for the startup session, even when `prewalk.enabled` is `true`, and keep [auto-prewalk](#auto-prewalk) out of it. `/new` still follows the settings. |
-| `--prewalk-into <model-or-role>` | Arm prewalk and use the supplied model pattern or role instead of `@smol`. |
+| Flag                             | Effect                                                                                                                                                                      |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--prewalk`                      | Arm prewalk for the new session.                                                                                                                                            |
+| `--no-prewalk`                   | Leave prewalk disabled for the startup session, even when `prewalk.enabled` is `true`, and keep [auto-prewalk](#auto-prewalk) out of it. `/new` still follows the settings. |
+| `--prewalk-into <model-or-role>` | Arm prewalk and use the supplied model pattern or role instead of `@smol`.                                                                                                  |
 
 For example:
 
@@ -83,18 +83,18 @@ If prewalk is already armed, `/prewalk` leaves the existing target in place. `/p
 
 ```yaml
 prewalk:
-  enabled: false
-  auto: on
-  autoTarget: "@smol"
+   enabled: false
+   auto: on
+   autoTarget: "@smol"
 ```
 
 `prewalk.autoTarget` (default `@smol`) takes a model pattern or role, resolved with the normal role and model-matching rules, including authentication.
 
-| `prewalk.auto` | Behavior |
-| --- | --- |
-| `off` (default) | No classification; nothing changes. |
-| `suggest` | Classifies each new task and reports the decision only. Never arms prewalk or switches models. |
-| `on` | Classifies each new task. When the judge is confident the task fits and the target resolves with a usable credential, arms a handoff from the active model to the target; otherwise nothing changes. |
+| `prewalk.auto`  | Behavior                                                                                                                                                                                             |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `off` (default) | No classification; nothing changes.                                                                                                                                                                  |
+| `suggest`       | Classifies each new task and reports the decision only. Never arms prewalk or switches models.                                                                                                       |
+| `on`            | Classifies each new task. When the judge is confident the task fits and the target resolves with a usable credential, arms a handoff from the active model to the target; otherwise nothing changes. |
 
 Run `suggest` for a while to see how it judges your prompts, then set `auto: on`. To plan on a stronger model, make it your active (`@default`) model; auto-prewalk hands off from whatever you are on.
 
@@ -108,11 +108,11 @@ Auto-prewalk needs the `judge` model role to resolve first to a native judgment 
 
 The judge sorts each task by where its expensive reasoning belongs, not by how hard or large it is:
 
-| Route | Meaning | Typical tasks |
-| --- | --- | --- |
-| `prewalk` | The hard thinking comes first; once it settles the approach, the remaining implementation and verification are bounded. | Tracing an unfamiliar subsystem before a localized change; reading several interacting files before implementing a clear design; diagnosing a bug down to a concrete fix; a migration whose hard part is finding the transformation and everything it touches. |
-| `primary` | Strong reasoning stays necessary while implementing, debugging, or validating, so the first edit is too early to hand off. | Unresolved races or invariants; subtle lifecycle changes; a bug whose cause will still be unclear after a first look; high-risk or algorithmically hard changes. |
-| `direct` | There is no up-front phase worth handing off from. | Explanations and read-only questions; trivial, mechanical, or fully specified edits; tiny localized fixes. |
+| Route     | Meaning                                                                                                                    | Typical tasks                                                                                                                                                                                                                                                  |
+| --------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prewalk` | The hard thinking comes first; once it settles the approach, the remaining implementation and verification are bounded.    | Tracing an unfamiliar subsystem before a localized change; reading several interacting files before implementing a clear design; diagnosing a bug down to a concrete fix; a migration whose hard part is finding the transformation and everything it touches. |
+| `primary` | Strong reasoning stays necessary while implementing, debugging, or validating, so the first edit is too early to hand off. | Unresolved races or invariants; subtle lifecycle changes; a bug whose cause will still be unclear after a first look; high-risk or algorithmically hard changes.                                                                                               |
+| `direct`  | There is no up-front phase worth handing off from.                                                                         | Explanations and read-only questions; trivial, mechanical, or fully specified edits; tiny localized fixes.                                                                                                                                                     |
 
 Volume of work alone and difficulty alone never make a task a prewalk candidate, and a wrong handoff costs more than a missed one: between `prewalk` and `primary` the judge is told to choose `primary`, and for a small task to choose `direct`. OMP arms only when `prewalk` wins **and** its probability is at least 0.70. That threshold is fixed, and a `prewalk` winner below it counts as a "no".
 

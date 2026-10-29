@@ -85,16 +85,16 @@ build:ci --verbose_failures
 build:ci --keep_going=false
 # Reuse sandbox trees between actions: the zig/xwin toolchains stage ~10k-file
 # input trees per action, and rebuilding+async-deleting them for thousands of
-# actions exhausts file descriptors on the kata pods (EMFILE in unix_jni).
+# actions exhausts file descriptors on CI runner VMs (EMFILE in unix_jni).
 build:ci --reuse_sandbox_directories
 
 # --- Remote cache ------------------------------------------------------------
-# The bazel-remote endpoint is cluster-internal only; .github/actions/bazel-cache
-# composes endpoint + credentials into an rc fragment on omp-kata pods.
-# GitHub-hosted runners never use a remote cache (actions/cache-backed
-# --disk_cache instead). These configs carry only the policy bits.
+# .github/actions/bazel-cache composes the bazel-remote endpoint + credentials
+# (repository secrets) into an rc fragment on vmon `omp-ci` runners.
+# GitHub-hosted runners never use the remote cache and run no Bazel builds.
+# These configs carry only the policy bits.
 #
-# cache-rw: trusted in-cluster writers (omp-kata pods).
+# cache-rw: trusted writers (non-PR jobs on vmon runners).
 build:cache-rw --remote_upload_local_results=true
 build:cache-rw --remote_local_fallback
 # cache-ro: read-only consumers (e.g. local dev via .bazelrc.user + VPN/tailnet).

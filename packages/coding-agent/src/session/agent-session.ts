@@ -206,6 +206,7 @@ import anthropicUsageWrapUpPrompt from "../prompts/system/anthropic-usage-wrap-u
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-notice.md" with { type: "text" };
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
+import manualContinuePrompt from "../prompts/system/manual-continue.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
@@ -732,6 +733,8 @@ type ScheduledAgentContinueOptions = {
 	shouldContinue?: () => boolean;
 	onSkip?: (reason: AgentContinueSkipReason) => void;
 	onError?: (error: unknown) => void;
+	/** Messages the continued turn answers, handed to the turn observer (see `#startTurnObservation`). */
+	turnRecords?: AgentMessage[];
 };
 
 type ScheduledAgentContinueRequest = {
@@ -5414,7 +5417,7 @@ export class AgentSession implements SettingsScope {
 				let observation: TurnObservation | undefined;
 				const onStart = this.#ircWakeTurnObserver
 					? () => {
-							observation = this.#startTurnObservation([]);
+							observation = this.#startTurnObservation(options.turnRecords ?? []);
 						}
 					: undefined;
 				const promise = this.#runAgentContinue(signal, request, coalescedSources, onStart);
@@ -8088,6 +8091,43 @@ export class AgentSession implements SettingsScope {
 		return this.#admitSubmission(() => this.#prompt(text, options));
 	}
 
+	/**
+	 * Resume the agent for the operator's `.`/`c` continue shortcut. A prompt the
+	 * model has not answered yet (an Esc before any output) runs again as is: a
+	 * continue directive would add nothing. Otherwise the hidden manual-continue
+	 * directive asks the model to pick its work back up.
+	 *
+	 * @throws {AgentBusyError} while a turn runs.
+	 */
+	async resume(): Promise<void> {
+		const prompt = this.#recovery.prepareResume();
+		if (!prompt) {
+			await this.prompt(manualContinuePrompt, {
+				synthetic: true,
+				userInitiated: true,
+				expandPromptTemplates: false,
+			});
+			return;
+		}
+		this.#noteUserTurn();
+		this.#todo.resetCycle();
+		this.#resetPromptMaintenanceState();
+		this.#scheduleAgentContinue({ source: "manual-continue", turnRecords: [prompt] });
+	}
+
+	/**
+	 * A user turn (typed prompt or `.`/`c` continue) re-enables advisor auto-resume
+	 * that a prior user interrupt suppressed and resets plan-mode reminder state.
+	 */
+	#noteUserTurn(): void {
+		this.#advisors.autoResumeSuppressed = false;
+		this.#planModeReminderCount = 0;
+		this.#planModeReminderAwaitingProgress = false;
+		// A user turn owns the next decision; drop a queued forced choice from
+		// a reminder continuation this prompt just preempted.
+		this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+	}
+
 	async #prompt(text: string, options?: PromptOptions): Promise<boolean> {
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
@@ -8185,17 +8225,8 @@ export class AgentSession implements SettingsScope {
 		const sessionAgentNotice = options?.synthetic ? undefined : this.#tools.takeSessionAgentNotice();
 		const prependNotices = sessionAgentNotice ? [...keywordNotices, sessionAgentNotice] : keywordNotices;
 
-		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
-		// re-enables advisor auto-resume that a prior user interrupt suppressed.
-		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
-		if (options?.userInitiated ?? !options?.synthetic) {
-			this.#advisors.autoResumeSuppressed = false;
-			this.#planModeReminderCount = 0;
-			this.#planModeReminderAwaitingProgress = false;
-			// A user turn owns the next decision; drop a queued forced choice from
-			// a reminder continuation this prompt just preempted.
-			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
-		}
+		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) are not user turns.
+		if (options?.userInitiated ?? !options?.synthetic) this.#noteUserTurn();
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 

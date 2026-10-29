@@ -67,7 +67,14 @@ interface ExtractionHost extends AgentSession {
 export async function flushSharpshooterExtraction(session: AgentSession, timeoutMs = 5_000): Promise<void> {
 	const pending = (session as ExtractionHost)[kExtractionInFlight];
 	if (!pending) return;
-	await Promise.race([pending, Bun.sleep(Math.max(0, timeoutMs))]);
+	// A settled extraction must not leave the bound's timer holding the event loop open.
+	const bound = Promise.withResolvers<void>();
+	const timer = setTimeout(bound.resolve, Math.max(0, timeoutMs));
+	try {
+		await Promise.race([pending, bound.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 export interface SharpshooterEnvelope {

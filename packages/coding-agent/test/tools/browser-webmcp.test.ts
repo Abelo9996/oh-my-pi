@@ -1,8 +1,13 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { acquireBrowser, holdBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import {
+	acquireBrowser,
+	holdBrowser,
+	type PuppeteerBrowserHandle,
+	releaseBrowser,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import {
 	installWebMcp,
@@ -17,8 +22,24 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
-// Every case includes a real Chromium lifecycle, including process launch and shutdown.
 const BROWSER_TEST_TIMEOUT_MS = 30_000;
+
+// One headless Chromium for the file, held across it; the browser host's tabs open in it too. Each test closes the
+// pages and tabs it opened.
+let sharedHeadless: PuppeteerBrowserHandle | undefined;
+
+beforeAll(async () => {
+	if (!CHROMIUM_AVAILABLE) return;
+	const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+	if (!("browser" in launched)) throw new Error("Expected a Puppeteer browser");
+	holdBrowser(launched);
+	sharedHeadless = launched;
+});
+
+function headless(): PuppeteerBrowserHandle {
+	if (!sharedHeadless?.browser.connected) throw new Error("Expected the shared headless browser");
+	return sharedHeadless;
+}
 
 function createBrowserHost() {
 	const session: ToolSession = {
@@ -55,6 +76,7 @@ function valueFrom<T>(result: { details?: unknown }): T {
 afterAll(async () => {
 	await releaseAllTabs({ kill: true });
 	await disposeAllVmContexts();
+	if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser WebMCP helpers", () => {
@@ -257,9 +279,7 @@ window.cachedContext = navigator.modelContext;`,
 	])(
 		"mirrors a tool registered after attach on a page whose modelContext is $setup",
 		async ({ define, registerOn }) => {
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
 				await page.goto("data:text/html,<title>page-owned context</title>");
@@ -279,7 +299,6 @@ window.cachedContext = navigator.modelContext;`,
 				await controller.dispose();
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,
@@ -313,9 +332,7 @@ ModelContext.prototype.registerTool = window.pageRegister;`,
 				fetch: () =>
 					new Response("<!doctype html><title>dispose</title>", { headers: { "content-type": "text/html" } }),
 			});
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
 				await page.goto(`http://localhost:${server.port}/`);
@@ -327,7 +344,6 @@ ModelContext.prototype.registerTool = window.pageRegister;`,
 				expect(await realm.evaluate(check)).toBe(true);
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,
@@ -342,9 +358,7 @@ ModelContext.prototype.registerTool = window.pageRegister;`,
 				fetch: () =>
 					new Response("<!doctype html><title>before</title>", { headers: { "content-type": "text/html" } }),
 			});
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
 				await page.goto(`http://localhost:${server.port}/`);
@@ -373,7 +387,6 @@ ModelContext.prototype.registerTool = window.pageRegister;`,
 				await controller.dispose();
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,
@@ -400,9 +413,7 @@ Object.defineProperty(document, "modelContext", { configurable: true, value: pag
 				fetch: () =>
 					new Response("<!doctype html><title>cached</title>", { headers: { "content-type": "text/html" } }),
 			});
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
 				await page.goto(`http://localhost:${server.port}/`);
@@ -418,7 +429,6 @@ Object.defineProperty(document, "modelContext", { configurable: true, value: pag
 				await controller.dispose();
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,
@@ -427,9 +437,7 @@ Object.defineProperty(document, "modelContext", { configurable: true, value: pag
 	it(
 		"calls a page-owned context's methods on that context when the page detaches them",
 		async () => {
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
 				await page.goto("data:text/html,<title>detached</title>");
@@ -453,7 +461,6 @@ null;`);
 				await controller.dispose();
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,
@@ -466,9 +473,7 @@ null;`);
 	])(
 		"reports nativeAvailable $nativeAvailable when $owner has a null modelContext",
 		async ({ owner, nativeAvailable }) => {
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
 				await page.goto("data:text/html,<title>null context</title>");
@@ -482,7 +487,6 @@ null;`);
 				);
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,

@@ -219,6 +219,14 @@ crate.annotation(
     version = "0.28.0",
 )
 
+# Same for normal dependencies: grep-printer's edge to the vendored
+# grep-searcher (a workspace member via [patch.crates-io]) is dropped, so its
+# rustc invocation has no `--extern grep_searcher`.
+crate.annotation(
+    crate = "grep-printer",
+    deps = ["@@//crates/vendor/grep-searcher:grep-searcher"],
+)
+
 # Release addons must never pick up a host libpcre2 (Homebrew paths leaked into
 # shipped dylibs before); always build the vendored static copy.
 crate.annotation(

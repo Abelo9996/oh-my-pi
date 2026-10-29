@@ -230,6 +230,10 @@ const tabs = new Map<string, TabSession>();
 // recorded target instead. A shared browser's other targets must never be
 // touched.
 const workerPageTargets = new WeakMap<WorkerHandle, string>();
+// Tags a worker that exited on its own. A tab keeps its exited worker until the reattach publishes a replacement, and
+// a release meanwhile must not wait out a `closed` reply that worker can no longer send.
+const kWorkerExited = Symbol("tabWorker.exited");
+type ExitTrackedWorker = WorkerHandle & { [kWorkerExited]?: true };
 // Per-name acquisition chain: serializes concurrent `acquireTab` calls for the
 // same tab name so the existence check and `tabs.set` (separated by several
 // awaits) cannot interleave and leak a worker + browser refCount.
@@ -1345,7 +1349,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	}
 	let cleanupError: unknown;
 	let targetCloseFailed = false;
-	if (wasAlive) {
+	if (wasAlive && !(tab.worker as ExitTrackedWorker)[kWorkerExited]) {
 		try {
 			tab.worker.send({ type: "close" });
 			await waitForClosed(tab);
@@ -1975,6 +1979,7 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 		if (!(error instanceof WorkerMessageError)) lastError = error;
 	});
 	worker.onExit(exitCode => {
+		(worker as ExitTrackedWorker)[kWorkerExited] = true;
 		// A release or recycle owns a worker it replaced or is tearing down.
 		if (tabs.get(tab.name) !== tab || tab.worker !== worker || tab.state !== "alive" || releaseInflight.has(tab))
 			return;

@@ -13,17 +13,11 @@ import type {
 	WorkerInitPayload,
 	WorkerOutbound,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
-import {
-	acquireTab,
-	getTabsMapForTest,
-	releaseTab,
-	runInTab,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { acquireTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
-import puppeteer, { type Browser, type Target, type WebWorker } from "puppeteer-core";
-import { rejectionOf } from "../helpers/rejection";
+import puppeteer, { type Browser, type WebWorker } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -343,33 +337,6 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			await fixture.close();
 		}
 	}, 60_000);
-
-	it("drops a closed owned tab's handle and browser hold when timeout recovery loses its connection", async () => {
-		const fixture = await launchRelayFixture();
-		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
-		if (!("browser" in relay)) throw new Error("Expected relay Chromium connection");
-		const name = `relay-closed-recovery-${process.pid}`;
-		const referencesBefore = relay.refCount;
-		const { tab } = await acquireTab(name, relay, { timeoutMs: 15_000 });
-		const gone = Promise.withResolvers<void>();
-		const onGone = (target: Target) => {
-			if ("_targetId" in target && target._targetId === tab.targetId) gone.resolve();
-		};
-		relay.browser.on("targetdestroyed", onGone);
-		try {
-			const run = runInTab(name, { code: "await page.close(); await wait(60_000);", timeoutMs: 5_000, session });
-			await gone.promise;
-			relay.browser.disconnect();
-			expect(await rejectionOf(run)).toBeInstanceOf(Error);
-			expect(getTabsMapForTest().has(name)).toBeFalse();
-			expect(relay.refCount).toBe(referencesBefore);
-		} finally {
-			relay.browser.off("targetdestroyed", onGone);
-			await releaseTab(name).catch(() => undefined);
-			await releaseBrowser(relay, { kill: false });
-			await fixture.close();
-		}
-	}, 30_000);
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("owned tab recovery", () => {

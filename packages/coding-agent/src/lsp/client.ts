@@ -84,15 +84,33 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 
 // Broker-shared server mode: language servers hosted by the per-project LSP mux
 // daemon, one per connection; a released server lingers for reuse while the mux runs.
-// Off by default so embedders and tests that drive getOrCreateClient directly
-// never touch the daemon broker; the SDK sets it from the `lsp.shared` setting at
-// session creation and on every later change. Only consulted at cold-start, so
-// running clients keep their transport.
-let sharedLspEnabled = false;
+// The newest hold decides; with none it is off, so embedders and tests that drive
+// getOrCreateClient directly never touch the daemon broker. Each process-binding SDK
+// session holds it from its `lsp.shared` setting until disposed, then hands it back to
+// the previous holder. Only consulted at cold-start, so running clients keep their transport.
+interface SharedLspHold {
+	enabled: boolean;
+}
+const sharedLspHolds: SharedLspHold[] = [];
 
-/** Enable or disable attaching to broker-shared language servers. */
-export function setSharedLspEnabled(enabled: boolean): void {
-	sharedLspEnabled = enabled;
+/** Whether a client cold start attaches to a broker-shared language server. */
+export function isSharedLspEnabled(): boolean {
+	return sharedLspHolds.at(-1)?.enabled ?? false;
+}
+
+/** Hold the shared-LSP mode at `enabled` until released; `set` follows later setting changes. */
+export function holdSharedLsp(enabled: boolean): { set(enabled: boolean): void; release(): void } {
+	const hold: SharedLspHold = { enabled };
+	sharedLspHolds.push(hold);
+	return {
+		set(next) {
+			hold.enabled = next;
+		},
+		release() {
+			const index = sharedLspHolds.indexOf(hold);
+			if (index !== -1) sharedLspHolds.splice(index, 1);
+		},
+	};
 }
 
 /**
@@ -1140,7 +1158,7 @@ export async function getOrCreateClient(
 		// already multiplexing this command. Any shared-path failure falls back
 		// to a private spawn so LSP never regresses on broker trouble.
 		let proc: LspTransport | null = null;
-		if (sharedLspEnabled && command === baseCommand) {
+		if (isSharedLspEnabled() && command === baseCommand) {
 			proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
 		}
 		proc ??= ptree.spawn([command, ...args], {

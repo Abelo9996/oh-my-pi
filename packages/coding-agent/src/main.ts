@@ -267,6 +267,11 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string)
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
 }
 
+/** Print a non-fatal startup warning, for launches without a UI to show it in. */
+function writeStartupWarning(warning: string): void {
+	process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+}
+
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!cfgStartupCheckUpdate.get(settings)) {
 		return;
@@ -431,7 +436,7 @@ export async function submitInteractiveInput(
 		| "optimisticSkillMessagePending"
 	> &
 		Partial<Pick<InteractiveMode, "loopPrompt" | "pauseLoop">>,
-	session: Pick<AgentSession, "buildUserSkillPrompt" | "prompt" | "promptCustomMessage" | "isStreaming">,
+	session: Pick<AgentSession, "buildUserSkillPrompt" | "prompt" | "promptCustomMessage" | "resume" | "isStreaming">,
 	input: SubmittedUserInput,
 ): Promise<void> {
 	if (input.cancelled) {
@@ -451,10 +456,9 @@ export async function submitInteractiveInput(
 		// the message instead of erroring when a turn is already underway. Normal
 		// user Enter carries "steer" (interrupt, matching the streaming-branch Enter);
 		// background/continuation submits omit it and fall back to "followUp". The
-		// synthetic branch below opts out by design.
+		// resume branch below opts out by design.
 		const streamingBehavior = input.streamingBehavior ?? ("followUp" as const);
-		// Continue shortcuts submit an already-started synthetic developer prompt with
-		// no optimistic user message.
+		// Continue shortcuts arrive already started: they render no optimistic user message.
 		if (!input.started && !mode.markPendingSubmissionStarted(input)) {
 			return;
 		}
@@ -476,18 +480,10 @@ export async function submitInteractiveInput(
 				attribution: "agent" as const,
 			};
 			input.dispatched = await session.promptCustomMessage(message, { streamingBehavior });
-		} else if (input.synthetic) {
-			// Synthetic continue shortcuts are hidden developer prompts. The streaming
-			// queue (#queueUserMessage) only carries user-attributed messages, so we do
-			// NOT pass streamingBehavior here: queueing would silently demote the
-			// developer directive to a visible user message. A synthetic submit while
-			// streaming keeps its prior behavior (rejected as busy) rather than changing
-			// its role.
-			await session.prompt(input.text, {
-				synthetic: true,
-				expandPromptTemplates: false,
-				userInitiated: input.userInitiated,
-			});
+		} else if (input.resume) {
+			// No queue intent: the streaming queue only carries user messages, so a
+			// continue shortcut while busy is rejected rather than queued as one.
+			await session.resume();
 		} else if (isKnownSkillCommand(skillHost, input.text)) {
 			// Resubmitted skill text must dispatch through the skill path, or the
 			// model receives a literal `/skill:` token.
@@ -1033,12 +1029,17 @@ async function switchToResumedProject(
 	return { cwd };
 }
 
-function notifyResumeCwdFallback(parsedArgs: Args, resumedProject: ResumedProjectResult, cwd: string): void {
+/** `notifs` is the interactive UI's startup notices: an interactive launch writes nothing before its UI. */
+function notifyResumeCwdFallback(
+	parsedArgs: Args,
+	resumedProject: ResumedProjectResult,
+	cwd: string,
+	notifs: (InteractiveModeNotify | null)[] | undefined,
+): void {
 	if (!resumedProject.chdirFailed) return;
-	writeStartupNotice(
-		parsedArgs,
-		`${chalk.yellow(`Could not switch to resumed project ${resumedProject.chdirFailed}; staying in ${cwd}.`)}\n`,
-	);
+	const notice = `Could not switch to resumed project ${resumedProject.chdirFailed}; staying in ${cwd}.`;
+	if (notifs) notifs.push({ kind: "warn", message: notice });
+	else writeStartupNotice(parsedArgs, `${chalk.yellow(notice)}\n`);
 }
 
 /**
@@ -1415,13 +1416,17 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
-/** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
+/**
+ * Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage.
+ * Non-fatal warnings go to `warn`, which an interactive launch points at its UI's startup notices.
+ */
 export async function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	sessionManager: SessionManager | undefined,
 	modelRegistry: ModelRegistry,
 	activeSettings: Settings,
+	warn: (warning: string) => void = writeStartupWarning,
 ): Promise<CreateAgentSessionOptions> {
 	const options: CreateAgentSessionOptions = {
 		cwd: parsed.cwd ?? getProjectDir(),
@@ -1520,9 +1525,7 @@ export async function buildSessionOptions(
 			settings: activeSettings,
 			preferences: modelMatchPreferences,
 		});
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
+		if (resolved.warning) warn(resolved.warning);
 		if (resolved.disabledProvider !== undefined) {
 			// Deferring a disabled pin to post-extension resolution would let it
 			// through, so refuse here (issue #13079).
@@ -1666,9 +1669,7 @@ export async function buildSessionOptions(
 			options.deferredPrewalk = { target, patterns: targetPatterns };
 		} else {
 			options.prewalk = selection.prewalk;
-			for (const warning of selection.warnings) {
-				process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
-			}
+			for (const warning of selection.warnings) warn(warning);
 		}
 	}
 
@@ -1678,9 +1679,7 @@ export async function buildSessionOptions(
 	if (parsed.planYolo) {
 		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
 		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
+		if (resolved.warning) warn(resolved.warning);
 		if (resolved.error || !resolved.model) {
 			throw new Error(resolved.error ?? `Model "${parsed.planYoloInto ?? "@smol"}" not found`);
 		}
@@ -2204,7 +2203,7 @@ export async function runRootCommand(
 				sessionManager,
 			);
 			cwd = resumedProject.cwd;
-			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd);
+			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd, isInteractive ? notifs : undefined);
 			if (cwd !== previousCwd) {
 				// applyStartupCwd persists an explicit --cwd in parsedArgs; once resume
 				// switches projects, keep session construction on the destination too.
@@ -2296,7 +2295,7 @@ export async function runRootCommand(
 				sessionManager,
 			);
 			cwd = resumedProject.cwd;
-			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd);
+			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd, isInteractive ? notifs : undefined);
 			if (cwd !== previousCwd) {
 				parsedArgs.cwd = cwd;
 				scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
@@ -2333,6 +2332,13 @@ export async function runRootCommand(
 
 		let startupTelemetry: CreateAgentSessionOptions["telemetry"];
 		let startupExtensions: CreateAgentSessionOptions["extensions"];
+		// An interactive launch writes nothing to the terminal before its UI: the
+		// first paint clears the screen, and in Tern the surface would open over
+		// (and briefly flash) any line printed ahead of it.
+		const startupWarning = (warning: string): void => {
+			if (isInteractive) notifs.push({ kind: "warn", message: warning });
+			else writeStartupWarning(warning);
+		};
 		const buildStartupSessionOptions = async (manager: SessionManager | undefined) => {
 			const options = await logger.time(
 				"buildSessionOptions",
@@ -2342,6 +2348,7 @@ export async function runRootCommand(
 				manager,
 				modelRegistry,
 				settingsInstance,
+				startupWarning,
 			);
 			options.authStorage = authStorage;
 			options.modelRegistry = modelRegistry;
@@ -2353,10 +2360,7 @@ export async function runRootCommand(
 			options.settings = settingsInstance;
 			options.telemetry = startupTelemetry;
 			options.extensions = startupExtensions;
-			options.onPrewalkWarning = warning => {
-				if (isInteractive) notifs.push({ kind: "warn", message: warning });
-				else process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
-			};
+			options.onPrewalkWarning = startupWarning;
 			return options;
 		};
 		let sessionOptions = await buildStartupSessionOptions(sessionManager);

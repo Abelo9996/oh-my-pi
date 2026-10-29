@@ -2,7 +2,6 @@
 
 use std::{
 	collections::{BTreeSet, HashMap},
-	mem::size_of,
 	path::{Path, PathBuf},
 	sync::{Arc, LazyLock},
 };
@@ -64,10 +63,7 @@ impl Clipboard {
 	/// Merge named registers from a completed transaction.
 	pub fn commit_from(&mut self, fork: &Self) {
 		let Some(named) = &fork.named else { return };
-		self
-			.named
-			.get_or_insert_with(HashMap::new)
-			.extend(named.clone());
+		self.named.get_or_insert_default().extend(named.clone());
 	}
 }
 
@@ -305,7 +301,7 @@ impl EditStore {
 	pub fn versions(&self, path: &Path) -> Vec<Snapshot> {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
-		state.histories.get(path).map_or_else(Vec::new, |history| {
+		state.histories.get(path).map_or_default(|history| {
 			history
 				.versions
 				.iter()
@@ -439,8 +435,7 @@ impl EditStore {
 fn merge_seen(snapshot: &mut Snapshot, lines: Option<&[u32]>) {
 	let Some(lines) = lines else { return };
 	// Copies the set only while a lookup still holds the previous version.
-	Arc::make_mut(snapshot.seen_lines.get_or_insert_with(Arc::default))
-		.extend(lines.iter().copied());
+	Arc::make_mut(snapshot.seen_lines.get_or_insert_default()).extend(lines.iter().copied());
 }
 
 fn touch(state: &mut StoreState, path: &Path) {

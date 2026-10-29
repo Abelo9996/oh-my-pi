@@ -19,6 +19,7 @@ members = [
    "crates/vendor/brush-core",
    "crates/vendor/brush-parser",
    "crates/vendor/cfg_aliases",
+   "crates/vendor/grep-searcher",
    "crates/vendor/napi",
    "crates/vendor/tree-sitter-go",
 ]
@@ -40,6 +41,10 @@ brush-parser = { path = "crates/vendor/brush-parser" }
 # portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
 # future-incompatible trailing semicolons.
 cfg_aliases = { path = "crates/vendor/cfg_aliases" }
+# grep-searcher 0.1.17 (latest release) searches either a blocking `io::Read`
+# or a whole slice; the vendored copy adds the chunk-fed `search_push` (see its
+# README.md).
+grep-searcher = { path = "crates/vendor/grep-searcher" }
 # napi 3.13.0 pins every `bun test --isolate` realm through per-thread handles
 # of never-torn-down envs; the vendored copy releases them (see its README.md).
 napi = { path = "crates/vendor/napi" }
@@ -307,7 +312,6 @@ webrtc = "0.17.2"
 # System & Platform
 # ──────────────────────────────────────────────────────────────────────────────
 libc = "0.2"
-os_pipe = "1"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",
    "Win32_Globalization",

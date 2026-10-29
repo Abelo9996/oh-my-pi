@@ -6,6 +6,9 @@
 
 - Fixed a cancelled request whose OAuth credential was mid-refresh killing the whole session with `[Unhandled Rejection] AbortError: OAuth refresh ownership aborted by caller` ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 - Fixed requests that joined an OAuth refresh started by an already-cancelled request failing with that request's cancellation instead of getting the refreshed credential ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
+- Fixed Cursor models losing omp's system prompt (context files, skills, rules) from the second turn on, or whenever earlier messages precede the active one ([#17059](https://github.com/can1357/oh-my-pi/issues/17059), [#17325](https://github.com/can1357/oh-my-pi/pull/17325) by [@robfeldmann](https://github.com/robfeldmann))
+- Fixed short-lived commands that refresh an OAuth login, such as `omp token --force-refresh`, staying open for about 5 seconds after printing their result
+- Fixed TypeSafe login rejecting valid keys when `TYPESAFE_BASE_URL` is set: the key is now checked against `<base>/v1/models` instead of `<base>/models`
 
 ## [18.13.3] - 2026-10-28
 

@@ -19,6 +19,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
@@ -74,6 +75,7 @@ import { describeUsageFallback } from "./retry-fallback-reason";
 import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
+import { isUserQueuedMessage } from "./queued-messages";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { journalJudgmentUsage } from "../judgment";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
@@ -156,6 +158,27 @@ function retryableAssistantTurnEnd(messages: readonly AgentMessage[]): number | 
 	if (message.stopReason !== "error" && message.stopReason !== "aborted") return undefined;
 	return turnEnd;
 }
+/** An assistant turn cut off before any text or tool call; no provider replays it. */
+function isCutOffAssistant(message: AgentMessage): boolean {
+	return message.role === "assistant" && shouldDropTruncatedThinkingOnlyAssistant(message);
+}
+
+/**
+ * The last prompt in `messages[0, end)` that no replayed assistant turn has
+ * answered yet: a user prompt, or the operator's `.`/`c` continue directive.
+ */
+function unansweredPrompt(messages: readonly AgentMessage[], end: number): AgentMessage | undefined {
+	for (let index = end - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role === "assistant") {
+			if (!isCutOffAssistant(message)) return undefined;
+		} else if (isUserQueuedMessage(message) || (message.role === "developer" && message.userInitiated === true)) {
+			return message;
+		}
+	}
+	return undefined;
+}
+
 /** Whether `messages` ends in a failed/aborted turn whose most recent activity was a tool call. */
 function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
 	const turnEnd = retryableAssistantTurnEnd(messages);
@@ -3374,6 +3397,27 @@ export class TurnRecovery {
 		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
 
 		return true;
+	}
+	/**
+	 * Ready a bare resume of the prompt the model still owes a reply — an Esc or
+	 * a failure cut its turn off before any text or tool call. Drops the trailing
+	 * cut-off turns from active context, as {@link retry} drops a failed turn (no
+	 * provider replays them anyway), so `Agent.continue()` answers the prompt as is.
+	 *
+	 * @returns the prompt to resume; undefined while busy, or when an assistant
+	 * turn already answers the last prompt.
+	 */
+	prepareResume(): AgentMessage | undefined {
+		if (this.#host.isStreaming() || this.#host.isCompacting() || this.isRetrying) return undefined;
+		const messages = this.#host.agent.state.messages;
+		const end = conversationEnd(messages);
+		let tail = end;
+		while (tail > 0 && isCutOffAssistant(messages[tail - 1])) tail--;
+		const prompt = unansweredPrompt(messages, tail);
+		if (prompt && tail < end) {
+			this.#host.agent.replaceMessages([...messages.slice(0, tail), ...messages.slice(end)]);
+		}
+		return prompt;
 	}
 	/**
 	 * Strip the failed tool batch (and any aborted boundary) for a tool replay:

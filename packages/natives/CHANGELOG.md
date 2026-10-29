@@ -2,8 +2,29 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `invalidateFsScanCache`: the listing cache no longer needs invalidation. `FS_SCAN_CACHE_TTL_MS`, `FS_SCAN_EMPTY_RECHECK_MS`, `FS_SCAN_CACHE_MAX_ENTRIES`, and `FS_SCAN_CACHE_MAX_BYTES` are no longer read
+
+### Added
+
+- The bash tool's built-in `rsync` behaves like rsync 3.5.1 on Linux, macOS, and Windows without an installed binary: local copies, `-e`/ssh remote shells, and `rsync://` daemons, interoperating with real rsync peers speaking protocol 29–33. Serving as a daemon (`--daemon`) is not supported; `PI_DISABLE_UUTILS_DESTRUCTIVE` falls back to the system `rsync`
+- The bash tool has a built-in `ast-grep` (also `sg`) for structural search and rewrite: `run` with patterns, rewrites, `-U`, context, headings, and `--json` output like ast-grep 0.50
+
+### Changed
+
+- Native `glob` is about 3× faster on large trees; `grep`, `fuzzyFind`, `listWorkspace`, and `astGrep`/`astEdit` run on the same rewritten walker and return identical results from run to run
+- Native `grep` with `maxCount` (the agent's grep tool) searches files while the walk finds them and stops both once the limit is met: 1.3–2.3× faster, and a first page of results about 10× faster
+- The bash tool's built-in `rg` and recursive `grep` search files in parallel (about 2× faster) and print them in path order
+- `cache: true` reuses unchanged directory listings validated against their timestamps, so it never serves stale results
+- Reduced overhead for full-tree native `grep` searches while preserving result ordering and streaming backpressure
+- Aborting or timing out native `grep`, `glob`, `fuzzyFind`, `listWorkspace`, and `astGrep`/`astEdit` stops their filesystem work at once, including searches over JavaScript-provided filesystems; `grep`'s `onMatches` streaming paces the search to the callback
+- Cancelling the bash tool's built-in `rg`, `grep`, `fd`, `find`, and `ast-grep` (abort, `timeout`) stops them immediately, even mid-way through a large file; `find -prune` and `fd` ignore rules no longer list pruned directories
+
 ### Fixed
 
+- Fixed cancelled directory searches leaving filesystem-provider requests running during walk startup
+- Fixed the bash tool's built-in commands (`cat`, `grep`, `head`, `wc`, `read`, `mapfile`, …) hanging on macOS at the end of a FIFO's input until the command was aborted; `read -t` now returns at EOF instead of waiting out its timeout
 - Fixed `wrapTextWithAnsi` continuing a wrapped styled underline (`4:3`, `4:4`) as a background colour, `4:0` setting background `40`, and colon-form colours (`38:2::r:g:b`) being dropped ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 
 ## [18.13.3] - 2026-10-28

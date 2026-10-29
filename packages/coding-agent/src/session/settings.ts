@@ -1148,7 +1148,7 @@ export const cfgProvidersOpenaiWebsockets = register({
 export const cfgProvidersOpenaiLiveSteering = register({
 	id: "providers.openaiLiveSteering",
 	type: "boolean",
-	default: true,
+	default: false,
 	ui: {
 		tab: "providers",
 		group: "Protocol",
