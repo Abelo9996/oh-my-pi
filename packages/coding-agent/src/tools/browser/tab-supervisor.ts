@@ -17,9 +17,9 @@ import { CELL_BUDGET_SLACK_MS } from "../run-scope";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { gracefulKillTreeOnce, pickElectronTarget } from "./attach";
-import { CmuxTab } from "./cmux/cmux-tab";
+import type * as Cmux from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
-import { runInProcessTab } from "./in-process-run";
+import type * as InProcessRun from "./in-process-run";
 import { browserConnection, DEFAULT_VIEWPORT } from "./launch";
 import {
 	closeCdpTarget,
@@ -55,7 +55,7 @@ import {
 
 import { cfgBrowserScreenshotDir } from "./settings";
 import { listTernBlocks, noTernBlockError, pickTernBlock } from "./tern/blocks";
-import { TernTab } from "./tern/tern-tab";
+import type * as Tern from "./tern/tern-tab";
 import { newUploadStagingDir, removeUploadStaging, sweepUploadStaging } from "./upload-files";
 
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
@@ -148,7 +148,7 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
 	backend: "cmux";
-	cmuxTab: CmuxTab;
+	cmuxTab: Cmux.CmuxTab;
 	cmuxOwnsSurface: boolean;
 	cmuxAttachedSurface?: string;
 }
@@ -157,7 +157,7 @@ export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
 export interface TernTabSession extends TabSessionBase<TernBrowserHandle> {
 	backend: "tern";
 	/** The PiP's driver. */
-	ternTab: TernTab;
+	ternTab: Tern.TernTab;
 }
 
 export type TabSession = WorkerTabSession | CmuxTabSession | TernTabSession;
@@ -747,6 +747,8 @@ async function acquireCmuxTab(
 			}
 		}
 
+		// Browser-only evaluators stay out of CLI startup and worker-backed tabs.
+		const { CmuxTab }: typeof Cmux = require("./cmux/cmux-tab");
 		const cmuxTab = new CmuxTab({ client: browser.client, surfaceId, url: initialUrl });
 		if (attachedSurface && opts.url) {
 			await cmuxTab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: opts.timeoutMs });
@@ -816,6 +818,7 @@ async function acquireTernTab(
 	browser: TernBrowserHandle,
 	opts: AcquireTabOptions,
 ): Promise<AcquireTabResult> {
+	const { TernTab }: typeof Tern = require("./tern/tern-tab");
 	const settings = {
 		name,
 		url: opts.url,
@@ -829,7 +832,7 @@ async function acquireTernTab(
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 	};
-	let ternTab: TernTab;
+	let ternTab: Tern.TernTab;
 	if (opts.target === undefined) {
 		ternTab = await TernTab.open(browser.tern, {
 			...settings,
@@ -1013,6 +1016,7 @@ async function runInTabWithSnapshot(
 	if (tab.backend === "cmux" || tab.backend === "tern") {
 		const runSignal = opts.signal ? AbortSignal.any([opts.signal, closeAc.signal]) : closeAc.signal;
 		try {
+			const { runInProcessTab }: typeof InProcessRun = require("./in-process-run");
 			// `runInProcessTab.then(resolve, reject)` publishes the run's real
 			// outcome to `promise`, but `releaseTab` may have already
 			// rejected it — `Promise.withResolvers` settles on the first
