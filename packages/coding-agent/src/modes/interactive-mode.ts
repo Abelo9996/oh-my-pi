@@ -9248,8 +9248,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController.restoreCompactionQueueToEditor(status);
 	}
 
-	waitForFollowUpDispatches(): Promise<void> {
-		return this.#inputController.waitForFollowUpDispatches();
+	waitForSubmissionDispatches(): Promise<void> {
+		return this.#inputController.waitForSubmissionDispatches();
 	}
 
 	handleImagePaste(): Promise<boolean> {

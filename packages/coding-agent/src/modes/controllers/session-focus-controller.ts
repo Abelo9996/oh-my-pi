@@ -140,11 +140,7 @@ export class SessionFocusController {
 		this.#focusedAgentId = undefined;
 		this.#attachedSession = undefined;
 		const attached = await this.#attach(this.ctx.session);
-		if (attached && this.#focusedAgentId === undefined) {
-			this.ctx.showStatus("Returned to main session");
-			// Main may have settled while unobserved; a queued `/compact` waits for that settle.
-			if (this.ctx.yieldCompaction) this.ctx.runYieldCompaction();
-		}
+		if (attached && this.#focusedAgentId === undefined) this.ctx.showStatus("Returned to main session");
 	}
 
 	dispose(): void {

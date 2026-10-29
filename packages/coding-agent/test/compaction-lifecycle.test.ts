@@ -133,10 +133,12 @@ describe("executeCompaction UI lifecycle", () => {
 
 describe("compaction queued for the next yield", () => {
 	/** `agentRun`: the agent loop streams; `promptSetup`: a prompt is in pre-dispatch setup (no agent run
-	 *  yet); `transitioning`: a session switch is applying; `compactingChecks`: how many `isCompacting`
-	 *  reads report a pass started elsewhere. */
-	function buildYieldCtx(onWaitForIdle: (state: { agentRun: boolean; promptSetup: boolean }) => void = () => {}) {
-		const state = { agentRun: false, promptSetup: false, transitioning: false, compactingChecks: 0 };
+	 *  yet); `retrying`: an auto-retry waits out its backoff; `transitioning`: a session switch is applying;
+	 *  `compactingChecks`: how many `isCompacting` reads report a pass started elsewhere. */
+	function buildYieldCtx(
+		onWaitForIdle: (state: { agentRun: boolean; promptSetup: boolean; retrying: boolean }) => void = () => {},
+	) {
+		const state = { agentRun: false, promptSetup: false, retrying: false, transitioning: false, compactingChecks: 0 };
 		const session = {
 			agent: {
 				state: {
@@ -148,11 +150,18 @@ describe("compaction queued for the next yield", () => {
 			get isStreaming() {
 				return state.agentRun || state.promptSetup;
 			},
+			get isRetrying() {
+				return state.retrying;
+			},
 			get isCompacting() {
 				if (state.compactingChecks === 0) return false;
 				state.compactingChecks--;
 				return true;
 			},
+			hasAdmittedSubmission: false,
+			queuedMessageCount: 0,
+			hasPendingAsyncWork: () => false,
+			settleAsyncWork: vi.fn(async () => {}),
 			waitForIdle: vi.fn(async () => onWaitForIdle(state)),
 			waitForAdmittedSubmissions: vi.fn(async () => {}),
 			get isSessionTransitioning() {
@@ -183,7 +192,8 @@ describe("compaction queued for the next yield", () => {
 			showWarning: vi.fn(),
 			restoreCompactionQueueToEditor: vi.fn(),
 			flushCompactionQueue,
-			waitForFollowUpDispatches: vi.fn(async () => {}),
+			waitForSubmissionDispatches: vi.fn(async () => {}),
+			hasPendingSubmission: () => false,
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
 		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand");
@@ -200,15 +210,22 @@ describe("compaction queued for the next yield", () => {
 		expect(ctx.yieldCompaction).toBeUndefined();
 	});
 
-	it("keeps the request for the next settle when a new run started first", async () => {
-		const { ctx, controller, handleCompactCommand } = buildYieldCtx(state => {
-			state.agentRun = true;
+	it("does not compact while the run can still continue on its own", async () => {
+		let idleWaits = 0;
+		const { state, controller, handleCompactCommand } = buildYieldCtx(current => {
+			// The retry's backoff ends (and its turn finishes) before the second idle check.
+			if (++idleWaits === 2) current.retrying = false;
+		});
+		state.retrying = true;
+		const retryingAtCompact: boolean[] = [];
+		handleCompactCommand.mockImplementation(async () => {
+			retryingAtCompact.push(state.retrying);
+			return "ok";
 		});
 
 		await controller.runYieldCompaction();
 
-		expect(handleCompactCommand).not.toHaveBeenCalled();
-		expect(ctx.yieldCompaction).toEqual({ text: "/compact soft", sessionId: "s1", leafId: "e1", mode: "soft" });
+		expect(retryingAtCompact).toEqual([false]);
 	});
 
 	it("runs once a prompt still in setup bails without starting a run", async () => {
@@ -287,7 +304,7 @@ describe("compaction queued for the next yield", () => {
 		const { ctx, controller, handleCompactCommand } = buildYieldCtx();
 		// A Ctrl+Q skill sent before the `/compact` is still expanding when the run ends.
 		const skillDispatch = Promise.withResolvers<void>();
-		ctx.waitForFollowUpDispatches = () => skillDispatch.promise;
+		ctx.waitForSubmissionDispatches = () => skillDispatch.promise;
 		handleCompactCommand.mockResolvedValue("ok");
 
 		const running = controller.runYieldCompaction();

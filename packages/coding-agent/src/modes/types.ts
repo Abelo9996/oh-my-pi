@@ -419,8 +419,10 @@ export interface InteractiveModeContext {
 	runYieldCompaction(): void;
 	/** Hand a queued `/compact` and the input in the compaction queue back to the editor, saying why. */
 	restoreCompactionQueueToEditor(status?: string): void;
-	/** Resolves once follow-up-key submissions past their input hooks reached the session or finished locally. */
-	waitForFollowUpDispatches(): Promise<void>;
+	/** Resolves once submissions reached the session (admission or pending-submission hand-off) or finished locally. */
+	waitForSubmissionDispatches(): Promise<void>;
+	/** True while a foreground submission is accepted but not yet handed to the session. */
+	hasPendingSubmission(): boolean;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
 	/** No argument restores the default; a function label is re-read on every spinner tick. */

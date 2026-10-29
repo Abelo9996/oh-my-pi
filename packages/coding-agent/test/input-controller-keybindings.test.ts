@@ -946,9 +946,40 @@ describe("InputController keybinding setup", () => {
 
 		editor.setText("sent before the compaction");
 		void controller.handleFollowUp();
-		await controller.waitForFollowUpDispatches();
+		await controller.waitForSubmissionDispatches();
 
 		expect(spies.prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("tracks an Enter submission until it reaches the session", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		withCompactionQueue(ctx);
+		const hook = Promise.withResolvers<void>();
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			followUp: vi.fn(async () => {}),
+			extensionRunner: {
+				hasHandlers: (event: string) => event === "input",
+				emitInput: async () => {
+					await hook.promise;
+					return undefined;
+				},
+			},
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		const submitted = editor.onSubmit?.("=> sent with Enter");
+		let dispatched = false;
+		const waiting = controller.waitForSubmissionDispatches().then(() => {
+			dispatched = true;
+		});
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		expect(dispatched).toBe(false);
+
+		hook.resolve();
+		await Promise.all([submitted, waiting]);
+		expect(dispatched).toBe(true);
 	});
 
 	it("returns a request stranded by a switch to the editor before routing new input", async () => {

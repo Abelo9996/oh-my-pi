@@ -326,8 +326,8 @@ export class InputController {
 	 * Each submission awaits the previous one's, so queue placement follows submission order.
 	 */
 	#submissionHookOrder: Promise<void> = Promise.resolve();
-	/** Follow-up-key submissions past their input hooks that the session has not admitted yet. */
-	readonly #followUpDispatches = new Set<Promise<void>>();
+	/** Submissions (Enter or the follow-up key) the session has not admitted yet and that still dispatch locally. */
+	readonly #submissionDispatches = new Set<Promise<void>>();
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -601,6 +601,8 @@ export class InputController {
 				}
 				this.ctx.pauseLoop();
 				this.ctx.cancelPendingSubmission();
+				// A setup cancelled before its turn starts emits no `agent_end`: hand the queue back here.
+				this.#restoreYieldCompactionOnStop();
 				return;
 			}
 			if (this.ctx.focusedAgentId) {
@@ -625,6 +627,7 @@ export class InputController {
 				return;
 			}
 			if (this.ctx.loadingAnimation && this.ctx.cancelPendingSubmission()) {
+				this.#restoreYieldCompactionOnStop();
 				return;
 			}
 			// The turn is over and only background jobs can resume it; its row
@@ -1068,7 +1071,7 @@ export class InputController {
 	}
 
 	setupEditorSubmitHandler(): void {
-		this.ctx.editor.onSubmit = async (text: string) => {
+		const submit = async (text: string) => {
 			const submittedText = text;
 			// The Editor resets before calling onSubmit, so this is normally empty;
 			// different editor text after an await below is a newer draft.
@@ -1475,6 +1478,9 @@ export class InputController {
 			}
 			this.ctx.editor.addToHistory(text);
 		};
+		// A queued `/compact` waits for Enter input taken before it to reach the session (skill
+		// expansion, `/queue`, mode commands), the same as for the follow-up key.
+		this.ctx.editor.onSubmit = text => this.#trackSubmission(() => submit(text));
 	}
 
 	/**
@@ -2091,11 +2097,11 @@ export class InputController {
 		// The conversation this was sent in; a queued `/compact` must not land in another one.
 		const origin = conversationPosition(this.ctx.sessionManager);
 		// Until this submission reaches the session (`prompt()` admits it synchronously) or finishes
-		// locally, the session cannot see it; a queued `/compact` waits for it (`waitForFollowUpDispatches`).
+		// locally, the session cannot see it; a queued `/compact` waits for it (`waitForSubmissionDispatches`).
 		const dispatch = Promise.withResolvers<void>();
-		this.#followUpDispatches.add(dispatch.promise);
+		this.#submissionDispatches.add(dispatch.promise);
 		const admitted = () => {
-			if (this.#followUpDispatches.delete(dispatch.promise)) dispatch.resolve();
+			if (this.#submissionDispatches.delete(dispatch.promise)) dispatch.resolve();
 		};
 		try {
 			// Input hooks pass in submission order (shared with Enter, see `#submissionHookOrder`), so a
@@ -2296,12 +2302,31 @@ export class InputController {
 		if (!continuesConversation(this.ctx.sessionManager, request)) this.restoreCompactionQueueToEditor();
 	}
 
+	/** Esc stopped the run: a queued `/compact` and the follow-ups behind it go back to the editor. */
+	#restoreYieldCompactionOnStop(): void {
+		if (this.ctx.yieldCompaction) {
+			this.restoreCompactionQueueToEditor("Run stopped: queued compaction returned to the editor");
+		}
+	}
+
 	/**
-	 * Resolves once every follow-up-key submission that has passed its input hooks reached the session
-	 * (prompt/custom-message admission) or finished dispatching locally.
+	 * Resolves once every submission (Enter or the follow-up key) reached the session (prompt or
+	 * custom-message admission, or the pending-submission hand-off) or finished dispatching locally.
 	 */
-	async waitForFollowUpDispatches(): Promise<void> {
-		while (this.#followUpDispatches.size > 0) await Promise.all(this.#followUpDispatches);
+	async waitForSubmissionDispatches(): Promise<void> {
+		while (this.#submissionDispatches.size > 0) await Promise.all(this.#submissionDispatches);
+	}
+
+	/** Track an Enter submission from the moment it is taken until its dispatch ends. */
+	async #trackSubmission(dispatch: () => Promise<void>): Promise<void> {
+		const done = Promise.withResolvers<void>();
+		this.#submissionDispatches.add(done.promise);
+		try {
+			await dispatch();
+		} finally {
+			this.#submissionDispatches.delete(done.promise);
+			done.resolve();
+		}
 	}
 
 	/**

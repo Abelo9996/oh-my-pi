@@ -278,6 +278,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			}
 			const { ctx } = runtime;
 			const origin = runtime.followUp;
+			// A switch still applying (or rolling back) decides which conversation is live; judge after it.
+			if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
 			if (origin && !continuesConversation(ctx.sessionManager, origin)) {
 				// Input hooks ran while the conversation changed: never compact one it was not sent in.
 				restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
