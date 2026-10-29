@@ -4729,7 +4729,11 @@ fn find_tree_options(config: &Config) -> pi_walker::walk::TreeOptions {
 			Follow::Roots => pi_walker::walk::Follow::Roots,
 			Follow::Always => pi_walker::walk::Follow::Always,
 		},
-		sorted: config.sorted_output,
+		order: if config.sorted_output {
+			pi_walker::walk::Order::Names
+		} else {
+			pi_walker::walk::Order::Listing
+		},
 		emit_root: true,
 		min_depth: config.min_depth,
 		max_depth: (config.max_depth != usize::MAX).then_some(config.max_depth),

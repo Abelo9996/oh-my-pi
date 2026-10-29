@@ -23,9 +23,10 @@ pub fn absolute(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// Canonical spelling of an existing `path` on `fs`, or `path` itself when it
-/// cannot be canonicalized. A canonical form in another scheme (a URL whose
-/// provider resolves it to its backing host file) is ignored, so URL roots
-/// keep their URL spelling.
+/// cannot be canonicalized.
+///
+/// A canonical form in another scheme (a URL whose provider resolves it to its
+/// backing host file) is ignored, so URL roots keep their URL spelling.
 pub fn canonical(fs: &BlockingFs, path: PathBuf) -> PathBuf {
 	match fs.canonicalize(&path) {
 		Ok(canonical) if pi_vfs::url_scheme(&canonical) == pi_vfs::url_scheme(&path) => canonical,

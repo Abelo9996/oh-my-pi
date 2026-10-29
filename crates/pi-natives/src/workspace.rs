@@ -144,7 +144,7 @@ fn workspace_tree_options(config: &WorkspaceConfig) -> pi_walker::walk::TreeOpti
 		detail_max_depth: Some(config.max_depth),
 		// File-level ignore rules must not hide AGENTS.md.
 		unignored_name: config.collect_agents_md.then_some(AGENTS_MD_FILENAME),
-		sorted: true,
+		order: pi_walker::walk::Order::Names,
 		emit_root: false,
 		min_depth: 1,
 		max_depth: Some(config.walk_max_depth),

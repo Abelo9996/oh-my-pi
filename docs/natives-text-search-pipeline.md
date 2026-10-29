@@ -93,7 +93,7 @@ Terminology follows `docs/natives-architecture.md`:
    - `offset` and `maxCount` are applied during aggregation across sorted file results; `maxCountPerFile` can additionally prevent one hot file consuming the content-mode budget.
    - Directory execution model (`pi_walker::grep::grep`):
       - Without a match budget, files are read and scanned inside one parallel `walk::walk`; per-file results are put in path order afterwards.
-      - With a match budget (`maxCount`), candidates are gathered in path order with `walk::collect` and searched from the front in parallel with `pi_walker::exec::ordered`, which consumes results strictly in index order and stops once the budget is settled. Path-ordered first pages are deterministic.
+      - With a match budget (`maxCount`), a path-ordered `walk::tree` (`Order::Paths`) streams candidates into `pi_walker::exec::streamed`, which searches them in parallel, consumes results strictly in walk order, and stops the walk and the search once the budget is settled. Path-ordered first pages are deterministic.
       - `maxCountPerFile` (content mode) caps matches collected per file so one hot file cannot exhaust the global `maxCount` budget before other files are reached.
       - Files over 4 MiB are ordered after all other files and searched over their first 4 MiB only.
       - `offset` and `maxCount` are applied while aggregating per-file results. The positional `onMatch(error, match)` callback is emitted after directory aggregation; the direct-file branch returns its matches without that callback.

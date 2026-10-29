@@ -20,7 +20,7 @@ use globset::{GlobBuilder, GlobMatcher};
 use pi_walker::{
 	FileType,
 	ignore::{Match as RuleMatch, Rules},
-	walk::{Action, Event, Follow, TreeOptions, WalkError},
+	walk::{Action, Event, Follow, Order, TreeOptions, WalkError},
 };
 use pi_vfs::{BlockingFs, Metadata};
 use regex::{Regex, RegexBuilder};
@@ -739,7 +739,7 @@ fn fd_tree_options(cli: &FdCli) -> TreeOptions {
 		// fd walks a path operand that is itself a symlink; `-L` extends that
 		// to links found during the walk.
 		follow: if cli.follow { Follow::Always } else { Follow::Roots },
-		sorted: true,
+		order: Order::Names,
 		emit_root: true,
 		min_depth: cli.exact_depth.or(cli.min_depth).unwrap_or(0),
 		max_depth: cli.exact_depth.or(cli.max_depth),

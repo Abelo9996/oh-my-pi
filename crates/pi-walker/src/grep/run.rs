@@ -19,7 +19,7 @@ use crate::{
 	exec::{self, Flow},
 	fs::{Detail, File, FileType, Fs, Session},
 	glob::Selector,
-	walk::{self, Action, Entry, Stop, WalkError},
+	walk::{self, Action, Completion, Event, Follow, Order, Stop, TreeOptions, WalkError, arena},
 };
 
 /// Largest batch handed to a [`MatchSink`].
@@ -535,14 +535,15 @@ enum Outcome {
 	SkippedOversized,
 }
 
-/// Searches the candidate `entry` for a budgeted pass: in full (deferring
-/// files over [`MAX_FILE_BYTES`]) or, with `prefix`, over that prefix.
+/// Searches the candidate at walk-relative `rel` for a budgeted pass: in full
+/// (deferring files over [`MAX_FILE_BYTES`]) or, with `prefix`, over that
+/// prefix.
 fn search_candidate<M: Matcher>(
 	search: &Search<'_, M>,
 	fs: &Fs,
 	root: &Path,
 	(scratch, session): &mut (Scratch, Session),
-	entry: Entry<'_>,
+	rel: &[u8],
 	prefix: bool,
 ) -> Outcome {
 	let unreadable = if prefix {
@@ -550,7 +551,7 @@ fn search_candidate<M: Matcher>(
 	} else {
 		Outcome::Skipped
 	};
-	let Ok((mut file, info)) = session.open_file(&fs.join(root, entry.path)) else {
+	let Ok((mut file, info)) = session.open_file(&fs.join(root, rel)) else {
 		return unreadable;
 	};
 	if !prefix && info.size > MAX_FILE_BYTES {
@@ -574,7 +575,7 @@ fn search_candidate<M: Matcher>(
 		return Outcome::Searched(None);
 	}
 	let hit = FileHit {
-		path: entry.path_lossy().into_owned(),
+		path: String::from_utf8_lossy(rel).into_owned(),
 		matches,
 		count: outcome.count,
 		limit_reached: outcome.limit_reached,
@@ -590,15 +591,16 @@ struct Budget<'b, 's, M> {
 	units:     u64,
 	settled:   bool,
 	hits:      Vec<FileHit>,
-	deferred:  Vec<usize>,
+	/// Oversized candidates (walk-relative paths) for the prefix pass.
+	deferred:  Vec<arena::Bytes>,
 	searched:  u64,
 	oversized: u64,
 }
 
 impl<M: Matcher> Budget<'_, '_, M> {
-	/// Takes candidate `index`'s outcome, in order; stops once `need` units
-	/// are settled.
-	fn take(&mut self, index: usize, outcome: Outcome) -> Flow {
+	/// Takes the outcome of the candidate at `rel`, in path order; stops once
+	/// `need` units are settled.
+	fn take(&mut self, rel: arena::Bytes, outcome: Outcome) -> Flow {
 		match outcome {
 			Outcome::Searched(hit) => {
 				self.searched += 1;
@@ -609,7 +611,7 @@ impl<M: Matcher> Budget<'_, '_, M> {
 					self.hits.push(hit);
 				}
 			},
-			Outcome::Defer => self.deferred.push(index),
+			Outcome::Defer => self.deferred.push(rel),
 			Outcome::Skipped => {},
 			Outcome::SkippedOversized => self.oversized += 1,
 		}
@@ -622,10 +624,11 @@ impl<M: Matcher> Budget<'_, '_, M> {
 	}
 }
 
-/// Collects the candidates in path order and searches them from the front in
-/// parallel, normal files first and then (unless the budget is met) the
-/// prefixes of files over [`MAX_FILE_BYTES`], stopping as soon as the first
-/// `offset + max` results are settled.
+/// Walks the candidates in path order and searches them from the front in
+/// parallel as the walk finds them, normal files first and then (unless the
+/// budget is met) the prefixes of files over [`MAX_FILE_BYTES`], stopping the
+/// walk and the search as soon as the first `offset + max` results are
+/// settled.
 #[allow(clippy::too_many_arguments, reason = "the search's shared state")]
 fn budgeted<M: Matcher + Sync>(
 	search: &Search<'_, M>,
@@ -637,12 +640,25 @@ fn budgeted<M: Matcher + Sync>(
 	stop: &dyn Stop,
 	max: u64,
 ) -> Result<GrepResult, GrepError> {
-	let files = walk::collect(fs, root, wopts, true, stop, |_, entry| match entry.file_type {
-		FileType::Dir if filter.prunes_dir(entry.path) => Action::SkipDir,
-		FileType::File if filter.keeps_file(entry.path, entry.name()) => Action::Continue,
-		_ => Action::Skip,
-	})
-	.map_err(GrepError::Walk)?;
+	let tree_opts = TreeOptions {
+		hidden: wopts.hidden,
+		gitignore: wopts.gitignore,
+		skip_git: wopts.skip_git,
+		skip_node_modules: wopts.skip_node_modules,
+		follow: if wopts.follow_links {
+			Follow::Always
+		} else {
+			Follow::Roots
+		},
+		order: Order::Paths,
+		max_depth: wopts.max_depth,
+		same_file_system: wopts.same_file_system,
+		..TreeOptions::default()
+	};
+	// Candidate paths outlive both passes; workers read them through
+	// `Bytes::get` while the walk keeps appending.
+	let mut paths = arena::Arena::default();
+	let mut walked = Ok(Completion::Complete);
 	let workers = wopts.parallelism(fs);
 	let init = || (Scratch::default(), fs.session());
 	let mut budget = Budget {
@@ -655,16 +671,38 @@ fn budgeted<M: Matcher + Sync>(
 		searched: 0,
 		oversized: 0,
 	};
-	let complete = exec::ordered(
-		files.len(),
+	let feed = |push: &mut dyn FnMut(arena::Bytes) -> bool| {
+		walked = walk::tree(fs, root, &tree_opts, stop, |event| {
+			let Event::Entry(entry) = event else {
+				return Action::Continue;
+			};
+			match entry.file_type {
+				FileType::Dir if filter.prunes_dir(entry.path) => Action::SkipDir,
+				FileType::File if filter.keeps_file(entry.path, entry.name()) => {
+					if push(paths.push(&[entry.path])) {
+						Action::Continue
+					} else {
+						Action::Stop
+					}
+				},
+				_ => Action::Skip,
+			}
+		});
+	};
+	let complete = exec::streamed(
 		workers,
 		stop,
+		feed,
 		init,
-		|state, index| search_candidate(search, fs, root, state, files.get(index), false),
-		|index, outcome| budget.take(index, outcome),
+		// SAFETY: `paths` outlives every pass.
+		|state, rel| search_candidate(search, fs, root, state, unsafe { rel.get() }, false),
+		|rel, outcome| budget.take(rel, outcome),
 	);
-	if !complete && !budget.settled {
-		return Err(GrepError::Walk(WalkError::Stopped));
+	if !budget.settled {
+		walked.map_err(GrepError::Walk)?;
+		if !complete {
+			return Err(GrepError::Walk(WalkError::Stopped));
+		}
 	}
 	let deferred = std::mem::take(&mut budget.deferred);
 	if !budget.settled && !deferred.is_empty() {
@@ -673,7 +711,11 @@ fn budgeted<M: Matcher + Sync>(
 			workers,
 			stop,
 			init,
-			|state, index| search_candidate(search, fs, root, state, files.get(deferred[index]), true),
+			|state, index| {
+				// SAFETY: `paths` outlives every pass.
+				let rel = unsafe { deferred[index].get() };
+				search_candidate(search, fs, root, state, rel, true)
+			},
 			|index, outcome| budget.take(deferred[index], outcome),
 		);
 		if !complete && !budget.settled {

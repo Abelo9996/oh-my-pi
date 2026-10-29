@@ -8,7 +8,7 @@
 //! entry before its subtree is read.
 //!
 //! ```ignore
-//! let opts = TreeOptions { sorted: true, emit_root: true, ..Default::default() };
+//! let opts = TreeOptions { emit_root: true, ..Default::default() };
 //! tree(&fs, root, &opts, &Never, |event| match event {
 //!     Event::Entry(entry) => { println!("{}", entry.abs.display()); Action::Continue }
 //!     Event::Error(error) => { eprintln!("{}: {}", error.path.display(), error.error); Action::Continue }
@@ -38,6 +38,20 @@ pub enum Follow {
 	Always,
 }
 
+/// Order in which a [`tree`] visits each directory's entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Order {
+	/// As the directory listing returns them.
+	Listing,
+	/// Byte order of their names (`find`, `fd`).
+	#[default]
+	Names,
+	/// Byte order of the paths of the files below: a listed directory sorts
+	/// as its name plus `/`, so files are visited in the byte order of their
+	/// full paths, the order a sorted [`super::collect`] returns.
+	Paths,
+}
+
 /// Options of a [`tree`] traversal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeOptions {
@@ -56,9 +70,8 @@ pub struct TreeOptions {
 	/// Entries deeper than this are listed with [`Detail::Minimal`]; `None`
 	/// applies `detail` everywhere.
 	pub detail_max_depth:  Option<usize>,
-	/// Visit each directory's entries in byte order of their names (else
-	/// listing order).
-	pub sorted:            bool,
+	/// Order of each directory's entries.
+	pub order:             Order,
 	/// Report the root itself (depth 0, empty `path`) when `min_depth` is 0.
 	pub emit_root:         bool,
 	/// Shallowest depth reported; shallower entries are still traversed.
@@ -87,7 +100,7 @@ impl Default for TreeOptions {
 			follow:            Follow::Roots,
 			detail:            Detail::Minimal,
 			detail_max_depth:  None,
-			sorted:            true,
+			order:             Order::Names,
 			emit_root:         false,
 			min_depth:         1,
 			max_depth:         None,
@@ -525,10 +538,20 @@ impl Walker<'_> {
 			self.pool.push(listing);
 			return Err(error);
 		}
-		if self.opts.sorted {
-			let Listing { records, names } = &mut listing;
-			let names = names.as_slice();
-			records.sort_unstable_by(|a, b| record_name(names, a).cmp(record_name(names, b)));
+		let Listing { records, names } = &mut listing;
+		let names = names.as_slice();
+		match self.opts.order {
+			Order::Listing => {},
+			Order::Names => {
+				records.sort_unstable_by(|a, b| record_name(names, a).cmp(record_name(names, b)));
+			},
+			Order::Paths => {
+				let key = |record: &Record| {
+					let slash = (record.file_type == FileType::Dir).then_some(&b'/');
+					record_name(names, record).iter().chain(slash)
+				};
+				records.sort_unstable_by(|a, b| key(a).cmp(key(b)));
+			},
 		}
 		let ignore = if self.ignorer.is_some() {
 			let mut names = Names::default();

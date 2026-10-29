@@ -680,6 +680,35 @@ fn tree_visits_each_directory_in_name_order_pre_and_post() {
 	assert_eq!(post, ["B", "_", "a/x", "a/y/z", "a/y", "a", "a-b", "c", "é", ""]);
 }
 
+/// `Order::Paths` visits files in the byte order of their full paths, which
+/// differs from name order where a directory name prefixes a sibling's
+/// (`a/x` sorts after `a-b` and `a.txt`); it matches a sorted collect.
+#[test]
+fn tree_path_order_matches_sorted_collect_for_files() {
+	let tmp = make_tree("tree-path-order", &["a/x", "a/y/z", "a-b", "a.txt", "ab/q", "b"]);
+	let opts = TreeOptions { order: Order::Paths, ..Default::default() };
+	let (seen, errors) = tree_events(&Fs::native(), tmp.path(), &opts);
+	assert!(errors.is_empty(), "{errors:?}");
+	let files: Vec<String> = seen
+		.into_iter()
+		.filter(|path| tmp.path().join(path).is_file())
+		.collect();
+	assert_eq!(files, ["a-b", "a.txt", "a/x", "a/y/z", "ab/q", "b"]);
+	let collected = collect(&Fs::native(), tmp.path(), &Options::default(), true, &Never, |_, e| {
+		if e.file_type == FileType::File {
+			Action::Continue
+		} else {
+			Action::Skip
+		}
+	})
+	.expect("collect");
+	let sorted: Vec<String> = collected
+		.iter()
+		.map(|e| e.path_lossy().into_owned())
+		.collect();
+	assert_eq!(files, sorted);
+}
+
 #[test]
 fn tree_depth_bounds_and_root_emission() {
 	let tmp = make_tree("tree-depth", &["a/b/c/d"]);

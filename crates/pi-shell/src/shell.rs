@@ -6458,6 +6458,38 @@ mod tests {
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "dup3\nmoved4\nsw\n"));
 	}
 
+	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
+	/// a builtin waiting for more input hung once the writer closed: `mapfile`
+	/// and `read` until cancelled, and `read -t` timed out instead of reading
+	/// EOF. Each writer here closes while its reader waits.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn builtins_waiting_on_a_fifo_see_its_writer_close() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				concat!(
+					"{ echo a; sleep 0.2; } > f & mapfile -t lines < f; wait; echo \
+					 \"mapfile=${#lines[@]}\"\n",
+					"{ echo b; sleep 0.2; } > f & while read -r l; do echo \"read=$l\"; done < f; \
+					 wait\n",
+					"{ printf c; sleep 0.2; } > f & read -t 5 -r x < f; echo \"read-t=$? $x\"; wait",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("each reader ends at its writer's EOF");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "mapfile=1\nread=b\nread-t=1 c\n"));
+	}
+
 	/// Runs `command` on a dedicated single-worker runtime and fails after five
 	/// seconds. The deadline lives on the calling thread, so it still fires when
 	/// a builtin blocks the runtime's only worker.

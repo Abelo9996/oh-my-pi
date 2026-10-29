@@ -10,9 +10,10 @@
 //! reported line holding a NUL ends the file's search.
 //!
 //! Directory searches read and scan files inside one parallel walk when
-//! results are unbounded; with a match budget the candidates are collected in
-//! path order and searched from the front in parallel ([`crate::exec`]),
-//! stopping once the budget is settled. Either way results are in path
+//! results are unbounded; with a match budget a path-ordered walk streams
+//! candidates into a parallel search that consumes them in that order
+//! ([`crate::exec::streamed`]), and both stop once the budget is settled.
+//! Either way results are in path
 //! order — files over 4 MiB, searched over their first 4 MiB, after all
 //! others — and identical from run to run. With a [`MatchSink`] results are
 //! delivered per file, as they complete, instead of returned.

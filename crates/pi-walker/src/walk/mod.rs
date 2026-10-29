@@ -31,7 +31,7 @@
 //! let files: usize = walked.states.iter().sum();
 //! ```
 
-mod arena;
+pub(crate) mod arena;
 mod cache;
 mod parallel;
 pub mod tree;
@@ -45,7 +45,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
-pub use tree::{Completion, Event, Follow, TreeEntry, TreeOptions, tree};
+pub use tree::{Completion, Event, Follow, Order, TreeEntry, TreeOptions, tree};
 
 use self::{arena::Arena, parallel::Stored};
 use crate::fs::{Detail, Dir, File, FileInfo, FileType, Fs, Session};

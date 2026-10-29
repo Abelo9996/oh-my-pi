@@ -77,6 +77,16 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 	/// skips that cost.
 	const RUNS_COMMANDS: bool = false;
 
+	/// Whether the utility handles cancellation like a process that catches
+	/// SIGINT/SIGTERM/SIGHUP: once the shell cancels it (abort, `timeout`), it
+	/// still reports its own exit status and its final diagnostics (`rsync`'s
+	/// `received SIGINT, SIGTERM, or SIGHUP (code 20)` trailer). The adapter
+	/// then awaits the body's status instead of reporting 130, and output
+	/// written after the cancellation is not dropped. The body must still end
+	/// promptly once [`Host::is_cancelled`] turns true. Every other utility
+	/// keeps the default: killed silently with status 130.
+	const OWNS_CANCELLATION: bool = false;
+
 	/// Whether the utility asks [`Host::path_is_stdout`] (`rg`, which must not
 	/// read the file its own output lands in). Only then does the host keep a
 	/// handle on stdout's identity; every other utility skips the dup.
@@ -252,7 +262,9 @@ enum GuardedStream {
 /// killed and print nothing more, so every later write on either stream is
 /// dropped. This is the one place that silences what a cancelled utility
 /// says about its cancelled reads (`cat: /dev/zero: Operation canceled`,
-/// `tail: internal error`); utilities need no case of their own.
+/// `tail: internal error`); utilities need no case of their own. A utility
+/// that owns its cancellation ([`Utility::OWNS_CANCELLATION`]) is not
+/// silenced: it reports its own end, like a process that catches the signal.
 struct SigpipeGuard {
 	inner:   OpenFile,
 	stream:  GuardedStream,
@@ -277,7 +289,8 @@ impl SigpipeGuard {
 
 	/// Whether the emulated process is dead to this stream's reader.
 	fn discards(&self) -> bool {
-		self.cancel.fired() || matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit()
+		(self.cancel.silences && self.cancel.fired())
+			|| matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit()
 	}
 }
 
@@ -329,8 +342,11 @@ impl openfiles::Stream for SigpipeGuard {
 /// still dropped), or the adapter raised the host's flag.
 #[derive(Clone)]
 struct CommandCancel {
-	flag:  Arc<AtomicBool>,
-	token: Option<CancellationToken>,
+	flag:     Arc<AtomicBool>,
+	token:    Option<CancellationToken>,
+	/// Writes on guarded streams are dropped once cancelled (false for a
+	/// [`Utility::OWNS_CANCELLATION`] utility, which reports its own end).
+	silences: bool,
 }
 
 impl CommandCancel {
@@ -1793,7 +1809,7 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 		},
 	};
 
-	let mut host = build_host(&context, U::NAME, U::CHECKS_STDOUT_PATH)?;
+	let mut host = build_host(&context, U::NAME, U::CHECKS_STDOUT_PATH, U::OWNS_CANCELLATION)?;
 	let cancel = context.cancel_token();
 	let cancel_flag = host.cancel_flag();
 	let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancel_flag));
@@ -1835,8 +1851,8 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 			() = &mut cancelled => {
 				cancel_flag.store(true, Ordering::Relaxed);
 				drop(runner.take());
-				let _ = tokio::join!(&mut handle, drain(&mut running));
-				break 130;
+				let (result, ()) = tokio::join!(&mut handle, drain(&mut running));
+				break final_status(U::OWNS_CANCELLATION, true, result.ok());
 			},
 			Some(shell) = running.next(), if !running.is_empty() => {
 				if let Some(runner) = runner.as_mut() {
@@ -1849,7 +1865,7 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 				// If the token already fired, the task only finished because
 				// our cancel flag unblocked it — report interrupted.
 				let interrupted = cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
-				break if interrupted { 130 } else { result.unwrap_or(1) };
+				break final_status(U::OWNS_CANCELLATION, interrupted, result.ok());
 			},
 			Some(request) = next_request(runner.as_ref()) => {
 				if let Some(runner) = runner.as_mut() {
@@ -1860,6 +1876,13 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	};
 
 	Ok(ExecutionResult::new((code & 0xff) as u8))
+}
+
+/// The exit status the adapter reports: 130 for a cancelled utility, unless
+/// it owns its cancellation ([`Utility::OWNS_CANCELLATION`]); otherwise the
+/// body's status (1 when the body task itself failed).
+fn final_status(owns_cancellation: bool, cancelled: bool, body: Option<i32>) -> i32 {
+	if cancelled && !owns_cancellation { 130 } else { body.unwrap_or(1) }
 }
 
 /// Runs every command in `running` to completion.
@@ -1919,6 +1942,7 @@ fn build_host<SE: ShellExtensions>(
 	context: &ExecutionContext<'_, SE>,
 	name: &str,
 	checks_stdout_path: bool,
+	owns_cancellation: bool,
 ) -> Result<Host, Error> {
 	let stdin = context.try_fd(OpenFiles::STDIN_FD);
 	// The `OpenFile` is kept alive by the `Stdin` below, so the fd stays valid.
@@ -1943,7 +1967,11 @@ fn build_host<SE: ShellExtensions>(
 	// One flag, shared: the adapter flips it on cancellation, and a blocked
 	// `Stdin::read` must observe the very same flag or it never wakes.
 	let cancel = Arc::new(AtomicBool::new(false));
-	let command_cancel = CommandCancel { flag: Arc::clone(&cancel), token: context.cancel_token() };
+	let command_cancel = CommandCancel {
+		flag:     Arc::clone(&cancel),
+		token:    context.cancel_token(),
+		silences: !owns_cancellation,
+	};
 
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
 	let stdout_handle = if checks_stdout_path { output_handle(&stdout) } else { None };
@@ -2111,13 +2139,33 @@ mod testing {
 			stdin: Box<dyn openfiles::Stream>,
 			cwd: impl Into<PathBuf>,
 		) -> (Self, Capture) {
+			Self::for_test_streams(name, stdin, cwd, false)
+		}
+
+		/// [`Host::for_test`] for a utility that owns its cancellation
+		/// ([`Utility::OWNS_CANCELLATION`]): writes after cancellation survive.
+		pub(crate) fn for_test_owning(
+			name: &str,
+			stdin: impl Into<Vec<u8>>,
+			cwd: impl Into<PathBuf>,
+		) -> (Self, Capture) {
+			Self::for_test_streams(name, Box::new(MemStream::reader(stdin.into())), cwd, true)
+		}
+
+		fn for_test_streams(
+			name: &str,
+			stdin: Box<dyn openfiles::Stream>,
+			cwd: impl Into<PathBuf>,
+			owns_cancellation: bool,
+		) -> (Self, Capture) {
 			let capture = Capture {
 				stdout: Arc::new(Mutex::new(Vec::new())),
 				stderr: Arc::new(Mutex::new(Vec::new())),
 			};
 			let cancel = Arc::new(AtomicBool::new(false));
 			let sigpipe = Arc::new(Sigpipe::default());
-			let command_cancel = CommandCancel { flag: Arc::clone(&cancel), token: None };
+			let command_cancel =
+				CommandCancel { flag: Arc::clone(&cancel), token: None, silences: !owns_cancellation };
 			let stdout = OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&capture.stdout))));
 			let stderr = OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&capture.stderr))));
 			let host = Self {
@@ -2164,7 +2212,7 @@ mod testing {
 			self.stdout_is_file = super::Destination::of(&file).regular_file;
 			self.stdout_handle = output_handle(&file);
 			self.stdout_metadata.take();
-			let command_cancel = CommandCancel { flag: Arc::clone(&self.cancel), token: None };
+			let command_cancel = self.stdin.cancel.clone();
 			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe, &command_cancel);
 		}
 
@@ -2214,7 +2262,11 @@ mod testing {
 		stdin: &str,
 		cwd: impl Into<PathBuf>,
 	) -> (i32, Capture) {
-		let (mut host, capture) = Host::for_test(U::NAME, stdin.as_bytes().to_vec(), cwd);
+		let (mut host, capture) = if U::OWNS_CANCELLATION {
+			Host::for_test_owning(U::NAME, stdin.as_bytes().to_vec(), cwd)
+		} else {
+			Host::for_test(U::NAME, stdin.as_bytes().to_vec(), cwd)
+		};
 		let full: Vec<OsString> = std::iter::once(OsString::from(U::NAME))
 			.chain(argv.iter().map(OsString::from))
 			.collect();
@@ -2482,6 +2534,71 @@ mod testing {
 			assert!(!shared(&f1, &f2));
 
 			drop((reader, reader2));
+		}
+	}
+
+	mod cancellation {
+		use crate::host::{Host, Utility, Write, final_status, run_caught};
+
+		/// Reports its cancellation on stderr and exits 20, like a process that
+		/// catches SIGTERM.
+		#[derive(clap::Parser)]
+		struct Catcher;
+
+		impl Utility for Catcher {
+			const NAME: &'static str = "catcher";
+			const OWNS_CANCELLATION: bool = true;
+
+			fn run(self, host: &mut Host) -> i32 {
+				while !host.is_cancelled() {
+					std::thread::yield_now();
+				}
+				let _ = writeln!(host.stderr, "catcher: received SIGTERM (code 20)");
+				let _ = host.stderr.flush();
+				20
+			}
+		}
+
+		/// The same body without owning cancellation: killed silently.
+		#[derive(clap::Parser)]
+		struct Plain;
+
+		impl Utility for Plain {
+			const NAME: &'static str = "plain";
+
+			fn run(self, host: &mut Host) -> i32 {
+				while !host.is_cancelled() {
+					std::thread::yield_now();
+				}
+				let _ = writeln!(host.stderr, "plain: interrupted");
+				let _ = host.stderr.flush();
+				20
+			}
+		}
+
+		/// Contract: a default utility is cancelled like a killed process,
+		/// with status 130 and nothing printed after the cancellation.
+		#[test]
+		fn default_utility_is_silenced_and_reports_130() {
+			let (mut host, capture) = Host::for_test("plain", "", "/");
+			host.cancel_for_test();
+			let code = run_caught::<Plain>(Plain, &mut host);
+			assert_eq!(capture.err(), "");
+			assert_eq!(final_status(Plain::OWNS_CANCELLATION, true, Some(code)), 130);
+		}
+
+		/// Contract: a utility that owns its cancellation reports its own
+		/// status, and its final diagnostics reach stderr.
+		#[test]
+		fn owning_utility_reports_its_own_status_and_text() {
+			let (mut host, capture) = Host::for_test_owning("catcher", "", "/");
+			host.cancel_for_test();
+			let code = run_caught::<Catcher>(Catcher, &mut host);
+			assert_eq!(capture.err(), "catcher: received SIGTERM (code 20)\n");
+			assert_eq!(final_status(Catcher::OWNS_CANCELLATION, true, Some(code)), 20);
+			// Uncancelled runs keep the body's status either way.
+			assert_eq!(final_status(false, false, Some(3)), 3);
+			assert_eq!(final_status(true, false, None), 1);
 		}
 	}
 
