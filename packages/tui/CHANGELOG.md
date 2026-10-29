@@ -22,6 +22,7 @@
 - In Tern, `omp setup` is a native page: a step bar over searchable Sign in and default model sheets (the highlighted model stays in view as you arrow), and it skips the glyph, composer shape and theme steps, which Tern draws itself
 - Signing in during `omp setup` uses the same sign-in dialog as `/login`
 - In Tern, hovering a subagent's row shows its whole assignment as formatted Markdown in a wide card, instead of a narrow tooltip of the flattened text
+- Typing `B)` or `8)` no longer turns into 😎 (so "option B)" and "step 8)" stay as typed); `B-)` and `8-)` still do
 ### Fixed
 
 - Fixed the LSP diagnostics view showing "No issues" for files whose language server had not reported yet; they now show as unverified ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
