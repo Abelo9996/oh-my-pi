@@ -132,12 +132,33 @@ describe("executeCompaction UI lifecycle", () => {
 });
 
 describe("compaction queued for the next yield", () => {
-	function buildYieldCtx(streamingAfterIdle: boolean) {
-		const session = { isStreaming: true, isCompacting: false, waitForIdle: vi.fn() };
-		session.waitForIdle.mockImplementation(async () => {
-			session.isStreaming = streamingAfterIdle;
+	/** `agentRun`: the agent loop streams; `promptSetup`: a prompt is in pre-dispatch setup (no agent run
+	 *  yet); `compactingChecks`: how many `isCompacting` reads report a pass started elsewhere. */
+	function buildYieldCtx(onWaitForIdle: (state: { agentRun: boolean; promptSetup: boolean }) => void = () => {}) {
+		const state = { agentRun: false, promptSetup: false, compactingChecks: 0 };
+		const session = {
+			agent: {
+				state: {
+					get isStreaming() {
+						return state.agentRun;
+					},
+				},
+			},
+			get isStreaming() {
+				return state.agentRun || state.promptSetup;
+			},
+			get isCompacting() {
+				if (state.compactingChecks === 0) return false;
+				state.compactingChecks--;
+				return true;
+			},
+			waitForIdle: vi.fn(async () => onWaitForIdle(state)),
+			waitForAdmittedSubmissions: vi.fn(async () => {}),
+		};
+		const compactingAtFlush: boolean[] = [];
+		const flushCompactionQueue = vi.fn(async () => {
+			compactingAtFlush.push(state.compactingChecks > 0);
 		});
-		const flushCompactionQueue = vi.fn(async () => {});
 		const ctx = {
 			session,
 			yieldCompaction: { text: "/compact soft", mode: "soft" },
@@ -149,11 +170,11 @@ describe("compaction queued for the next yield", () => {
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
 		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand");
-		return { ctx, controller, handleCompactCommand, flushCompactionQueue };
+		return { state, ctx, controller, handleCompactCommand, flushCompactionQueue, compactingAtFlush };
 	}
 
 	it("runs the queued compaction once the session is idle", async () => {
-		const { ctx, controller, handleCompactCommand } = buildYieldCtx(false);
+		const { ctx, controller, handleCompactCommand } = buildYieldCtx();
 		handleCompactCommand.mockResolvedValue("ok");
 
 		await controller.runYieldCompaction();
@@ -163,7 +184,9 @@ describe("compaction queued for the next yield", () => {
 	});
 
 	it("keeps the request for the next settle when a new run started first", async () => {
-		const { ctx, controller, handleCompactCommand } = buildYieldCtx(true);
+		const { ctx, controller, handleCompactCommand } = buildYieldCtx(state => {
+			state.agentRun = true;
+		});
 
 		await controller.runYieldCompaction();
 
@@ -171,12 +194,36 @@ describe("compaction queued for the next yield", () => {
 		expect(ctx.yieldCompaction).toEqual({ text: "/compact soft", mode: "soft" });
 	});
 
+	it("runs once a prompt still in setup bails without starting a run", async () => {
+		let idleWaits = 0;
+		const { state, controller, handleCompactCommand } = buildYieldCtx(current => {
+			// The prompt bails before the second idle check.
+			if (++idleWaits === 2) current.promptSetup = false;
+		});
+		handleCompactCommand.mockResolvedValue("ok");
+		state.promptSetup = true;
+
+		await controller.runYieldCompaction();
+
+		expect(handleCompactCommand).toHaveBeenCalledWith(undefined, "soft");
+	});
+
 	it("releases held follow-ups when there is nothing to compact", async () => {
-		const { ctx, controller, flushCompactionQueue } = buildYieldCtx(false);
+		const { ctx, controller, flushCompactionQueue } = buildYieldCtx();
 
 		await controller.runYieldCompaction();
 
 		expect(ctx.showWarning).toHaveBeenCalledWith("Nothing to compact (no messages yet)");
 		expect(flushCompactionQueue).toHaveBeenCalled();
+	});
+
+	it("releases held follow-ups after a compaction started elsewhere ends", async () => {
+		const { state, controller, handleCompactCommand, compactingAtFlush } = buildYieldCtx();
+		state.compactingChecks = 3;
+
+		await controller.runYieldCompaction();
+
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(compactingAtFlush).toEqual([false]);
 	});
 });

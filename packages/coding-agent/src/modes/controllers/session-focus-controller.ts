@@ -140,7 +140,11 @@ export class SessionFocusController {
 		this.#focusedAgentId = undefined;
 		this.#attachedSession = undefined;
 		const attached = await this.#attach(this.ctx.session);
-		if (attached && this.#focusedAgentId === undefined) this.ctx.showStatus("Returned to main session");
+		if (attached && this.#focusedAgentId === undefined) {
+			this.ctx.showStatus("Returned to main session");
+			// Main may have settled while unobserved; a queued `/compact` waits for that settle.
+			if (this.ctx.yieldCompaction) this.ctx.runYieldCompaction();
+		}
 	}
 
 	dispose(): void {
@@ -177,7 +181,7 @@ export class SessionFocusController {
 		this.ctx.syncIdleMaintenanceView(target);
 		try {
 			this.ctx.unsubscribe?.();
-			this.ctx.clearTransientSessionUi();
+			this.ctx.clearTransientSessionUi({ viewOnly: true });
 			this.ctx.eventController.resetTranscriptAnchors();
 			let assistantStreamSynced = false;
 			const restoreAssistant = async (message: AssistantMessage): Promise<void> => {

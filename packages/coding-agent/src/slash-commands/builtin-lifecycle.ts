@@ -280,6 +280,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				ctx.yieldCompaction = { text: command.text, instructions: parsed.instructions, mode: parsed.mode };
 				ctx.updatePendingMessagesDisplay();
 				ctx.showStatus("Queued compaction for when the agent yields");
+				// A prompt still in setup may bail without an agent run, and so without the settle that runs this.
+				ctx.runYieldCompaction();
 				return;
 			}
 			await ctx.handleCompactCommand(parsed.instructions, parsed.mode);

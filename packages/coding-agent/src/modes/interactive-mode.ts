@@ -1927,7 +1927,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setHoveredClickId(id);
 	}
 
-	clearTransientSessionUi(): void {
+	clearTransientSessionUi(options?: { viewOnly?: boolean }): void {
 		this.#hideSessionInfo();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
@@ -1950,8 +1950,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
-		this.compactionQueuedMessages = [];
-		this.yieldCompaction = undefined;
+		// A view switch leaves the main session, and the input queued for it, in place.
+		if (!options?.viewOnly) {
+			this.compactionQueuedMessages = [];
+			this.yieldCompaction = undefined;
+		}
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.lastAssistantUsage = undefined;
@@ -8648,8 +8651,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.flushCompactionQueue(options);
 	}
 
-	runYieldCompaction(): Promise<void> {
-		return this.#commandController.runYieldCompaction();
+	runYieldCompaction(): void {
+		if (!this.yieldCompaction) return;
+		// Not awaited by callers: the compaction outlives the event dispatch or submission that starts it.
+		void this.#commandController.runYieldCompaction().catch(error => {
+			logger.warn("Queued compaction failed", { error: String(error) });
+		});
 	}
 
 	flushPendingBashComponents(): void {

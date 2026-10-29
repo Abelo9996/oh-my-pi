@@ -229,8 +229,9 @@ export interface InteractiveModeContext {
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */
 	setClickHoverId(id: string | undefined): void;
-	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
-	clearTransientSessionUi(): void;
+	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. `viewOnly`
+	 *  (focus switch, main session unchanged) keeps the main session's compaction queues. */
+	clearTransientSessionUi(options?: { viewOnly?: boolean }): void;
 	settings: Settings;
 	keybindings: KeybindingsManager;
 	agent: AgentSession["agent"];
@@ -409,8 +410,8 @@ export interface InteractiveModeContext {
 		options?: { preserveDraft?: boolean },
 	): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
-	/** Run the compaction queued for the next yield, once the session is idle. */
-	runYieldCompaction(): Promise<void>;
+	/** Start the compaction queued for the next yield, if any; it runs once the session is idle. */
+	runYieldCompaction(): void;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
 	/** No argument restores the default; a function label is re-read on every spinner tick. */

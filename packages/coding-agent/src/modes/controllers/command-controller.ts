@@ -2072,26 +2072,37 @@ export class CommandController {
 	}
 
 	/**
-	 * Run the `/compact` queued for the next yield. Called when a run settles; the
-	 * session may still be unwinding, so wait for idle. A run started meanwhile keeps
-	 * the request for its own settle. Follow-ups queued behind it are in
-	 * `compactionQueuedMessages`, which compaction flushes when it finishes.
+	 * Run the `/compact` queued for the next yield. Called when a run settles or the
+	 * main session regains the view; waits out unwinding and admitted submissions. A
+	 * run started meanwhile keeps the request for its own settle. Follow-ups queued
+	 * behind it wait in `compactionQueuedMessages` and are flushed once it ends.
 	 */
 	async runYieldCompaction(): Promise<void> {
 		const request = this.ctx.yieldCompaction;
 		if (!request) return;
 		const session = this.ctx.session;
-		await session.waitForIdle();
-		if (this.ctx.yieldCompaction !== request || this.ctx.session !== session || session.isStreaming) return;
+		while (true) {
+			// A running agent owns the next settle, which runs the request.
+			if (session.agent.state.isStreaming) return;
+			await session.waitForIdle();
+			await session.waitForAdmittedSubmissions();
+			if (this.ctx.yieldCompaction !== request || this.ctx.session !== session) return;
+			if (!session.isStreaming) break;
+			// A prompt in pre-dispatch setup: wait until it starts a run or bails.
+			await Bun.sleep(10);
+		}
 		this.ctx.yieldCompaction = undefined;
 		this.ctx.updatePendingMessagesDisplay();
 		if (session.isCompacting) {
-			// Another pass already compacts; it flushes the follow-ups queued behind this request.
+			// Another pass (auto, or an extension's `ctx.compact()`) already compacts.
 			this.ctx.showStatus("Skipped queued compaction: context is already compacting");
-			return;
+			while (session.isCompacting) {
+				await Bun.sleep(10);
+			}
+		} else {
+			await this.handleCompactCommand(request.instructions, request.mode);
 		}
-		await this.handleCompactCommand(request.instructions, request.mode);
-		// "Nothing to compact" returns before compaction flushes its queue; release the held follow-ups.
+		// "Nothing to compact" and a pass started elsewhere end without flushing; release held follow-ups.
 		await this.ctx.flushCompactionQueue({ willRetry: false });
 	}
 

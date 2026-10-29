@@ -2587,13 +2587,8 @@ export class EventController {
 		// torn-down "Working…" row with the "F5 to Retry" affordance.
 		this.ctx.syncRetryHintRow();
 		this.ctx.ui.requestRender();
-		// The run yielded: a `/compact` queued behind it runs now. Not awaited — the
-		// compaction outlives this serialized event dispatch.
-		if (this.ctx.yieldCompaction) {
-			void this.ctx.runYieldCompaction().catch(error => {
-				logger.warn("Queued compaction failed", { error: String(error) });
-			});
-		}
+		// The run yielded: a `/compact` queued behind it runs now.
+		if (this.ctx.yieldCompaction) this.ctx.runYieldCompaction();
 		// The user stopped the run themselves: no prediction or toast for it.
 		if (options?.interrupted) return;
 		if (this.#settledRunStatus(event).state === "done") this.composerPrediction.request();

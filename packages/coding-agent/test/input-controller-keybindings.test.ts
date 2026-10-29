@@ -757,6 +757,7 @@ describe("InputController keybinding setup", () => {
 			yieldCompaction: undefined,
 			handleCompactCommand,
 			queueCompactionMessage,
+			runYieldCompaction: vi.fn(),
 		});
 		return { handleCompactCommand, queueCompactionMessage };
 	}
@@ -780,6 +781,7 @@ describe("InputController keybinding setup", () => {
 		editor.setText("/compact keep the API notes");
 		await controller.handleFollowUp();
 		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(spies.showError).not.toHaveBeenCalled();
 		expect(ctx.yieldCompaction).toEqual({
 			text: "/compact keep the API notes",
 			instructions: "keep the API notes",
