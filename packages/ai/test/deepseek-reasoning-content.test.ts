@@ -606,4 +606,33 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			expect(assistant?.reasoning_content).toBe(".");
 		});
 	});
+	describe("Mistral-hosted DeepSeek replay", () => {
+		it("keeps thinking in assistant content without forbidden reasoning fields on later turns", () => {
+			const model = deepseekModel({
+				provider: "mistral",
+				baseUrl: "https://api.mistral.ai/v1",
+				id: "deepseek-v4-1-flash-1017",
+			});
+			const toolTurn = assistantToolCall(model, [
+				{ type: "thinking", thinking: "Check the file.", thinkingSignature: "reasoning_content" },
+				{ type: "toolCall", id: "call_mistral", name: "read", arguments: { path: "/tmp/test" } },
+			]);
+			const plainTurn: AssistantMessage = {
+				...assistantToolCall(model, [{ type: "text", text: "Done." }]),
+				stopReason: "stop",
+			};
+			const replay = convertMessages(model, { messages: [toolTurn, plainTurn] }, model.compat).filter(
+				message => message.role === "assistant",
+			);
+			expect(replay).toHaveLength(2);
+			expect(replay[0]?.content).toContain("Check the file.");
+			expect(replay[0]?.tool_calls).toHaveLength(1);
+			expect(replay[1]?.content).toBe("Done.");
+			for (const turn of replay) {
+				expect(turn).not.toHaveProperty("reasoning_content");
+				expect(turn).not.toHaveProperty("reasoning");
+				expect(turn).not.toHaveProperty("reasoning_text");
+			}
+		});
+	});
 });
