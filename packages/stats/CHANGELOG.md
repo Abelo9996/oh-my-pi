@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Optimized database schema with new composite indexes and ingestion pragmas, significantly reducing sync times
+- Minimized database update operations by integrating tool results directly into initial call ingestion
 - Sped up `omp stats` session sync about 2–5× on large histories; the first run after upgrading spends up to a minute rebuilding the stats database indexes
 
 ### Fixed
