@@ -227,7 +227,7 @@ export class TableChartFigure implements Component {
 	/** The image's share of the caller's ceiling: all but the separator row. */
 	#figureRows(): number | undefined {
 		const rows = this.#options.maxRows?.();
-		return rows === undefined ? undefined : Math.max(0, rows - 1);
+		return rows === undefined ? undefined : Math.max(0, Math.floor(rows) - 1);
 	}
 
 	/** Point the figure at `table`. */

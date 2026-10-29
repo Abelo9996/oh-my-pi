@@ -226,7 +226,7 @@ export class SvgFigure implements Component {
 	/** The caller's row ceiling, if any; a surface shorter than its chrome leaves none. */
 	#maxRows(): number | undefined {
 		const rows = this.#options.maxRows?.();
-		return rows === undefined ? undefined : Math.max(0, rows);
+		return rows === undefined ? undefined : Math.max(0, Math.floor(rows));
 	}
 
 	render(width: number): readonly string[] {
@@ -242,7 +242,10 @@ export class SvgFigure implements Component {
 			this.#placeholder ??= [` ${theme.fg("dim", "Drawing SVG…")}`];
 			return this.#placeholder;
 		}
-		return this.#imageFor(raster, maxRows).render(width);
+		const rows = this.#imageFor(raster, maxRows).render(width);
+		// A SIXEL band is six pixels whole: cells shorter than that reserve more
+		// rows than the ceiling, and a cut band would draw nothing anyway.
+		return maxRows !== undefined && rows.length > maxRows ? [] : rows;
 	}
 
 	invalidate(): void {

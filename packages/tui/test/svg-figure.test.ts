@@ -192,8 +192,8 @@ describe("SvgFigure", () => {
 		}
 	});
 
-	it("hides at a zero ceiling without holding up completion, then draws when room returns", async () => {
-		let maxRows = 0;
+	it("hides below one whole row without holding up completion, then draws when room returns", async () => {
+		let maxRows = 0.5;
 		const landed = Promise.withResolvers<void>();
 		const svg = new SvgFigure({
 			markdown: text => new Markdown(text, 0, 0, getMarkdownTheme()),
@@ -209,6 +209,17 @@ describe("SvgFigure", () => {
 		svg.render(76);
 		await landed.promise;
 		expect(svg.render(76).some(row => TERMINAL.isImageLine(row))).toBe(true);
+	});
+
+	it("hides a SIXEL whose one band needs more rows than the ceiling", async () => {
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		setCellDimensions({ widthPx: 16, heightPx: 4 });
+		const landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({ maxRows: () => 1, onChange: () => landed.resolve() });
+		svg.update(TALL_SVG, true);
+		svg.render(76);
+		await landed.promise;
+		expect(svg.render(76)).toEqual([]);
 	});
 
 	it("cuts the code fallback to the ceiling, returning the same rows while unchanged", async () => {
