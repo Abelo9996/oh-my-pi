@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1851,6 +1851,33 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
 			expect(output).toContain("bravo.txt");
 			expect(output).not.toContain("alpha.txt");
+		});
+
+		it("re-reads an archive rewritten in place within one timestamp granule", async () => {
+			const archivePath = path.join(testDir, "granule.zip");
+			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			// A coarse-timestamp filesystem: the same-size rewrite below lands in this
+			// write's granule, so it leaves the archive's whole stat unchanged.
+			const granuleStat = await Bun.file(archivePath).stat();
+			const prototype: Bun.BunFile = Object.getPrototypeOf(Bun.file(archivePath));
+			const realStat = prototype.stat;
+			vi.spyOn(prototype, "stat").mockImplementation(function (this: Bun.BunFile) {
+				return this.name === archivePath ? Promise.resolve(granuleStat) : realStat.call(this);
+			});
+			// Both reads run inside the granule.
+			setSystemTime(granuleStat.ctime);
+			try {
+				expect(
+					getTextOutput(await readTool.execute("test-call-zip-granule-before", { path: archivePath })),
+				).toContain("alpha.txt");
+
+				fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+				const output = getTextOutput(await readTool.execute("test-call-zip-granule-after", { path: archivePath }));
+				expect(output).toContain("bravo.txt");
+				expect(output).not.toContain("alpha.txt");
+			} finally {
+				setSystemTime();
+			}
 		});
 
 		it("should list zip archives without inflating member payloads", async () => {

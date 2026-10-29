@@ -71,7 +71,16 @@ const archiveReaderCache = new LRUCache<string, CachedArchiveReader>({
 	sizeCalculation: cached => Math.max(1, cached.entryCount),
 });
 
+/**
+ * Archives changed more recently than this are never memoized (git's racy-clean
+ * rule): on coarse-timestamp filesystems a same-size rewrite inside one timestamp
+ * granule leaves the identity unchanged.
+ */
+const RACY_IDENTITY_WINDOW_MS = 2_000;
+
 async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
+	// The clock is read before the stat, so a change landing between the two counts as recent.
+	const checkedAtMs = Date.now();
 	// A vanished or unreadable archive is reported by the opener, as it always has been.
 	const stat = await Bun.file(absolutePath)
 		.stat()
@@ -88,7 +97,7 @@ async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
 		return cached.reader;
 	}
 	const reader = await openArchive(absolutePath);
-	if (!CACHEABLE_ARCHIVE_FORMATS[reader.format]) {
+	if (!CACHEABLE_ARCHIVE_FORMATS[reader.format] || checkedAtMs - stat.ctimeMs < RACY_IDENTITY_WINDOW_MS) {
 		archiveReaderCache.delete(absolutePath);
 		return reader;
 	}
