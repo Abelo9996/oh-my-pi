@@ -81,7 +81,7 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/credential/:id/block`   | bearer | Upsert a provider/scope rate-limit block                           |
 | `DELETE` | `/v1/credential/:id/block`   | bearer | Delete one block named by body `providerKey` and `blockScope`      |
 | `DELETE` | `/v1/credential/:id/blocks`  | bearer | Delete all rate-limit blocks for a credential                      |
-| `GET`    | `/v1/usage`                  | bearer | Aggregate current `UsageReport[]` across credentials               |
+| `GET`    | `/v1/usage`                  | bearer | Current `UsageReport[]`; optional `provider` query filter           |
 | `GET`    | `/v1/usage/history`          | bearer | Persisted usage history; optional `sinceMs` and `provider` filters |
 | `POST`   | `/v1/usage/observed`         | bearer | Record usage observed by a broker client                           |
 | `GET`    | `/v1/usage/clients`          | bearer | Summarize client-observed usage since optional `sinceMs`           |
@@ -248,7 +248,7 @@ There is no raw provider passthrough path. All supported routes go through `pi-a
 
 ## Usage cache: server-side 5-min jitter + client-side 15 s single-flight
 
-Two layers cache the aggregate provider-usage report. Both are intentional and stacked.
+Two layers cache provider usage. On the broker, `GET /v1/usage?provider=anthropic` fetches only that provider's credentials; omitting `provider` returns the complete aggregate. Clients can also reuse an existing aggregate fetch, as described below.
 
 ### Server-side cache (broker `AuthStorage`)
 
@@ -258,14 +258,16 @@ Constants: `USAGE_REPORT_TTL_MS = 5 * 60_000` in `packages/ai/src/auth/sqlite-cr
 
 ### Client-side single-flight (`RemoteAuthCredentialStore`)
 
-When the gateway (or any other broker client) calls `fetchUsageReports()` / `getUsageReport(provider, credential)`, `RemoteAuthCredentialStore` coalesces concurrent calls into a single `GET /v1/usage` round-trip and caches the result for **15 s** in memory.
+`RemoteAuthCredentialStore` coalesces concurrent usage calls by provider and caches each result for **15 s** in memory. `getUsageReport(provider, credential)` requests only that provider; unscoped `fetchUsageReports()` requests the full aggregate. A fresh or in-flight aggregate can serve a provider lookup, but a provider-only result never stands in for the aggregate.
 
 - `USAGE_CACHE_TTL_MS = 15_000` (`packages/ai/src/auth-broker/remote-store.ts`).
-- A single `#usageInflight` promise is shared across all callers; a per-caller `AbortSignal` is **raced** against the shared promise, not threaded into it, so one caller’s abort never cascades into a peer’s in-flight request.
-- On fetch failure the error is logged and `null` is cached for 15 s, so sequential callers do not immediately retry a failed broker. Aggregate usage returns `null`; a per-credential lookup may still use a fresh client-observed header overlay.
+- Calls in the same scope share one in-flight promise; a per-caller `AbortSignal` is **raced** against it, not threaded into it, so one caller’s abort never cancels a peer’s request.
+- On fetch failure the error is logged and `null` is cached for 15 s in that scope, so sequential callers do not immediately retry a failed broker. A per-credential lookup may still use a fresh client-observed header overlay.
 - Fresh provider response-header hints are overlaid on matching reports for up to 15 s.
 
-The client window is shorter than the broker's per-credential cache and coalesces the usage lookups used by `CredentialSelector` (`packages/ai/src/auth/select.ts`) into a single broker round-trip.
+The client window is shorter than the broker's per-credential cache. Older brokers ignore `provider`; clients filter their replies correctly, but avoiding unrelated-provider latency requires upgrading the broker.
+
+Session startup calls `authStorage.keys.prefetchUsage(provider, sessionId, options)` to overlap required usage reads with tool/context loading. This uses the selector's eligibility rules without selecting an account, advancing round-robin order, or establishing a session pin; normal request-time selection remains authoritative.
 
 ## Client snapshot cache
 

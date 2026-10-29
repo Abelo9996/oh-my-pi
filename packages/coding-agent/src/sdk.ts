@@ -2188,6 +2188,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Anthropic); others warm once a request has revealed their real origin.
 		// Every mode benefits (interactive, print, rpc, acp).
 		void prewarmModelConnection(model);
+		// Usage-aware credential selection may need a cold remote usage report.
+		// Start only that metadata read while tools/extensions/context are loading;
+		// the selector owns eligibility and still chooses/pins the account at request
+		// time. A preliminary model can change after extensions register, so this
+		// must never validate or commit credentials for it.
+		void logger
+			.time("prefetchCredentialUsage", () =>
+				modelRegistry.authStorage.keys.prefetchUsage(resolvedModel.provider, providerSessionId, {
+					baseUrl: resolvedModel.baseUrl,
+					modelId: resolvedModel.id,
+					accountIds: resolvedModel.accountAccess && Object.keys(resolvedModel.accountAccess),
+				}),
+			)
+			.catch(error => {
+				logger.debug("Startup credential usage prefetch failed", {
+					provider: resolvedModel.provider,
+					error: String(error),
+				});
+			});
 	}
 
 	// Re-derives the thinking level whenever startup settles on a different
@@ -4014,20 +4033,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			tools: Map<string, AgentTool>,
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
-			const activeRepoContext = hasSession
-				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
-				: initialActiveRepoContext;
-			if (hasSession && pinnedContextFiles === undefined) {
-				contextFiles = contextFileFilter(
-					await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
-						...cfgDisabledExtensions.get(settings),
-					]),
-				);
-				toolSession.contextFiles = contextFiles;
-				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
-			}
-			// Re-discover rules from disk on every session-scoped rebuild, mirroring the
-			// context-file refresh above. The rule buckets are otherwise frozen at
+			let activeRepoContext = initialActiveRepoContext;
+			// Re-discover rules and context files from disk on every session-scoped
+			// rebuild. The rule buckets are otherwise frozen at
 			// session creation, so a `RULES.md` (or any rule) created or edited while omp
 			// runs never reaches the prompt on /clear or /new until restart (issue #10940).
 			// resetCapabilities() clears the fs cache at those boundaries, so this observes
@@ -4036,14 +4044,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Sessions handed an explicit rule set (subagents inherit the parent's) keep it
 			// but still re-bucket, so live `ttsr.*` filter changes apply to them too.
 			if (hasSession) {
-				const ttsrSettings = cfgTtsr.get(settings);
-				const ruleItems =
+				// These reads share only the cwd and discovery scope. Start them together:
+				// a slow repository lookup must not delay context files or rules, including
+				// the first refresh after session_start hooks have edited those files.
+				const [repoContext, refreshedContextFiles, ruleItems] = await Promise.all([
+					logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd),
+					pinnedContextFiles === undefined
+						? logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
+								...cfgDisabledExtensions.get(settings),
+							])
+						: undefined,
 					options.rules ??
-					(
-						await logger.time("rediscoverRules", () =>
-							loadCapability<Rule>(ruleCapability.id, { cwd: promptCwd, agentDir }),
-						)
-					).items;
+						logger
+							.time("rediscoverRules", () =>
+								loadCapability<Rule>(ruleCapability.id, { cwd: promptCwd, agentDir }),
+							)
+							.then(result => result.items),
+				]);
+				activeRepoContext = repoContext;
+				if (refreshedContextFiles !== undefined) {
+					contextFiles = contextFileFilter(refreshedContextFiles);
+					toolSession.contextFiles = contextFiles;
+					session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
+				}
+				const ttsrSettings = cfgTtsr.get(settings);
 				const buckets = bucketRules(ruleItems, ttsrManager, {
 					builtinRules: ttsrSettings.builtinRules,
 					disabledRules: ttsrSettings.disabledRules,

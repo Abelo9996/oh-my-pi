@@ -8789,7 +8789,8 @@ export class AgentSession implements SettingsScope {
 			const autoPrewalkTask = this.#isAutoPrewalkTask(message);
 			if (autoPrewalkTask) await this.#prewalk.beginAutoTask();
 			const autoPrewalk = autoPrewalkTask ? this.#prewalk.classifyAuto(expandedText, setupAbort.signal) : undefined;
-			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			if (!(await logger.time("prompt:usagePreflight", () => this.#runUsageAwarePreflightForNextModelCall())))
+				return false;
 			// A capped session hands the prompt back rather than start a run whose first request it refuses.
 			if (this.#refuseOverCostCap()) return false;
 			// Flush any pending bash messages before the new prompt
@@ -8802,7 +8803,8 @@ export class AgentSession implements SettingsScope {
 			this.#recovery.setAcceptTerminalEmptyStop(options?.acceptTerminalEmptyStop === true);
 
 			// Validate model
-			if (!this.model) {
+			const model = this.model;
+			if (!model) {
 				throw new Error(
 					"No model selected.\n\n" +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}\n\n` +
@@ -8811,10 +8813,10 @@ export class AgentSession implements SettingsScope {
 			}
 
 			// Validate API key
-			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId);
+			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
 			if (!apiKey) {
 				throw new Error(
-					`No API key found for ${this.model.provider}.\n\n` +
+					`No API key found for ${model.provider}.\n\n` +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
 				);
 			}
@@ -8897,13 +8899,8 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 
-			const preparation = await this.#prepareAgentStart(
-				message,
-				expandedText,
-				options?.images,
-				generation,
-				setupAbort.signal,
-				"direct",
+			const preparation = await logger.time("prompt:prepareAgentStart", () =>
+				this.#prepareAgentStart(message, expandedText, options?.images, generation, setupAbort.signal, "direct"),
 			);
 			const preparedMessages = preparation.commit();
 			if (!preparedMessages) return false;
@@ -8938,7 +8935,9 @@ export class AgentSession implements SettingsScope {
 			if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
 				maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
 			}
-			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages);
+			await logger.time("prompt:prePromptCompaction", () =>
+				this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages),
+			);
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}

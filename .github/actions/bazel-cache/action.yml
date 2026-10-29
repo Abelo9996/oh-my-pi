@@ -1,10 +1,13 @@
 name: "Compose bazel cache config"
 description: >
-   Emits a bazelrc fragment wiring the shared bazel-remote cache. Every Bazel
-   job runs on a vmon `omp-ci` sandbox (VMON_CI=1), whose template bakes the
-   repository/xwin caches at /opt/bazel-repo-cache; given the bazel-remote
-   secrets it adds the read-write remote cache. Elsewhere the fragment
-   carries only --config=ci and the build runs uncached.
+   Emits a bazelrc fragment wiring a remote cache. Every Bazel job runs on a
+   vmon `omp-ci` sandbox (VMON_CI=1), whose template bakes the
+   repository/xwin caches at /opt/bazel-repo-cache. Given the bazel-remote
+   secrets it adds the shared read-write bazel-remote cache; without them it
+   uses the vmon node's own Bazel HTTP cache ($VMON_CACHE_URL/bazel, set by
+   the vmon runner when the node serves it): written by non-PR jobs, read by
+   all. Elsewhere the fragment carries only --config=ci and the build runs
+   uncached.
 
 inputs:
    remote-url:
@@ -54,7 +57,22 @@ runs:
            } > "$rc"
 
            if [ -z "$REMOTE_URL$REMOTE_USER$REMOTE_PASSWORD" ]; then
-             echo "::warning title=Bazel cache::No bazel-remote secrets reached this job; building without the remote cache."
+             if [ -n "${VMON_CACHE_URL:-}" ]; then
+               # The vmon node's local Bazel cache. It refuses writes from
+               # pull request jobs; PRs (pull_request_target included) skip
+               # uploads instead of collecting 403 warnings.
+               case "${GITHUB_EVENT_NAME:-}" in
+                 pull_request*) mode=cache-ro ;;
+                 *) mode=cache-rw ;;
+               esac
+               {
+                 echo "common --config=${mode}"
+                 echo "common --remote_cache=${VMON_CACHE_URL}/bazel"
+               } >> "$rc"
+               echo "::notice title=Bazel cache::Using the vmon node's Bazel cache (${mode})."
+               exit 0
+             fi
+             echo "::warning title=Bazel cache::No bazel-remote secrets reached this job and the vmon node serves no Bazel cache; building without the remote cache."
              exit 0
            fi
            if [ -z "$REMOTE_URL" ] || [ -z "$REMOTE_USER" ] || [ -z "$REMOTE_PASSWORD" ]; then

@@ -13,6 +13,8 @@
 
 - Fixed native Judge API requests omitting the `omp/<version>` User-Agent used to identify omp in upstream usage statistics ([#17311](https://github.com/can1357/oh-my-pi/pull/17311) by [@BizerNotNull](https://github.com/BizerNotNull))
 - Fixed Codex capacity errors on WebSocket and SSE streams dropping the provider's Retry-After, so retries fired before the requested wait ([#17362](https://github.com/can1357/oh-my-pi/pull/17362) by [@iFwu](https://github.com/iFwu))
+- Provider-specific auth-broker usage lookups no longer wait for unrelated providers; scoped caches retain the 15-second freshness window, shared cancellation isolation, and complete aggregate reports. The server-side latency reduction requires upgrading the broker
+- Credential usage can be prefetched during session setup without choosing or pinning an OAuth account or advancing round-robin selection
 - Fixed a cancelled request whose OAuth credential was mid-refresh killing the whole session with `[Unhandled Rejection] AbortError: OAuth refresh ownership aborted by caller` ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 - Fixed requests that joined an OAuth refresh started by an already-cancelled request failing with that request's cancellation instead of getting the refreshed credential ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 - Fixed Cursor models losing omp's system prompt (context files, skills, rules) from the second turn on, or whenever earlier messages precede the active one ([#17059](https://github.com/can1357/oh-my-pi/issues/17059), [#17325](https://github.com/can1357/oh-my-pi/pull/17325) by [@robfeldmann](https://github.com/robfeldmann))

@@ -90,7 +90,9 @@ build:ci --reuse_sandbox_directories
 
 # --- Remote cache ------------------------------------------------------------
 # .github/actions/bazel-cache composes the bazel-remote endpoint + credentials
-# (repository secrets) into an rc fragment on vmon `omp-ci` runners.
+# (repository secrets) into an rc fragment on vmon `omp-ci` runners, or
+# without them the vmon node's local Bazel cache ($VMON_CACHE_URL/bazel;
+# cache-rw on non-PR events, cache-ro on PRs, which the node refuses writes).
 # GitHub-hosted runners never use the remote cache and run no Bazel builds.
 # These configs carry only the policy bits.
 #
