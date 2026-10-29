@@ -133,9 +133,10 @@ describe("executeCompaction UI lifecycle", () => {
 
 describe("compaction queued for the next yield", () => {
 	/** `agentRun`: the agent loop streams; `promptSetup`: a prompt is in pre-dispatch setup (no agent run
-	 *  yet); `compactingChecks`: how many `isCompacting` reads report a pass started elsewhere. */
+	 *  yet); `transitioning`: a session switch is applying; `compactingChecks`: how many `isCompacting`
+	 *  reads report a pass started elsewhere. */
 	function buildYieldCtx(onWaitForIdle: (state: { agentRun: boolean; promptSetup: boolean }) => void = () => {}) {
-		const state = { agentRun: false, promptSetup: false, compactingChecks: 0 };
+		const state = { agentRun: false, promptSetup: false, transitioning: false, compactingChecks: 0 };
 		const session = {
 			agent: {
 				state: {
@@ -154,20 +155,22 @@ describe("compaction queued for the next yield", () => {
 			},
 			waitForIdle: vi.fn(async () => onWaitForIdle(state)),
 			waitForAdmittedSubmissions: vi.fn(async () => {}),
+			get isSessionTransitioning() {
+				return state.transitioning;
+			},
+			// The switch rolls back: the session and the request survive.
+			waitForSessionTransition: vi.fn(async () => {
+				state.transitioning = false;
+			}),
 		};
 		const compactingAtFlush: boolean[] = [];
 		const flushCompactionQueue = vi.fn(async () => {
 			compactingAtFlush.push(state.compactingChecks > 0);
 		});
-		const sessionManager = {
-			sessionId: "s1",
-			getSessionId: () => sessionManager.sessionId,
-			getEntries: () => [{ type: "message" }],
-		};
 		const ctx = {
 			session,
-			sessionManager,
-			yieldCompaction: { text: "/compact soft", sessionId: "s1", mode: "soft" },
+			sessionManager: { getEntries: () => [{ type: "message" }] },
+			yieldCompaction: { text: "/compact soft", mode: "soft" },
 			compactionQueuedMessages: [],
 			updatePendingMessagesDisplay: vi.fn(),
 			showStatus: vi.fn(),
@@ -176,7 +179,7 @@ describe("compaction queued for the next yield", () => {
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
 		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand");
-		return { state, ctx, sessionManager, controller, handleCompactCommand, flushCompactionQueue, compactingAtFlush };
+		return { state, ctx, controller, handleCompactCommand, flushCompactionQueue, compactingAtFlush };
 	}
 
 	it("runs the queued compaction once the session is idle", async () => {
@@ -197,7 +200,7 @@ describe("compaction queued for the next yield", () => {
 		await controller.runYieldCompaction();
 
 		expect(handleCompactCommand).not.toHaveBeenCalled();
-		expect(ctx.yieldCompaction).toEqual({ text: "/compact soft", sessionId: "s1", mode: "soft" });
+		expect(ctx.yieldCompaction).toEqual({ text: "/compact soft", mode: "soft" });
 	});
 
 	it("runs once a prompt still in setup bails without starting a run", async () => {
@@ -233,17 +236,17 @@ describe("compaction queued for the next yield", () => {
 		expect(compactingAtFlush).toEqual([false]);
 	});
 
-	it("drops the request and its held follow-ups after a switch to another conversation", async () => {
-		const { ctx, sessionManager, controller, handleCompactCommand, flushCompactionQueue } = buildYieldCtx();
-		ctx.compactionQueuedMessages.push({ text: "held", mode: "followUp" });
-		// An extension's `ctx.switchSession()` reuses the AgentSession object and only changes the conversation.
-		sessionManager.sessionId = "s2";
+	it("waits for a session switch to settle before compacting", async () => {
+		const { state, controller, handleCompactCommand } = buildYieldCtx();
+		state.transitioning = true;
+		const transitioningAtCompact: boolean[] = [];
+		handleCompactCommand.mockImplementation(async () => {
+			transitioningAtCompact.push(state.transitioning);
+			return "ok";
+		});
 
 		await controller.runYieldCompaction();
 
-		expect(handleCompactCommand).not.toHaveBeenCalled();
-		expect(flushCompactionQueue).not.toHaveBeenCalled();
-		expect(ctx.yieldCompaction).toBeUndefined();
-		expect(ctx.compactionQueuedMessages).toEqual([]);
+		expect(transitioningAtCompact).toEqual([false]);
 	});
 });

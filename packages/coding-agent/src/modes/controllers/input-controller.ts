@@ -320,6 +320,8 @@ export class InputController {
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
+	/** Settles when the latest follow-up submission has passed its input hooks. */
+	#followUpHookOrder: Promise<void> = Promise.resolve();
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -2070,17 +2072,28 @@ export class InputController {
 		// same draft, and later typing belongs to the next submission.
 		this.ctx.editor.clearDraft();
 
-		if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
-		if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
-			try {
-				const input = await this.#runInputHandlers(text, images, imageLinks);
-				if (!input) return;
-				({ text, images, imageLinks } = input);
-			} catch (error) {
-				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
-				this.ctx.showError(error instanceof Error ? error.message : String(error));
-				return;
+		// The follow-up key fires without awaiting: input hooks pass in submission order, so a slow hook
+		// on a queued `/compact` cannot let a later follow-up reach the queues first. Dispatch past this
+		// point decides queue placement synchronously.
+		const earlier = this.#followUpHookOrder;
+		const hooksDone = Promise.withResolvers<void>();
+		this.#followUpHookOrder = hooksDone.promise;
+		try {
+			await earlier;
+			if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
+			if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
+				try {
+					const input = await this.#runInputHandlers(text, images, imageLinks);
+					if (!input) return;
+					({ text, images, imageLinks } = input);
+				} catch (error) {
+					restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					return;
+				}
 			}
+		} finally {
+			hooksDone.resolve();
 		}
 
 		// Ctrl+Enter detached the draft before the first await, so a side command

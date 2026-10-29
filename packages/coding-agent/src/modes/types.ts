@@ -73,8 +73,6 @@ export type CompactionQueuedMessage = {
 export type YieldCompaction = {
 	/** The submitted command, restored to the editor when the request is dequeued. */
 	text: string;
-	/** Session the request was queued in; a switch away (which may reuse the `AgentSession`) drops it. */
-	sessionId: string;
 	instructions?: string;
 	mode?: CompactMode;
 };

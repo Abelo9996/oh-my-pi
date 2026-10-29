@@ -2086,15 +2086,10 @@ export class CommandController {
 			if (session.agent.state.isStreaming) return;
 			await session.waitForIdle();
 			await session.waitForAdmittedSubmissions();
+			// A switch clears the request at its start (`prepareSessionSwitch`); let it commit or roll back.
+			if (session.isSessionTransitioning) await session.waitForSessionTransition();
 			if (this.ctx.yieldCompaction !== request || this.ctx.session !== session) return;
-			if (this.ctx.sessionManager.getSessionId() !== request.sessionId) {
-				// Switched to another conversation: the request and the follow-ups held behind it belonged to the old one.
-				this.ctx.yieldCompaction = undefined;
-				this.ctx.compactionQueuedMessages = [];
-				this.ctx.updatePendingMessagesDisplay();
-				return;
-			}
-			if (!session.isStreaming) break;
+			if (!session.isStreaming && !session.isSessionTransitioning) break;
 			// A prompt in pre-dispatch setup: wait until it starts a run or bails.
 			await Bun.sleep(10);
 		}

@@ -8835,6 +8835,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.clearPinnedError();
 		this.#hidePlanReview();
+		// A queued `/compact`, and the follow-ups held behind it, belong to the conversation being left.
+		if (this.yieldCompaction) {
+			this.yieldCompaction = undefined;
+			this.compactionQueuedMessages = [];
+			this.updatePendingMessagesDisplay();
+		}
 	}
 
 	async handleClearCommand(): Promise<void> {

@@ -758,7 +758,6 @@ describe("InputController keybinding setup", () => {
 			handleCompactCommand,
 			queueCompactionMessage,
 			runYieldCompaction: vi.fn(),
-			sessionManager: { getSessionId: () => "session-1" },
 		});
 		return { handleCompactCommand, queueCompactionMessage };
 	}
@@ -785,7 +784,6 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showError).not.toHaveBeenCalled();
 		expect(ctx.yieldCompaction).toEqual({
 			text: "/compact keep the API notes",
-			sessionId: "session-1",
 			instructions: "keep the API notes",
 			mode: undefined,
 		});
@@ -826,6 +824,37 @@ describe("InputController keybinding setup", () => {
 
 		expect(handleCompactCommand).toHaveBeenCalledWith(undefined, undefined);
 		expect(ctx.yieldCompaction).toBeUndefined();
+	});
+
+	it("keeps submission order when an input hook delays a follow-up /compact", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const { queueCompactionMessage } = withCompactionQueue(ctx);
+		const compactHook = Promise.withResolvers<void>();
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			extensionRunner: {
+				hasHandlers: (event: string) => event === "input",
+				// Slow for the `/compact`, instant for the message sent after it.
+				emitInput: async (text: string) => {
+					if (text.startsWith("/compact")) await compactHook.promise;
+					return undefined;
+				},
+			},
+		});
+		const controller = new InputController(ctx);
+
+		editor.setText("/compact");
+		const compact = controller.handleFollowUp();
+		editor.setText("after the compaction");
+		const message = controller.handleFollowUp();
+		compactHook.resolve();
+		await Promise.all([compact, message]);
+
+		expect(ctx.yieldCompaction?.text).toBe("/compact");
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(queueCompactionMessage).toHaveBeenCalledWith("after the compaction", "followUp", undefined, {
+			preserveDraft: true,
+		});
 	});
 
 	it("continue shortcuts submit a resume instead of a prompt", async () => {
