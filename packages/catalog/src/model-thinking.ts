@@ -42,6 +42,18 @@ export function withoutUnverifiedThinking<T extends { reasoning: boolean; thinki
 /**
  * Clamps a requested thinking level against explicit model metadata.
  *
+ * A level the model does not serve is first resolved through its advertised
+ * alias (`thinking.effortMap`, e.g. a gateway that answers `medium` as `high`)
+ * when the alias names a served tier; only then does the ladder-climbing
+ * fallback apply. Aliasing ahead of the fallback keeps the request at the tier
+ * the endpoint says it lands on instead of the nearest lower one.
+ *
+ * Providers re-apply `thinking.effortMap` when they serialize the effort, so an
+ * alias is honoured only when the tier it names reaches the wire unchanged.
+ * A chained alias (`{ medium: "high", high: "max" }`) leaves the ladder and the
+ * map disagreeing about `high`; distance clamping stays authoritative there,
+ * exactly as it did before aliases were consulted.
+ *
  * Non-reasoning models always resolve to `undefined`.
  */
 export function clampThinkingLevelForModel<TApi extends Api>(
@@ -58,6 +70,13 @@ export function clampThinkingLevelForModel<TApi extends Api>(
 	const levels = getSupportedEfforts(model);
 	if (levels.includes(requested)) {
 		return requested;
+	}
+
+	const effortMap = model.thinking?.effortMap;
+	const aliased = effortMap?.[requested];
+	const aliasLevel = aliased === undefined ? undefined : levels.find(level => level === aliased);
+	if (aliasLevel !== undefined && (effortMap?.[aliasLevel] ?? aliasLevel) === aliasLevel) {
+		return aliasLevel;
 	}
 
 	const requestedIndex = THINKING_EFFORTS.indexOf(requested);

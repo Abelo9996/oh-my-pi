@@ -29,6 +29,7 @@ import {
 	type ModelKind,
 	type ModelSpec,
 	type OpenAICompat,
+	type ThinkingConfig,
 	runnerApiKind,
 } from "@oh-my-pi/pi-catalog/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -956,15 +957,28 @@ function advertisedReasoningEnabled(providerConfig: DiscoveryProviderConfig): bo
 type AdvertisedReasoning =
 	/** The row states it does not reason. */
 	| { kind: "none" }
-	/** The row advertises an effort ladder, and whether it also accepts `none`. */
-	| { kind: "ladder"; efforts: Effort[]; acceptsNone: boolean; defaultLevel?: Effort };
+	/**
+	 * The row advertises an effort ladder, whether it also accepts `none`, and
+	 * the aliases/lock facts that describe how requests land on it.
+	 */
+	| {
+			kind: "ladder";
+			efforts: Effort[];
+			acceptsNone: boolean;
+			defaultLevel?: Effort;
+			effortMap?: Partial<Record<Effort, Effort>>;
+			requiresEffort?: boolean;
+	  };
 
 /**
  * Read server-advertised reasoning support from an OpenAI-compatible
  * `/v1/models` row. codex-lb nests the Codex registry fields under `metadata`
  * (`supported_reasoning_levels: [{ effort }]`, `default_reasoning_level`);
- * other gateways may advertise the same fields top-level. Returns undefined
- * when the row says nothing usable about reasoning.
+ * other gateways may advertise the same fields top-level. A gateway that serves
+ * a reduced tier set can also name where an unserved request lands
+ * (`reasoning_effort_map: { medium: "high" }`) and state that reasoning cannot
+ * be turned off (`reasoning_required: true`). Returns undefined when the row
+ * says nothing usable about reasoning.
  *
  * An explicit non-reasoning declaration is reported as `{ kind: "none" }`
  * rather than `undefined`: the caller must be able to tell "this endpoint says
@@ -977,6 +991,8 @@ function extractAdvertisedReasoning(item: {
 	supported_reasoning_levels?: unknown;
 	default_reasoning_level?: unknown;
 	reasoning?: unknown;
+	reasoning_effort_map?: unknown;
+	reasoning_required?: unknown;
 }): AdvertisedReasoning | undefined {
 	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
 	// codex-lb nests every reasoning field under `metadata`; read the denial from
@@ -988,6 +1004,7 @@ function extractAdvertisedReasoning(item: {
 	if (efforts === undefined) return undefined;
 	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
 	const defaultLevel = advertisedReasoningEffort(rawDefault);
+	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
 	return {
 		kind: "ladder",
 		efforts,
@@ -997,6 +1014,10 @@ function extractAdvertisedReasoning(item: {
 		// clamped to the lowest tier.
 		acceptsNone: advisoryEffortEntries(raw).includes("none"),
 		...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
+		...(effortMap !== undefined ? { effortMap } : {}),
+		// The endpoint rejects disabled or omitted thinking, so a thinking-off
+		// request must clamp to a real tier instead of dropping the field.
+		...((metadata?.reasoning_required ?? item.reasoning_required) === true ? { requiresEffort: true } : {}),
 	};
 }
 
@@ -1007,6 +1028,25 @@ function advisoryEffortEntries(value: unknown): string[] {
 		const raw = isRecord(entry) ? entry.effort : entry;
 		return typeof raw === "string" ? [raw.toLowerCase()] : [];
 	});
+}
+
+/**
+ * Read a row's requested-effort → served-effort aliases. A gateway that serves a
+ * reduced tier set states where an unsupported request lands (`{"medium":
+ * "high"}` for a route that only accepts low/high/max), which is news neither
+ * the ladder nor numeric clamping can produce. Both sides go through the ladder
+ * vocabulary: `none` is the off-switch rather than a tier, and `minimal`/`ultra`
+ * have no omp equivalent, so entries naming them are dropped.
+ */
+function extractReasoningEffortMap(value: unknown): Partial<Record<Effort, Effort>> | undefined {
+	if (!isRecord(value)) return undefined;
+	const effortMap: Partial<Record<Effort, Effort>> = {};
+	for (const [rawRequested, rawServed] of Object.entries(value)) {
+		const requested = advertisedReasoningEffort(rawRequested);
+		const served = advertisedReasoningEffort(rawServed);
+		if (requested !== undefined && served !== undefined) effortMap[requested] = served;
+	}
+	return Object.keys(effortMap).length > 0 ? effortMap : undefined;
 }
 
 /**
@@ -1048,7 +1088,19 @@ function withAdvertisedEfforts(
 		preferredDefault !== undefined && advertised.efforts.includes(preferredDefault)
 			? preferredDefault
 			: advertised.efforts[0];
-	const thinking = { mode: "effort" as const, efforts: advertised.efforts, defaultLevel };
+	// `effortMap` / `requiresEffort` travel with the ladder because they are also
+	// facts about this row's wire: the map says where an effort the endpoint does
+	// not serve lands (a route that only accepts low/high/max answers `medium` as
+	// `high`), and the flag says the endpoint rejects a thinking-off request.
+	// `clampThinkingLevelForModel` reads the map before clamping by distance, and
+	// the stream honours the flag.
+	const thinking: ThinkingConfig = {
+		mode: "effort",
+		efforts: advertised.efforts,
+		defaultLevel,
+		...(advertised.effortMap !== undefined ? { effortMap: advertised.effortMap } : {}),
+		...(advertised.requiresEffort ? { requiresEffort: true } : {}),
+	};
 	if (isAnthropic) {
 		const mode = resolveModelPolicy({ ...spec, reasoning: true }).thinking?.mode ?? "budget";
 		return { ...spec, reasoning: true, thinking: { ...thinking, mode } };
@@ -1157,6 +1209,8 @@ export async function discoverOpenAIModelsList(
 						supported_reasoning_levels?: unknown;
 						default_reasoning_level?: unknown;
 						reasoning?: unknown;
+						reasoning_effort_map?: unknown;
+						reasoning_required?: unknown;
 					}>;
 				};
 			}),
@@ -1407,6 +1461,8 @@ export async function discoverProxyModels(
 					supported_reasoning_levels?: unknown;
 					default_reasoning_level?: unknown;
 					reasoning?: unknown;
+					reasoning_effort_map?: unknown;
+					reasoning_required?: unknown;
 				}>;
 			};
 		});

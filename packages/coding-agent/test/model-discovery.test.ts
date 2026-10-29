@@ -13,6 +13,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	cursorModelManagerOptions,
 	resolveModelCacheProviderId,
@@ -3145,6 +3146,93 @@ describe("ModelRegistry runtime discovery", () => {
 			{ apiKey: "TEST_KEY", fetch: chatFetch, reasoning: "high" },
 		).result();
 		expect(requestPayload?.reasoning_effort).toBe("high");
+	});
+
+	test("openai-models-list discovery carries advertised effort aliases and mandatory reasoning", async () => {
+		writeRawModelsJson({
+			"example-gateway": {
+				baseUrl: "http://127.0.0.1:9995",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		// `example-route` serves only low/high/max. Its row names the tier an
+		// unsupported request lands on (`reasoning_effort_map`) and states that
+		// reasoning cannot be turned off (`reasoning_required`); an unknown alias
+		// key must not survive into the model. `acme-plain-think` advertises a
+		// ladder and nothing else, so it must keep the plain ladder shape.
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9995/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "example-route",
+								object: "model",
+								owned_by: "example-gateway",
+								supported_reasoning_levels: ["low", "high", "max"],
+								default_reasoning_level: "high",
+								reasoning_effort_map: { medium: "high", xhigh: "max", turbo: "low" },
+								reasoning_required: true,
+							},
+							{
+								id: "acme-plain-think",
+								object: "model",
+								owned_by: "example-gateway",
+								supported_reasoning_levels: ["low", "high"],
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("example-gateway", "example-route");
+		expect(model?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.High,
+			effortMap: { medium: "high", xhigh: "max" },
+			requiresEffort: true,
+		});
+		const plain = registry.find("example-gateway", "acme-plain-think");
+		expect(plain?.thinking).toEqual({ mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.Low });
+
+		if (!model || model.api !== "openai-completions") {
+			throw new Error("expected the discovered model to use OpenAI Completions");
+		}
+		// The alias outranks clamping by distance: `medium` reaches the wire as
+		// `high`, the tier the row says it lands on, not as `low`.
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.High);
+		const requestPayloads: (Record<string, unknown> | undefined)[] = [];
+		const chatFetch: FetchImpl = async (_input, init) => {
+			requestPayloads.push(JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>);
+			const events = [
+				{ id: "chatcmpl-alias-fixture", choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }] },
+				{ id: "chatcmpl-alias-fixture", choices: [{ index: 0, finish_reason: "stop", delta: {} }] },
+			];
+			const body = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
+			return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+		};
+		// The endpoint cannot disable reasoning, so a thinking-off request still
+		// carries a tier instead of omitting `reasoning_effort`.
+		await streamOpenAICompletions(
+			model as Model<"openai-completions">,
+			{ messages: [{ role: "user", content: "Reply with exactly OK.", timestamp: Date.now() }] },
+			{ apiKey: "TEST_KEY", fetch: chatFetch, reasoning: Effort.Medium },
+		).result();
+		await streamOpenAICompletions(
+			model as Model<"openai-completions">,
+			{ messages: [{ role: "user", content: "Reply with exactly OK.", timestamp: Date.now() }] },
+			{ apiKey: "TEST_KEY", fetch: chatFetch, disableReasoning: true },
+		).result();
+		expect(requestPayloads[0]?.reasoning_effort).toBe("high");
+		expect(requestPayloads[1]?.reasoning_effort).toBe("low");
 	});
 
 	test("openai-models-list discovery reads server-advertised input modalities for ids absent from the catalog", async () => {
