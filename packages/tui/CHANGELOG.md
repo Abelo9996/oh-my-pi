@@ -15,6 +15,7 @@
 - `setExtensionLinks()` makes markdown draw links of registered schemes as a dotted-underlined label without URL suffix or terminal hyperlink; `Composer.viewportLinkAt()` and `Composer.startLinkHints()` / `typeLinkHint()` pick them by click or keyboard tag (new `app.links.hint` keybinding, Alt+O) ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 ### Changed
 
+- Rewind selector now automatically skips turns that render no output
 - Improved view placement for JSON trees when output lines are column‑capped
 - On a terminal expected to speak TSP, a `deferInput` start delivers plain typing (printable text, Backspace) to the focused component live; only the first other key and the keys after it wait for `TUI.releaseHeldInput()`
 - In Tern builds that support it, JSON tool results, MCP arguments, eval JSON output and structured subagent results appear in Tern's own interactive JSON viewer: small objects and arrays show whole on one line, larger ones fold to a one-line preview you click to expand
