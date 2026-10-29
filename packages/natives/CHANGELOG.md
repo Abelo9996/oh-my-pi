@@ -26,6 +26,7 @@
 - Fixed cancelled directory searches leaving filesystem-provider requests running during walk startup
 - Fixed the bash tool's built-in commands (`cat`, `grep`, `head`, `wc`, `read`, `mapfile`, …) hanging on macOS at the end of a FIFO's input until the command was aborted; `read -t` now returns at EOF instead of waiting out its timeout
 - Fixed `wrapTextWithAnsi` continuing a wrapped styled underline (`4:3`, `4:4`) as a background colour, `4:0` setting background `40`, and colon-form colours (`38:2::r:g:b`) being dropped ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+- Fixed native audio playback clicking when its queue runs dry mid-waveform; output fades to silence and back in over 5 ms ([#17295](https://github.com/can1357/oh-my-pi/issues/17295))
 
 ## [18.13.3] - 2026-10-28
 
