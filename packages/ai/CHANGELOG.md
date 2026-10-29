@@ -7,6 +7,8 @@
 - Fixed a cancelled request whose OAuth credential was mid-refresh killing the whole session with `[Unhandled Rejection] AbortError: OAuth refresh ownership aborted by caller` ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 - Fixed requests that joined an OAuth refresh started by an already-cancelled request failing with that request's cancellation instead of getting the refreshed credential ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 - Fixed Cursor models losing omp's system prompt (context files, skills, rules) from the second turn on, or whenever earlier messages precede the active one ([#17059](https://github.com/can1357/oh-my-pi/issues/17059), [#17325](https://github.com/can1357/oh-my-pi/pull/17325) by [@robfeldmann](https://github.com/robfeldmann))
+- Fixed pi-native turns whose model thinks for over ~5 minutes before its first event being cut by Bun's fetch timeout or an intermediate proxy; the gateway now sends SSE keepalives and the client honors the configured first-event timeout ([#17363](https://github.com/can1357/oh-my-pi/issues/17363))
+- Fixed pi-native clients crashing with `TypeError: undefined is not an object (evaluating 'event.error.stopReason')` when the auth-gateway reports a mid-stream upstream failure ([#17363](https://github.com/can1357/oh-my-pi/issues/17363))
 
 ## [18.13.3] - 2026-10-28
 
