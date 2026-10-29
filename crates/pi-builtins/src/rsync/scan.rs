@@ -43,7 +43,7 @@ use crate::rsync::checksum;
 use crate::rsync::consts::{
 	CF_SAFE_FLIST, CF_SYMLINK_ICONV, FLAG_CONTENT_DIR, FLAG_DIVERT_DIRS, FLAG_DUPLICATE,
 	FLAG_IMPLIED_DIR, FLAG_LENGTH64, FLAG_MOD_NSEC, FLAG_MOUNT_DIR, FLAG_TOP_DIR,
-	ACCESSPERMS, IOERR_GENERAL, IOERR_VANISHED, MAX_WIRE_NSEC, MAXPATHLEN, MIN_FILECNT_LOOKAHEAD,
+	ACCESSPERMS, IOERR_GENERAL, IOERR_VANISHED, MAX_WIRE_NSEC, MAXPATHLEN,
 	MSG_IO_ERROR, NDX_FLIST_EOF,
 	NDX_FLIST_OFFSET, S_IFREG, mode_is_device, mode_is_dir, mode_is_lnk, mode_is_reg,
 	mode_is_special,
@@ -1988,11 +1988,6 @@ impl Scanner {
 	}
 
 	// ----- extra lists --------------------------------------------------------
-
-	/// send_extra_file_list: next inc-recursion directory segment(s); NDX_FLIST_EOF when done.
-	pub(crate) fn send_extra(&mut self, out: &MuxWriter, flists: &Flists) -> Result<(), RsyncError> {
-		self.send_extra_at_least(out, flists, MIN_FILECNT_LOOKAHEAD)
-	}
 
 	/// send_extra_file_list with upstream's `at_least` (negative: one more than queued).
 	pub(crate) fn send_extra_at_least(

@@ -23,13 +23,12 @@ pub(crate) enum Info {
 }
 
 /// `--debug` flags this implementation reports on; the discriminant is the flag's position
-/// in upstream's table (`DEBUG_WORDS`). CHDIR, EXIT, and HASH parse and show in the help but
-/// no code path emits their messages.
+/// in upstream's table (`DEBUG_WORDS`). BIND, CHDIR, EXIT, HASH, and IO parse and show in the
+/// help but no code path emits their messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Debug {
 	Acl = 0,
 	Backup = 1,
-	Bind = 2,
 	Connect = 4,
 	Cmd = 5,
 	Del = 6,
@@ -41,7 +40,6 @@ pub(crate) enum Debug {
 	Genr = 13,
 	Hlink = 15,
 	Iconv = 16,
-	Io = 17,
 	Nstr = 18,
 	Own = 19,
 	Proto = 20,
@@ -580,9 +578,9 @@ Options added at each level of verbosity:
 		assert_eq!(levels.info(Info::Del), 0);
 		levels.apply_debug("ALL3").unwrap();
 		assert_eq!(levels.debug(Debug::Time), 3);
-		levels.apply_debug("none,io2").unwrap();
+		levels.apply_debug("none,proto2").unwrap();
 		assert_eq!(levels.debug(Debug::Time), 0);
-		assert_eq!(levels.debug(Debug::Io), 2);
+		assert_eq!(levels.debug(Debug::Proto), 2);
 		// Overflowing digit strings clamp to the maximum level.
 		levels.apply_info("misc99999999999999999999").unwrap();
 		assert_eq!(levels.info(Info::Misc), 4);
@@ -598,10 +596,10 @@ Options added at each level of verbosity:
 		assert_eq!(levels.info(Info::Misc), 2);
 		assert_eq!(levels.info(Info::Nonreg), 1);
 		// -vv is the first level that adds debug words.
-		assert_eq!(levels.debug(Debug::Bind), 1);
-		assert_eq!(OutLevels::from_verbose(1).debug(Debug::Bind), 0);
+		assert_eq!(levels.debug(Debug::Cmd), 1);
+		assert_eq!(OutLevels::from_verbose(1).debug(Debug::Cmd), 0);
 		let v3 = OutLevels::from_verbose(3);
-		assert_eq!(v3.debug(Debug::Bind), 1);
+		assert_eq!(v3.debug(Debug::Cmd), 1);
 		assert_eq!(v3.debug(Debug::Connect), 2);
 		assert_eq!(OutLevels::from_verbose(0).info(Info::Nonreg), 1);
 		assert_eq!(OutLevels::from_verbose(0).info(Info::Name), 0);
@@ -610,13 +608,13 @@ Options added at each level of verbosity:
 	#[test]
 	fn negate_round_trips() {
 		let mut levels = OutLevels::from_verbose(2);
-		levels.apply_debug("io3").unwrap();
+		levels.apply_debug("proto3").unwrap();
 		levels.negate();
 		assert_eq!(levels.info(Info::Name), 0);
-		assert_eq!(levels.debug(Debug::Io), 0);
+		assert_eq!(levels.debug(Debug::Proto), 0);
 		levels.negate();
 		assert_eq!(levels.info(Info::Name), 2);
-		assert_eq!(levels.debug(Debug::Io), 3);
+		assert_eq!(levels.debug(Debug::Proto), 3);
 	}
 
 	#[test]

@@ -4,7 +4,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use crate::rsync::consts::{CF_INC_RECURSE, CF_VARINT_FLIST_FLAGS, FLAG_IMPLIED_DIR};
+use crate::rsync::consts::{
+	CF_INC_RECURSE, CF_VARINT_FLIST_FLAGS, FLAG_IMPLIED_DIR, MIN_FILECNT_LOOKAHEAD,
+};
 use crate::rsync::filter::FilterConfig;
 use crate::rsync::mux::{IoCounters, MuxReader, ReadConfig, WriteConfig};
 use crate::rsync::options::Options;
@@ -101,7 +103,7 @@ fn scan_with(
 	let flists = Flists::new();
 	scanner.send_initial(&out, &flists).unwrap();
 	while !flists.is_eof() {
-		scanner.send_extra(&out, &flists).unwrap();
+		scanner.send_extra_at_least(&out, &flists, MIN_FILECNT_LOOKAHEAD).unwrap();
 	}
 	let mut w = out.clone();
 	w.flush().unwrap();
