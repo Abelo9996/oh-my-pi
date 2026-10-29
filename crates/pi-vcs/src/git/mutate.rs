@@ -458,22 +458,25 @@ impl GitRepo {
 		Ok(())
 	}
 
-	/// Record the checkout's uncommitted changes to tracked files as a stash
-	/// commit on `reference`'s reflog, leaving the working tree, the index, and
-	/// the stash list as they are. `None` when nothing is uncommitted.
-	pub fn save_uncommitted(&self, reference: &str, message: &str) -> Result<Option<String>> {
+	/// Write the checkout's uncommitted changes to tracked files as a stash
+	/// commit, leaving the working tree, the index, and the stash list as they
+	/// are. `None` when nothing is uncommitted. Git cannot record unmerged
+	/// entries, so this fails mid-conflict.
+	pub fn stash_create(&self) -> Result<Option<String>> {
 		let create = ["stash", "create"].map(str::to_owned);
 		let created = super::cli::run_sync(self.root(), &create, super::cli::COMMAND_TIMEOUT)?
 			.into_checked(&create)?;
 		let id = created.stdout.trim();
-		if id.is_empty() {
-			return Ok(None);
-		}
+		Ok((!id.is_empty()).then(|| id.to_owned()))
+	}
+
+	/// Point `reference` at `id`, recording `message` on its reflog.
+	pub fn record_ref(&self, reference: &str, id: &str, message: &str) -> Result<()> {
 		let update =
 			["update-ref", "--create-reflog", "-m", message, reference, id].map(str::to_owned);
 		super::cli::run_sync(self.root(), &update, super::cli::COMMAND_TIMEOUT)?
 			.into_checked(&update)?;
-		Ok(Some(id.to_owned()))
+		Ok(())
 	}
 
 	/// Reset HEAD, index, and optionally the worktree to a target commit.

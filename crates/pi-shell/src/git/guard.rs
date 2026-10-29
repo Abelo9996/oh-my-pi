@@ -8,8 +8,9 @@
 //! `git` the shell dispatches — after expansion, in the directory it actually
 //! runs in — by whose checkout that is.
 //!
-//! A linked worktree (`git worktree add`), and a submodule inside one, belong
-//! to one line of work. There every command runs, except that `stash pop`,
+//! A linked worktree (`git worktree add`) of a repository with a main checkout,
+//! and a submodule inside one, belong to one line of work. There every
+//! command runs, except that `stash pop`,
 //! `apply`, `drop`, `branch`, and `clear` refuse entries saved on another
 //! branch or a detached HEAD, since every worktree shares one stash list; and
 //! a command that discards uncommitted changes first records them on
@@ -87,7 +88,17 @@ impl Review {
 					.env()
 					.iter_exported()
 					.any(|(name, _)| is_git_repo_location_var(name)),
-			recurse:    recurse_option(invocation.sub, invocation.args).or(invocation.recurse),
+			// Configuration passed through the environment (`GIT_CONFIG_COUNT`)
+			// may turn on `submodule.recurse`.
+			recurse:    recurse_option(invocation.sub, invocation.args)
+				.or(invocation.recurse)
+				.or_else(|| {
+					shell
+						.env()
+						.iter_exported()
+						.any(|(name, _)| name == "GIT_CONFIG_COUNT")
+						.then_some(true)
+				}),
 			command:    args.join(" "),
 		}))
 	}
@@ -159,12 +170,17 @@ impl Place {
 	}
 }
 
-/// Whether `repo`'s checkout belongs to one line of work: a linked worktree, or
-/// a submodule checked out inside one. Any other checkout may be shared.
+/// Whether `repo`'s checkout belongs to one line of work: a worktree linked to
+/// a repository that has a main checkout of its own, or a submodule checked
+/// out inside one. Any other checkout may be shared, including every worktree
+/// of a bare repository, where one of them is where a person works.
 fn is_private(repo: &GitRepo) -> bool {
 	let info = repo.info();
 	if repo.is_linked_worktree() {
-		return true;
+		return info
+			.common_dir
+			.file_name()
+			.is_some_and(|name| name == ".git");
 	}
 	// A submodule's `.git` is a file pointing into its superproject's.
 	info.git_entry_path.is_file()
@@ -177,10 +193,10 @@ fn is_private(repo: &GitRepo) -> bool {
 /// using, if it is.
 fn in_shared(place: &Place, sub: Sub, verdict: Verdict, dir: &Path) -> Option<Refusal> {
 	let repo = match place {
-		Place::Shared(repo) | Place::Private(repo) => Some(repo),
+		Place::Shared(repo) => Some(repo),
 		// The repository found from the directory is not the one git changes.
-		Place::Redirected => return (verdict != Verdict::Allow).then_some(Refusal::Redirected(sub)),
-		Place::Unreadable | Place::Outside => None,
+		Place::Redirected => return Some(Refusal::Redirected(sub)),
+		Place::Unreadable | Place::Outside | Place::Private(_) => None,
 	};
 	match verdict {
 		Verdict::Allow => None,
@@ -213,8 +229,8 @@ fn in_private(repo: &GitRepo, sub: Sub, verdict: Verdict, site: &Site) -> Decisi
 			.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message())),
 		Verdict::Stash(Stash::Clear) => foreign_stash(repo, "clear", None)
 			.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message())),
-		// `--soft` keeps the index and working tree, and `--keep` stops before
-		// it would overwrite a change.
+		// `--soft` keeps the index and working tree. `--keep` keeps working-tree
+		// changes but can drop staged ones, so it saves first.
 		Verdict::ResetTo(_, true) => Decision::Run,
 		Verdict::ResetTo(_, false) | Verdict::Destructive => save_then_run(repo, sub, site, false),
 		Verdict::ConflictOnly => save_then_run(repo, sub, site, true),
@@ -244,29 +260,38 @@ fn outside_conflict(repo: Option<&GitRepo>, sub: Sub) -> Option<Refusal> {
 }
 
 /// Records `repo`'s uncommitted changes on [`DISCARDED_REF`] before the command
-/// at `site` discards them. When they cannot be recorded, a `targeted` command
+/// at `site` discards them. When git cannot write them, a `targeted` command
 /// still runs mid-operation, where it picks a conflict side: git cannot record
 /// unmerged entries.
 fn save_then_run(repo: &GitRepo, sub: Sub, site: &Site, targeted: bool) -> Decision {
-	// The record holds this repository's changes, not its submodules'.
+	// The record holds this repository's changes, not its submodules'. A
+	// submodule's git directory outlives the `.gitmodules` a command restores.
+	let info = repo.info();
 	if recurses(repo, site.recurse)
-		&& !matches!(repo.submodule_paths(), Ok(paths) if paths.is_empty())
+		&& (!matches!(repo.submodule_paths(), Ok(paths) if paths.is_empty())
+			|| info.git_dir.join("modules").is_dir()
+			|| info.common_dir.join("modules").is_dir())
 	{
 		return Decision::Refuse(Refusal::Recursive(sub).message());
 	}
-	match repo.save_uncommitted(DISCARDED_REF, &format!("before git {}", site.command)) {
-		Ok(None) => Decision::Run,
-		Ok(Some(id)) => {
-			let short = repo.short_id(&id).unwrap_or(id);
-			Decision::RunNoted(format!(
-				"git {}: saved your uncommitted changes as {short} on {DISCARDED_REF} first; git \
-				 stash apply --index {short} brings them back.\n",
-				sub.name()
-			))
+	let id = match repo.stash_create() {
+		Ok(None) => return Decision::Run,
+		Ok(Some(id)) => id,
+		Err(_) if targeted && repo.operation_in_progress().unwrap_or(false) => {
+			return Decision::Run;
 		},
-		Err(_) if targeted && repo.operation_in_progress().unwrap_or(false) => Decision::Run,
-		Err(err) => Decision::Refuse(Refusal::Unsaved(sub, err.to_string()).message()),
+		Err(err) => return Decision::Refuse(Refusal::Unsaved(sub, err.to_string()).message()),
+	};
+	// Once the changes are written, a failure to keep them is never exempt.
+	if let Err(err) = repo.record_ref(DISCARDED_REF, &id, &format!("before git {}", site.command)) {
+		return Decision::Refuse(Refusal::Unsaved(sub, err.to_string()).message());
 	}
+	let short = repo.short_id(&id).unwrap_or(id);
+	Decision::RunNoted(format!(
+		"git {}: saved your uncommitted changes as {short} on {DISCARDED_REF} first; git stash \
+		 apply --index {short} brings them back.\n",
+		sub.name()
+	))
 }
 
 /// Whether git recurses into submodules: as `option` says when given, else as
@@ -570,7 +595,22 @@ impl<'a> Invocation<'a> {
 					}
 					at += 1;
 				},
-				"--config-env" | "--namespace" | "--super-prefix" | "--attr-source" => at += 1,
+				"--config-env" => {
+					// Its value comes from the environment; assume it turns
+					// recursion on.
+					let setting = args.get(at)?.to_ascii_lowercase();
+					if setting.starts_with("submodule.recurse=") {
+						recurse = Some(true);
+					}
+					at += 1;
+				},
+				arg if arg
+					.to_ascii_lowercase()
+					.starts_with("--config-env=submodule.recurse=") =>
+				{
+					recurse = Some(true);
+				},
+				"--namespace" | "--super-prefix" | "--attr-source" => at += 1,
 				arg if arg.starts_with("--git-dir=") || arg.starts_with("--work-tree=") => {
 					redirected = true;
 				},
@@ -663,8 +703,7 @@ enum Verdict {
 	/// Discards the working tree or index wholesale; refused even mid-conflict.
 	Destructive,
 	/// `reset` to this revision without a pathspec: moves HEAD unless it names
-	/// HEAD's commit. True for `--soft` and `--keep`, which discard no
-	/// uncommitted change.
+	/// HEAD's commit. True for `--soft`, which discards no uncommitted change.
 	ResetTo(String, bool),
 	/// Rewrites working-tree files; allowed only mid-conflict.
 	ConflictOnly,
@@ -747,8 +786,8 @@ fn classify_reset(args: &[Arg<'_>]) -> Verdict {
 	match operands[..] {
 		_ if mode == Some("hard") => Verdict::Destructive,
 		[rev] if !index_only && !matches!(rev, "HEAD" | "@") => {
-			// `--soft` and `--keep` discard no uncommitted change.
-			Verdict::ResetTo(rev.to_owned(), matches!(mode, Some("soft" | "keep")))
+			// `--soft` discards no uncommitted change.
+			Verdict::ResetTo(rev.to_owned(), mode == Some("soft"))
 		},
 		_ => Verdict::Allow,
 	}
@@ -1024,7 +1063,7 @@ mod tests {
 			("reset -p main", "Allow"),
 			("reset --pathspec-from-file list main", "Allow"),
 			("reset --soft main", "ResetTo(\"main\", true)"),
-			("reset --keep main", "ResetTo(\"main\", true)"),
+			("reset --keep main", "ResetTo(\"main\", false)"),
 			("reset --merge main", "ResetTo(\"main\", false)"),
 			("reset --soft --mixed main", "ResetTo(\"main\", false)"),
 			("reset main --", "ResetTo(\"main\", false)"),
@@ -1118,6 +1157,8 @@ mod tests {
 			("-c submodule.recurse reset --hard", Some(true)),
 			("-c submodule.recurse=true reset --hard --no-recurse", Some(false)),
 			("-c Submodule.Recurse=off restore tracked.txt", Some(false)),
+			("--config-env submodule.recurse=RECURSE reset --hard", Some(true)),
+			("--config-env=submodule.recurse=RECURSE reset --hard", Some(true)),
 		] {
 			let args: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
 			let invocation = Invocation::parse(&args).expect("guarded");
@@ -1435,6 +1476,15 @@ mod tests {
 		let (code, output) = guarded(&worktree, "git reset -q --hard --recurse-submodules").await;
 		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
 		assert!(output.contains("recurses into submodules"), "{output}");
+		// The submodule's git directory still counts once `.gitmodules` is gone.
+		std::fs::remove_file(worktree.join(".gitmodules")).expect("remove .gitmodules");
+		let (code, output) = guarded(&worktree, "git reset -q --hard --recurse-submodules").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
+		git(&worktree, &["checkout", "-q", "--", ".gitmodules"]);
+		let config = "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=submodule.recurse \
+		              GIT_CONFIG_VALUE_0=true; git reset -q --hard";
+		let (code, output) = guarded(&worktree, config).await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
 		git(&repo, &["config", "submodule.recurse", "true"]);
 		let (code, output) = guarded(&worktree, "git reset -q --hard").await;
 		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
@@ -1449,6 +1499,49 @@ mod tests {
 			(read(&worktree), read(&worktree.join("lib"))),
 			("tracked\n".to_owned(), "mine\n".to_owned())
 		);
+	}
+
+	/// Every worktree of a bare repository is linked, and one of them is where
+	/// a person works: none counts as one agent's.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn worktrees_of_a_bare_repository_stay_guarded() {
+		let (_temp, repo) = fixture();
+		let parent = repo.parent().expect("fixture parent").to_owned();
+		let (bare, worktree) = (parent.join("bare.git"), parent.join("main"));
+		git(&parent, &["clone", "-q", "--bare", &repo.to_string_lossy(), "bare.git"]);
+		git(&bare, &["worktree", "add", "-q", &worktree.to_string_lossy(), "main"]);
+		std::fs::write(worktree.join("tracked.txt"), "mine\n").expect("edit");
+		let (code, output) = guarded(&worktree, "git checkout tracked.txt").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
+		assert!(output.contains("git worktree add"), "{output}");
+		assert_eq!(read(&worktree), "mine\n");
+	}
+
+	/// Mid-merge a path restore runs without a save only when git cannot
+	/// write one; a save it wrote but could not keep refuses the command.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_save_that_cannot_be_kept_refuses_even_mid_merge() {
+		let (_temp, repo) = fixture();
+		let parent = repo.parent().expect("fixture parent").to_owned();
+		let worktree = parent.join("wt");
+		git(&repo, &["checkout", "-qb", "side"]);
+		std::fs::write(repo.join("side.txt"), "side\n").expect("write side");
+		git(&repo, &["add", "side.txt"]);
+		git(&repo, &["commit", "-qm", "side"]);
+		git(&repo, &["checkout", "-q", "main"]);
+		git(&repo, &["worktree", "add", "-q", "-b", "topic", &worktree.to_string_lossy()]);
+		git(&worktree, &["merge", "-q", "--no-commit", "--no-ff", "side"]);
+		std::fs::write(worktree.join("tracked.txt"), "mine\n").expect("edit");
+		let lock = repo.join(".git/refs/omp/discarded.lock");
+		std::fs::create_dir_all(lock.parent().expect("refs/omp")).expect("refs/omp");
+		std::fs::write(&lock, "").expect("stale lock");
+
+		let (code, output) = guarded(&worktree, "git restore tracked.txt").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
+		assert!(output.contains("saving them first failed"), "{output}");
+		assert_eq!(read(&worktree), "mine\n");
 	}
 
 	/// Every worktree shares one stash list: a worktree takes back only the
