@@ -3,7 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } fro
 import * as natives from "@oh-my-pi/pi-natives";
 import { FigureMarkdown } from "@oh-my-pi/pi-tui/chat/figure-markdown";
 import { SvgFigure } from "@oh-my-pi/pi-tui/chat/svg-figure";
-import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
+import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { fencedCode, Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
@@ -152,6 +152,52 @@ describe("SvgFigure", () => {
 		expect(shown.box).toBe(shown.raster);
 	});
 
+	it("keeps a settled SIXEL visible during terminal-height shrink without an explicit ceiling", async () => {
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const encode = spyOn(natives, "encodeSixelAsync");
+		const rasterize = natives.rasterizeSvg;
+		const replacement = Promise.withResolvers<void>();
+		let changed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({ onChange: () => changed.resolve() });
+		svg.update(LANDSCAPE_SVG, true);
+		try {
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: 40 });
+			svg.render(76);
+			await changed.promise;
+			svg.render(76);
+			await encode.mock.results.at(-1)?.value;
+			const first = svg.render(76);
+			expect(first.at(-1)).toMatch(/\x1bP[\d;]*q/);
+			expect(first.length).toBeGreaterThan(9);
+
+			spyOn(natives, "rasterizeSvg").mockImplementationOnce(async (...args) => {
+				const png = await rasterize(...args);
+				await replacement.promise;
+				return png;
+			});
+			changed = Promise.withResolvers<void>();
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: 12 });
+			const pending = svg.render(76);
+			expect(pending).toBe(first);
+			expect(pending.at(-1)).toMatch(/\x1bP[\d;]*q/);
+			expect(encode).toHaveBeenCalledTimes(1);
+
+			replacement.resolve();
+			await changed.promise;
+			svg.render(76);
+			await encode.mock.results.at(-1)?.value;
+			const drawn = svg.render(76);
+			expect(drawn.length).toBeLessThanOrEqual(9);
+			expect(drawn.at(-1)).toMatch(/\x1bP[\d;]*q/);
+		} finally {
+			replacement.resolve();
+			svg.dispose();
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
 	it("reuses settled figure Markdown rows for container memoization and updates them after resizing", async () => {
 		let maxRows = 4;
 		let landed = Promise.withResolvers<void>();
@@ -209,10 +255,11 @@ describe("SvgFigure", () => {
 	});
 
 	it.each(["row callback", "setter"] as const)(
-		"keeps an already drawn SVG within a smaller %s bound while its raster is replaced",
+		"fits an already drawn SVG as a %s bound shrinks and grows",
 		async bound => {
 			setTerminalImageProtocol(ImageProtocol.Sixel);
 			const encoded = spyOn(natives, "encodeSixelAsync");
+			const encodeSync = spyOn(natives, "encodeSixel");
 			const budget = new ImageBudget(1);
 			let maxRows = 12;
 			let landed = Promise.withResolvers<void>();
@@ -246,12 +293,13 @@ describe("SvgFigure", () => {
 				if (bound === "setter") svg.setMaxRows(maxRows);
 				const pending = render();
 				expect(pending.length).toBeLessThanOrEqual(maxRows);
+				expect(encodeSync).not.toHaveBeenCalled();
 				expect(encoded.mock.calls.at(-1)?.[2]).toBeLessThanOrEqual(maxRows * CELL.heightPx);
 				await encoded.mock.results.at(-1)?.value;
 				await landed.promise;
 				const replacing = render();
 				expect(replacing.length).toBeLessThanOrEqual(maxRows);
-				expect(replacing.at(-1)).toMatch(/\x1bP[\d;]*q/);
+				expect(encodeSync).not.toHaveBeenCalled();
 				await encoded.mock.results.at(-1)?.value;
 				const drawn = render();
 				expect(drawn.length).toBeLessThanOrEqual(maxRows);
@@ -259,11 +307,84 @@ describe("SvgFigure", () => {
 				const raster = /"\d+;\d+;(\d+);(\d+)/.exec(drawn.join("\n"));
 				expect(raster).not.toBeNull();
 				expect(Math.ceil(Number(raster![2]) / CELL.heightPx)).toBeLessThanOrEqual(maxRows);
+				expect(encodeSync).not.toHaveBeenCalled();
+
+				landed = Promise.withResolvers<void>();
+				maxRows = 12;
+				if (bound === "setter") svg.setMaxRows(maxRows);
+				expect(render().length).toBeLessThanOrEqual(maxRows);
+				await landed.promise;
+				render();
+				await encoded.mock.results.at(-1)?.value;
+				const expanded = render();
+				expect(expanded.length).toBeGreaterThan(4);
+				expect(expanded.length).toBeLessThanOrEqual(maxRows);
+				expect(expanded.at(-1)).toMatch(/\x1bP[\d;]*q/);
+				expect(encodeSync).not.toHaveBeenCalled();
 			} finally {
 				svg.dispose();
 			}
 		},
 	);
+
+	it("retains a demoted SVG's text label within an explicitly smaller ceiling", async () => {
+		const budget = new ImageBudget(1);
+		const landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({ budget, maxRows: 12, onChange: () => landed.resolve() });
+		const newer = new Image(
+			"AA==",
+			"image/png",
+			{ fallbackColor: text => text },
+			{ budget, imageKey: "newer", maxHeightCells: 1 },
+			{ widthPx: CELL.widthPx, heightPx: CELL.heightPx },
+		);
+		svg.update(LANDSCAPE_SVG, true);
+		try {
+			svg.render(76);
+			await landed.promise;
+			budget.beginPass();
+			expect(svg.render(76)).toHaveLength(12);
+			budget.endPass();
+			svg.setMaxRows(2);
+			budget.beginPass();
+			svg.render(76);
+			newer.render(76);
+			expect(budget.endPass()).toBe(true);
+
+			budget.beginPass();
+			const demoted = svg.render(76);
+			newer.render(76);
+			budget.endPass();
+			expect(demoted).toHaveLength(2);
+			expect(demoted.at(-1)).toContain("[Image:");
+			expect(demoted.some(row => TERMINAL.isImageLine(row))).toBe(false);
+			budget.beginPass();
+			expect(svg.render(76)).toBe(demoted);
+			newer.render(76);
+			budget.endPass();
+		} finally {
+			svg.dispose();
+		}
+	});
+
+	it("hides a SIXEL graphic that cannot fit a complete band within the explicit ceiling", async () => {
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		setCellDimensions({ widthPx: 16, heightPx: 4 });
+		const encoded = spyOn(natives, "encodeSixelAsync");
+		const landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({ maxRows: 1, onChange: () => landed.resolve() });
+		svg.update(LANDSCAPE_SVG, true);
+		try {
+			svg.render(76);
+			await landed.promise;
+			svg.render(76);
+			await encoded.mock.results.at(-1)?.value;
+			expect(svg.render(76)).toEqual([]);
+			expect(svg.pending).toBe(false);
+		} finally {
+			svg.dispose();
+		}
+	});
 
 	it.each(["row callback", "setter"] as const)(
 		"hides placeholders and existing images at zero rows through a %s, then draws when room returns",

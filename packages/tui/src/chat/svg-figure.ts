@@ -2,7 +2,8 @@
  * A ```svg fence drawn as an inline terminal image. The source is rasterized
  * off the JS thread and shown through {@link Image}; while the fence streams,
  * each throttled revision repairs the partial source and replaces the
- * previous raster, which stays on screen until the next one lands.
+ * previous raster. An explicit row-ceiling change may temporarily reserve
+ * blank rows while the newly fitted image is encoded off the JS thread.
  *
  * Sizing is natural rather than preview-capped: one terminal row spans
  * {@link UNITS_PER_ROW} SVG user units, so `font-size="14"` text lands near
@@ -16,7 +17,7 @@ import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { hexToOklch, hueDistance, logger, oklchCusp, oklchToHex } from "@oh-my-pi/pi-utils";
 import { Image, type ImageBudget, imageMaxColumns } from "../components/image";
 import { fencedCode, type Markdown } from "../components/markdown";
-import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
+import { type CellDimensions, getCellDimensions, getImageDimensions, TERMINAL } from "../terminal-capabilities";
 import { ensureThemeSync, getThemeEpoch, type ThemeColor, theme } from "../theme";
 import type { Component } from "../tui";
 import { closePartialSvg, prepareSvg } from "./svg-source";
@@ -149,6 +150,12 @@ interface Attempt {
 	final: boolean;
 }
 
+interface ClippedRows {
+	sourceRows: readonly string[];
+	maxRows: number;
+	rows: readonly string[];
+}
+
 let nextFigureId = 0;
 
 /** Cells a figure rendered at `width` may fill: the image's width, the caller's row ceiling (or a share of the viewport), and the raster edge cap. */
@@ -183,14 +190,12 @@ export class SvgFigure implements Component {
 	#disposed = false;
 	/** Last render width; rasters wait for the first render to know their room. */
 	#width: number | undefined;
-	#image: { raster: Raster; component: Image } | undefined;
-	/** Visible image retained while a resize replacement's SIXEL encode is pending. */
-	#previousImage: Image | undefined;
+	#image: { raster: Raster; component: Image; clipped?: ClippedRows } | undefined;
 	#fallback:
 		| {
 				source: string;
 				md: Markdown;
-				clipped?: { sourceRows: readonly string[]; maxRows: number; rows: readonly string[] };
+				clipped?: ClippedRows;
 		  }
 		| undefined;
 	#placeholder: readonly string[] | undefined;
@@ -251,16 +256,25 @@ export class SvgFigure implements Component {
 			this.#placeholder ??= [` ${theme.fg("dim", "Drawing SVG…")}`];
 			return this.#placeholder;
 		}
-		const image = this.#imageFor(raster, limits.rows);
-		const rows = image.renderWithPrevious(width, this.#previousImage);
-		if (!image.pending) this.#previousImage = undefined;
-		return rows.length <= limits.rows ? rows : rows.slice(0, limits.rows);
+		// Viewport changes redraw the raster without resizing the visible image
+		// first. Only an explicit caller ceiling must apply before that redraw lands.
+		const image = this.#imageFor(raster, bound === undefined ? undefined : limits.rows);
+		const rows = image.render(width);
+		if (bound === undefined || rows.length <= limits.rows) return rows;
+		const current = this.#image!;
+		const cached = current.clipped;
+		if (cached?.sourceRows === rows && cached.maxRows === limits.rows) return cached.rows;
+		// A demoted image preserves its historical height for scrollback; retain
+		// its trailing text label inside an explicitly smaller figure. A graphic
+		// requiring more rows (e.g. a SIXEL band with sub-6px cells) cannot fit.
+		const clipped = rows.some(row => TERMINAL.isImageLine(row)) ? [] : rows.slice(-limits.rows);
+		current.clipped = { sourceRows: rows, maxRows: limits.rows, rows: clipped };
+		return clipped;
 	}
 
 	invalidate(): void {
 		this.#placeholder = undefined;
 		this.#image?.component.invalidate();
-		this.#previousImage?.invalidate();
 		// Rebuilt through the Markdown factory, which may carry a new theme.
 		this.#fallback = undefined;
 	}
@@ -405,16 +419,15 @@ export class SvgFigure implements Component {
 	 * cell size and room it was drawn for that box is its pixels exactly; a
 	 * raster outdated by a resize is scaled by {@link Image} until its redraw lands.
 	 */
-	#imageFor(raster: Raster, maxRows: number): Image {
+	#imageFor(raster: Raster, maxRows?: number): Image {
 		const current = this.#image;
 		const columns = raster.widthPx / raster.cell.widthPx;
-		const rows = Math.min(raster.heightPx / raster.cell.heightPx, maxRows);
+		const rasterRows = raster.heightPx / raster.cell.heightPx;
+		const rows = maxRows === undefined ? rasterRows : Math.min(rasterRows, maxRows);
 		if (current?.raster === raster) {
 			current.component.setMaxHeightCells(rows);
 			return current.component;
 		}
-		if (current?.raster.source === raster.source) this.#previousImage ??= current.component;
-		else this.#previousImage = undefined;
 		const component = new Image(
 			raster.data,
 			"image/png",

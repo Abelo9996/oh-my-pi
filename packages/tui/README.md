@@ -115,6 +115,8 @@ interface Component {
 
 `SvgFigure`, `FenceFigure`, `TableChartFigure`, and `FigureMarkdown` accept a `maxRows` option (a number or a callback returning a number or `undefined`) and expose `setMaxRows()` for resizing. Zero hides a figure; table charts include their leading separator in the limit. `FigureMarkdown` applies the limit to each child figure, so callers must reserve space for prose, headers, footers, and separators themselves. Overlay height is not forwarded automatically.
 
+An explicit ceiling takes effect immediately. In SIXEL terminals, resizing can temporarily show reserved rows while the fitted image is encoded off the JS thread, then repaint with the new image. Without an explicit ceiling, a terminal-height change keeps the old raster at its drawn size until the replacement raster lands.
+
 ## Built-in Components
 
 ### Composition

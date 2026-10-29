@@ -744,23 +744,16 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
-	/** Resize a mutable surface's image without discarding its settled SIXEL encode. */
+	/**
+	 * Resize a mutable surface's image. A changed SIXEL size reserves rows until
+	 * its off-thread encode lands; fallback height retains the tallest placement
+	 * because its rows may already be committed to native scrollback.
+	 */
 	setMaxHeightCells(maxHeightCells?: number): void {
 		if (this.#options.maxHeightCells === maxHeightCells) return;
 		this.#options.maxHeightCells = maxHeightCells;
-		this.#renderedGraphicRows = 0;
 		this.#native = undefined;
 		this.invalidate();
-	}
-
-	/** Whether the live render is waiting for its off-thread SIXEL encode. */
-	get pending(): boolean {
-		return (
-			TERMINAL.imageProtocol === ImageProtocol.Sixel &&
-			!this.#cachedSuppressed &&
-			this.#sixel !== undefined &&
-			this.#sixel.sequence === undefined
-		);
 	}
 
 	releaseRenderCaches(): void {
@@ -834,11 +827,6 @@ export class Image implements Component {
 	}
 
 	render(width: number): readonly string[] {
-		return this.renderWithPrevious(width);
-	}
-
-	/** Keep a previous raster visible while this image's SIXEL encode is pending. Both share one budget slot. */
-	renderWithPrevious(width: number, previous?: Image): readonly string[] {
 		const imageProtocol = TERMINAL.imageProtocol;
 		const hasProtocol = imageProtocol != null;
 		const cellDimensions = getCellDimensions();
@@ -851,7 +839,8 @@ export class Image implements Component {
 		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
 		// Only Kitty images with a budget id transmit their data separately from
 		// the placement; a pending re-transmit (after a purge or history clear)
-		// must rebuild the lines. SIXEL and iTerm2 carry the image inside the line
+		// must rebuild live graphics lines. Suppressed images render only text.
+		// SIXEL and iTerm2 carry the image inside the line
 		// itself and never register a transmit, so gating their cache on it would
 		// re-encode the full image on every render pass.
 		const imageId = this.#imageId;
@@ -869,7 +858,7 @@ export class Image implements Component {
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
 			// The text fallback embeds a link only under an enabled hyperlink policy.
 			this.#cachedLinked === linked &&
-			(!transmitsSeparately || this.#budget?.shouldTransmit(imageId) !== true) &&
+			(!transmitsSeparately || suppressed || this.#budget?.shouldTransmit(imageId) !== true) &&
 			// Cached rows reserved for a pending SIXEL encode must not reach scrollback.
 			!(scrollbackRenderDepth > 0 && this.#sixel !== undefined && this.#sixel.sequence === undefined)
 		) {
@@ -885,20 +874,13 @@ export class Image implements Component {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
 			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
-			let result = renderImage(this.#base64Data, this.#dimensions, {
+			const result = renderImage(this.#base64Data, this.#dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: this.#options.maxHeightCells,
 				imageId: this.#imageId,
 				includeTransmit: needsTransmit,
 				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
 			});
-			if (imageProtocol === ImageProtocol.Sixel && result?.sequence === undefined && previous && this.pending) {
-				result = renderImage(previous.#base64Data, previous.#dimensions, {
-					maxWidthCells: maxWidth,
-					maxHeightCells: this.#options.maxHeightCells,
-					sixel: (widthPx, heightPx) => previous.#sixelSequence(widthPx, heightPx, sixelBackground!),
-				});
-			}
 
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {
 				this.#budget.enqueueTransmit(this.#imageId, result.transmit);
