@@ -9,13 +9,12 @@
 //! runs in — by whose checkout that is.
 //!
 //! A linked worktree (`git worktree add`) of a repository with a main checkout,
-//! and a submodule inside one, belong to one line of work. There every
-//! command runs, except that `stash pop`,
-//! `apply`, `drop`, `branch`, and `clear` refuse entries saved on another
-//! branch or a detached HEAD, since every worktree shares one stash list; and
-//! a command that discards uncommitted changes first records them on
-//! [`DISCARDED_REF`]'s reflog, or is refused when it would also discard
-//! changes inside submodules, which that record cannot hold.
+//! and a submodule inside one, belong to one line of work. There every command
+//! runs, except that `stash pop`, `apply`, `drop`, `branch`, and `clear` refuse
+//! entries saved on another branch or a detached HEAD, since every worktree
+//! shares one stash list; and a command that discards uncommitted changes first
+//! records them on [`DISCARDED_REF`]'s reflog, or is refused when it would also
+//! discard changes inside submodules, which that record cannot hold.
 //!
 //! Any other checkout — a repository's main worktree, a clone, or one git is
 //! redirected to — may be shared by concurrent sessions, and there the guard
