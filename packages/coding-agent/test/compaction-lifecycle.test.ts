@@ -159,18 +159,24 @@ describe("compaction queued for the next yield", () => {
 		const flushCompactionQueue = vi.fn(async () => {
 			compactingAtFlush.push(state.compactingChecks > 0);
 		});
+		const sessionManager = {
+			sessionId: "s1",
+			getSessionId: () => sessionManager.sessionId,
+			getEntries: () => [{ type: "message" }],
+		};
 		const ctx = {
 			session,
-			yieldCompaction: { text: "/compact soft", mode: "soft" },
+			sessionManager,
+			yieldCompaction: { text: "/compact soft", sessionId: "s1", mode: "soft" },
+			compactionQueuedMessages: [],
 			updatePendingMessagesDisplay: vi.fn(),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
 			flushCompactionQueue,
-			sessionManager: { getEntries: () => [{ type: "message" }] },
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
 		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand");
-		return { state, ctx, controller, handleCompactCommand, flushCompactionQueue, compactingAtFlush };
+		return { state, ctx, sessionManager, controller, handleCompactCommand, flushCompactionQueue, compactingAtFlush };
 	}
 
 	it("runs the queued compaction once the session is idle", async () => {
@@ -191,7 +197,7 @@ describe("compaction queued for the next yield", () => {
 		await controller.runYieldCompaction();
 
 		expect(handleCompactCommand).not.toHaveBeenCalled();
-		expect(ctx.yieldCompaction).toEqual({ text: "/compact soft", mode: "soft" });
+		expect(ctx.yieldCompaction).toEqual({ text: "/compact soft", sessionId: "s1", mode: "soft" });
 	});
 
 	it("runs once a prompt still in setup bails without starting a run", async () => {
@@ -225,5 +231,19 @@ describe("compaction queued for the next yield", () => {
 
 		expect(handleCompactCommand).not.toHaveBeenCalled();
 		expect(compactingAtFlush).toEqual([false]);
+	});
+
+	it("drops the request and its held follow-ups after a switch to another conversation", async () => {
+		const { ctx, sessionManager, controller, handleCompactCommand, flushCompactionQueue } = buildYieldCtx();
+		ctx.compactionQueuedMessages.push({ text: "held", mode: "followUp" });
+		// An extension's `ctx.switchSession()` reuses the AgentSession object and only changes the conversation.
+		sessionManager.sessionId = "s2";
+
+		await controller.runYieldCompaction();
+
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(flushCompactionQueue).not.toHaveBeenCalled();
+		expect(ctx.yieldCompaction).toBeUndefined();
+		expect(ctx.compactionQueuedMessages).toEqual([]);
 	});
 });

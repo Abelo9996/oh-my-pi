@@ -2087,6 +2087,13 @@ export class CommandController {
 			await session.waitForIdle();
 			await session.waitForAdmittedSubmissions();
 			if (this.ctx.yieldCompaction !== request || this.ctx.session !== session) return;
+			if (this.ctx.sessionManager.getSessionId() !== request.sessionId) {
+				// Switched to another conversation: the request and the follow-ups held behind it belonged to the old one.
+				this.ctx.yieldCompaction = undefined;
+				this.ctx.compactionQueuedMessages = [];
+				this.ctx.updatePendingMessagesDisplay();
+				return;
+			}
 			if (!session.isStreaming) break;
 			// A prompt in pre-dispatch setup: wait until it starts a run or bails.
 			await Bun.sleep(10);
