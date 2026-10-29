@@ -12,6 +12,7 @@
 - Fixed short-lived commands that refresh an OAuth login, such as `omp token --force-refresh`, staying open for about 5 seconds after printing their result
 - Fixed TypeSafe login rejecting valid keys when `TYPESAFE_BASE_URL` is set: the key is now checked against `<base>/v1/models` instead of `<base>/models`
 - Fixed forced tool calls on non-reasoning models terminating omp with an unhandled reasoning-effort error ([#17283](https://github.com/can1357/oh-my-pi/pull/17283) by [@wyyufeng](https://github.com/wyyufeng))
+- Fixed an interrupted turn reporting the transport's abort text, such as "Codex websocket transport error: request was aborted", instead of the reason the caller passed to `abort()`, such as "Interrupted by user" ([#17216](https://github.com/can1357/oh-my-pi/pull/17216) by [@MaisonnatM](https://github.com/MaisonnatM))
 
 ## [18.13.3] - 2026-10-28
 

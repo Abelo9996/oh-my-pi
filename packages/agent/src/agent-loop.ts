@@ -2790,14 +2790,7 @@ function buildToolCallAbortMessages(
  *  `signal.reason` is the default `AbortError` `DOMException`) falls back to the
  *  generic sentinel that downstream renderers treat as "no specific reason". */
 export function abortReasonText(signal: AbortSignal | undefined): string {
-	const scopedReason = toolScopedAbortReason(signal);
-	if (scopedReason) return scopedReason.message;
-	const reason = signal?.reason;
-	if (typeof reason === "string" && reason.trim().length > 0) return reason;
-	if (reason instanceof Error && reason.name !== "AbortError" && reason.message.trim().length > 0) {
-		return reason.message;
-	}
-	return "Request was aborted";
+	return toolScopedAbortReason(signal)?.message ?? AIError.callerAbortReason(signal) ?? "Request was aborted";
 }
 
 function emitAbortedAssistantMessage(

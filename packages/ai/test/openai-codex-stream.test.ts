@@ -1703,6 +1703,60 @@ describe("openai-codex streaming", () => {
 		]);
 	});
 
+	it("reports the caller's abort reason instead of the generic abort text", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const context = createCodexTestContext();
+		const controller = new AbortController();
+		const fetchMock: FetchImpl = (input: string | URL | Request, init?: RequestInit) => {
+			const response = createNoProgressCodexSse(getRequestSignal(input, init));
+			queueMicrotask(() => controller.abort("Interrupted by user"));
+			return Promise.resolve(response);
+		};
+
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const result = await streamOpenAICodexResponses(model, context, {
+			fetch: fetchMock as FetchImpl,
+			apiKey: token,
+			signal: controller.signal,
+		}).result();
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("Interrupted by user");
+	});
+
+	it("reports the caller's abort reason when a websocket request is aborted", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const controller = new AbortController();
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		class InterruptedWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(): void {
+				controller.abort("Interrupted by user");
+			}
+		}
+		global.WebSocket = InterruptedWebSocket as unknown as typeof WebSocket;
+		try {
+			const result = await streamOpenAICodexResponses(createCodexTestModel(), createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				signal: controller.signal,
+				sessionId: "interrupted-websocket",
+				providerSessionState,
+			}).result();
+
+			expect(result.stopReason).toBe("aborted");
+			expect(result.errorMessage).toBe("Interrupted by user");
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
+	});
+
 	it("parses websocket JSON from non-string payloads", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
