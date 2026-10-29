@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { buildSessionTraceFromSnapshots } from "@oh-my-pi/omp-stats/trace";
+import type { SessionTrace } from "@oh-my-pi/omp-stats/types";
 import type { AgentState } from "@oh-my-pi/pi-agent-core";
 import { APP_NAME, isEnoent } from "@oh-my-pi/pi-utils";
 import { getResolvedThemeColors, getThemeExportColors } from "@oh-my-pi/pi-tui/theme";
@@ -174,6 +176,8 @@ export interface SessionData {
 	systemPrompt?: string;
 	tools?: { name: string; description: string }[];
 	subSessions?: Record<string, SubSession>;
+	/** Offline trace for the embedded transcripts; absent in older share snapshots. */
+	trace?: SessionTrace;
 }
 
 function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | null {
@@ -196,9 +200,9 @@ export function buildSessionData(sm: SessionManager, state?: AgentState): Sessio
 	};
 }
 
-/** Subagent transcripts next to `sessionFile`, with export-only header fields stripped. */
+/** All trace transcripts next to `sessionFile`, with export-only header fields stripped. */
 async function collectExportSubSessions(sessionFile: string): Promise<Record<string, SubSession>> {
-	const subSessions = await collectSubSessions(sessionFile);
+	const subSessions = await collectSubSessions(sessionFile, { includeAdvisors: true, includeCompressed: true });
 	for (const sub of Object.values(subSessions)) sub.header = sessionHeaderForExport(sub.header);
 	return subSessions;
 }
@@ -236,6 +240,7 @@ export async function exportSessionToHtml(
 		const subSessions = await collectExportSubSessions(sessionFile);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
+	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
 
 	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
 	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);
@@ -269,6 +274,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		const subSessions = await collectExportSubSessions(inputPath);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
+	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
 
 	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
 	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);

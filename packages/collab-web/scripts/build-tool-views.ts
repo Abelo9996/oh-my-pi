@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 /**
- * Bundle the shared React tool renderers + the `<omp-tool-view>` web component
- * into a single self-contained script (React included, CSS inlined) for
+ * Bundle the shared React tool and trace viewers (`<omp-tool-view>` and
+ * `<omp-session-trace>`) into one self-contained script (React included, CSS inlined) for
  * embedding in coding-agent HTML session exports.
  *
  * Output: packages/coding-agent/src/export/html/tool-views.generated.js
- * Run via `bun run gen:tool-views` after changing src/tool-render/.
+ * Run via `bun run gen:tool-views` after changing tool-render/, trace-render/,
+ * or the shared stats trace viewer. Trace CSS is imported as text into its shadow root.
  */
 import * as path from "node:path";
 
@@ -13,7 +14,7 @@ const root = path.join(import.meta.dir, "..");
 const outFile = path.join(root, "../coding-agent/src/export/html/tool-views.generated.js");
 
 const result = await Bun.build({
-	entrypoints: [path.join(root, "src/tool-render/standalone.tsx")],
+	entrypoints: [path.join(root, "src/export-standalone.ts")],
 	target: "browser",
 	format: "iife",
 	minify: true,

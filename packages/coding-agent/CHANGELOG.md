@@ -14,6 +14,8 @@
 
 ### Changed
 
+- HTML exports now match the `/stats` design, with an offline timeline drawer, full trace view, and sidebar navigation for nested subagents and advisors
+- `tui.autoGraph` defaults to the new `auto`: charts are refined by the judge whenever the judge role resolves to a native TypeSafe jev model, and drawn from the built-in guess otherwise
 - Removed manual scan cache invalidation triggers after file modifications; filesystem changes are now automatically detected via timestamp validation in the new `pi-walker` architecture
 - A muted `/live` call now stays shown as muted when the voice model starts a task or the session starts, instead of switching to "working" or "listening" while the microphone is still off ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
 - Model refreshes (startup, `/model`, toggling extended context) use far less CPU: unchanged models are no longer rebuilt on every pass, and with a custom agent directory or models config the model cache database is opened once per refresh instead of once per provider
@@ -29,6 +31,7 @@
 
 ### Fixed
 
+- Fixed table charts marking the worse value "best" when a column or row name suggests the wrong direction (a GPU's memory bandwidth and L2 cache read as costs). Charts no longer guess which way is better from header wording; under `tui.autoGraph: smart` the judge decides, for single-measure tables and every metric row too, and can decline a chart of page numbers, step numbers or figures quoted in prose
 - Fixed closing a browser tab while omp reattaches it after its worker exited taking most of a second longer than needed
 - Fixed startup warnings (`--model`, prewalk and `--plan-yolo` targets, a resumed session's folder that could not be opened) flashing in Tern before omp's UI covered them; they now show as warnings in the UI ([tern-sdk#90](https://github.com/stencil-hq/tern-sdk/issues/90))
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
