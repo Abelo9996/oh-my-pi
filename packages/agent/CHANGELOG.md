@@ -12,6 +12,10 @@
 - `AgentTool.approvalRestrictionPaths` reports paths a call reads, so restricted folders cover them without the approval being remembered per path ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal))
 - Added `Agent.logContext`, fields added to every log record written during the agent's runs ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Changed
+
+- Deferred loading of compaction utilities and provider-specific metadata to runtime
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

@@ -23,6 +23,8 @@
 
 ### Changed
 
+- Skill-description setup resolves exact role selectors against their provider without expanding unrelated catalogs; provider-scoped model reads reuse snapshots while keeping credential availability and runtime modifiers live
+- Normal print-mode startup defers slash-command implementation loading until a command is dispatched or an extension requests the command list
 - Session startup overlaps credential-usage reads with tool/context loading and refreshes repository context, context files, and rules concurrently; `PI_TIMING` now separates credential validation from other first-prompt preparation
 - Non-browser launches no longer load cmux/Tern browser evaluators or their accessibility bundles; each backend loads on first use
 - Headless startup no longer loads the interactive composer through plugin-loader SDK self-references or reserved HUD identifiers; injected `api.pi` loads the full host SDK only when accessed

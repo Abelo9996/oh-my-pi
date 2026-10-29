@@ -1,5 +1,5 @@
 /**
- * Built-in provider stream dispatch with shared error, cancellation, and timeout handling.
+ * First-use provider loading with shared stream error, cancellation, and timeout handling.
  */
 
 import type { CompatOf } from "@oh-my-pi/pi-catalog/types";
@@ -14,19 +14,19 @@ import {
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import * as AnthropicProvider from "./anthropic";
-import * as AzureOpenAIResponsesProvider from "./azure-openai-responses";
-import * as BedrockProvider from "./amazon-bedrock";
-import * as CursorProvider from "./cursor";
-import * as AppleFoundationModelsProvider from "./apple-foundation-models";
-import * as DevinProvider from "./devin";
-import * as GoogleProvider from "./google";
-import * as GoogleGeminiCliProvider from "./google-gemini-cli";
-import * as GoogleVertexProvider from "./google-vertex";
-import * as OllamaProvider from "./ollama";
-import * as OpenAICodexResponsesProvider from "./openai-codex-responses";
-import * as OpenAICompletionsProvider from "./openai-completions";
-import * as OpenAIResponsesProvider from "./openai-responses";
+import type * as AnthropicProvider from "./anthropic";
+import type * as AzureOpenAIResponsesProvider from "./azure-openai-responses";
+import type * as BedrockProvider from "./amazon-bedrock";
+import type * as CursorProvider from "./cursor";
+import type * as AppleFoundationModelsProvider from "./apple-foundation-models";
+import type * as DevinProvider from "./devin";
+import type * as GoogleProvider from "./google";
+import type * as GoogleGeminiCliProvider from "./google-gemini-cli";
+import type * as GoogleVertexProvider from "./google-vertex";
+import type * as OllamaProvider from "./ollama";
+import type * as OpenAICodexResponsesProvider from "./openai-codex-responses";
+import type * as OpenAICompletionsProvider from "./openai-completions";
+import type * as OpenAIResponsesProvider from "./openai-responses";
 
 type ProviderStream<TApi extends Api> = (
 	model: Model<TApi>,
@@ -210,10 +210,23 @@ function createProviderStreamError<TApi extends Api>(
 // Provider stream wrapper
 // ---------------------------------------------------------------------------
 
-function createProviderStream<TApi extends Api>(
-	stream: ProviderStream<TApi>,
+/**
+ * Wraps a provider stream whose module loads on first call.
+ *
+ * `load` MUST call `require` with a string literal: `Bun.build` bundles only
+ * literal specifiers, so a forwarded module name fails in compiled binaries.
+ * The first call rebinds to the stream `pick` selects, so later calls skip
+ * module resolution; a throwing `load` keeps the loader for the next call.
+ */
+function createLazyProviderStream<TModule, TApi extends Api>(
+	load: () => TModule,
+	pick: (mod: TModule) => ProviderStream<TApi>,
 	limits?: StreamLimits,
 ): (model: Model<TApi>, context: Context, options: OptionsForApi<TApi>) => EventStreamImpl {
+	let stream: ProviderStream<TApi> = (model, context, options) => {
+		stream = pick(load());
+		return stream(model, context, options);
+	};
 	return (model, context, options) => {
 		const outer = new EventStreamImpl();
 		const streamOptions: OptionsForApi<TApi> = options ?? {};
@@ -234,73 +247,90 @@ function createProviderStream<TApi extends Api>(
 }
 
 /** Stream Anthropic responses with provider-owned timeout handling. */
-export const streamAnthropic = createProviderStream<"anthropic-messages">(
-	(model, context, options) => AnthropicProvider.streamAnthropic(model, context, options),
+export const streamAnthropic = createLazyProviderStream(
+	(): typeof AnthropicProvider => require("./anthropic"),
+	mod => mod.streamAnthropic,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream Azure Responses with provider-owned timeout handling. */
-export const streamAzureOpenAIResponses = createProviderStream<"azure-openai-responses">(
-	(model, context, options) => AzureOpenAIResponsesProvider.streamAzureOpenAIResponses(model, context, options),
+export const streamAzureOpenAIResponses = createLazyProviderStream(
+	(): typeof AzureOpenAIResponsesProvider => require("./azure-openai-responses"),
+	mod => mod.streamAzureOpenAIResponses,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream Google's direct API through the shared watchdog. */
-export const streamGoogle = createProviderStream<"google-generative-ai">((model, context, options) =>
-	GoogleProvider.streamGoogle(model, context, options),
+export const streamGoogle = createLazyProviderStream(
+	(): typeof GoogleProvider => require("./google"),
+	mod => mod.streamGoogle,
 );
 
 /** Stream Cloud Code Assist while retaining its first-event watchdog. */
-export const streamGoogleGeminiCli = createProviderStream<"google-gemini-cli">(
-	(model, context, options) => GoogleGeminiCliProvider.streamGoogleGeminiCli(model, context, options),
+export const streamGoogleGeminiCli = createLazyProviderStream(
+	(): typeof GoogleGeminiCliProvider => require("./google-gemini-cli"),
+	mod => mod.streamGoogleGeminiCli,
 	GOOGLE_GEMINI_CLI_STREAM_LIMITS,
 );
 
 /** Stream the Vertex API through the shared watchdog. */
-export const streamGoogleVertex = createProviderStream<"google-vertex">((model, context, options) =>
-	GoogleVertexProvider.streamGoogleVertex(model, context, options),
+export const streamGoogleVertex = createLazyProviderStream(
+	(): typeof GoogleVertexProvider => require("./google-vertex"),
+	mod => mod.streamGoogleVertex,
 );
 
 /** Stream Codex with provider-owned timeout handling. */
-export const streamOpenAICodexResponses = createProviderStream<"openai-codex-responses">(
-	(model, context, options) => OpenAICodexResponsesProvider.streamOpenAICodexResponses(model, context, options),
+export const streamOpenAICodexResponses = createLazyProviderStream(
+	(): typeof OpenAICodexResponsesProvider => require("./openai-codex-responses"),
+	mod => mod.streamOpenAICodexResponses,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream Chat Completions with provider-owned timeout handling. */
-export const streamOpenAICompletions = createProviderStream<"openai-completions">(
-	(model, context, options) => OpenAICompletionsProvider.streamOpenAICompletions(model, context, options),
+export const streamOpenAICompletions = createLazyProviderStream(
+	(): typeof OpenAICompletionsProvider => require("./openai-completions"),
+	mod => mod.streamOpenAICompletions,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream Responses with provider-owned timeout handling. */
-export const streamOpenAIResponses = createProviderStream<"openai-responses">(
-	(model, context, options) => OpenAIResponsesProvider.streamOpenAIResponses(model, context, options),
+export const streamOpenAIResponses = createLazyProviderStream(
+	(): typeof OpenAIResponsesProvider => require("./openai-responses"),
+	mod => mod.streamOpenAIResponses,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream through the host Cursor transport when installed, otherwise the built-in transport. */
-export const streamCursor = createProviderStream<"cursor-agent">((model, context, options) =>
-	(cursorStreamOverride ?? CursorProvider.streamCursor)(model, context, options),
+export const streamCursor = createLazyProviderStream(
+	(): typeof CursorProvider => require("./cursor"),
+	(builtin): ProviderStream<"cursor-agent"> =>
+		(model, context, options) =>
+			(cursorStreamOverride ?? builtin.streamCursor)(model, context, options),
 );
 
 /** Stream Devin through the shared watchdog. */
-export const streamDevin = createProviderStream<"devin-agent">((model, context, options) =>
-	DevinProvider.streamDevin(model, context, options),
+export const streamDevin = createLazyProviderStream(
+	(): typeof DevinProvider => require("./devin"),
+	mod => mod.streamDevin,
 );
 
 /** Stream Apple's on-device Foundation Model through the shared watchdog. */
-export const streamAppleFoundationModels = createProviderStream<"apple-foundation-models">((model, context, options) =>
-	AppleFoundationModelsProvider.streamAppleFoundationModels(model, context, options),
+export const streamAppleFoundationModels = createLazyProviderStream(
+	(): typeof AppleFoundationModelsProvider => require("./apple-foundation-models"),
+	mod => mod.streamAppleFoundationModels,
 );
 
 /** Stream Ollama with OpenAI-compatible idle timeout precedence. */
-export const streamOllama = createProviderStream<"ollama-chat">(
-	(model, context, options) => OllamaProvider.streamOllama(model, context, options),
+export const streamOllama = createLazyProviderStream(
+	(): typeof OllamaProvider => require("./ollama"),
+	mod => mod.streamOllama,
 	OPENAI_IDLE_FLOORED_STREAM_LIMITS,
 );
 
 /** Stream through the host Bedrock transport when installed, otherwise the built-in transport. */
-export const streamBedrock = createProviderStream<"bedrock-converse-stream">((model, context, options) =>
-	(bedrockStreamOverride ?? BedrockProvider.streamBedrock)(model, context, options),
+export const streamBedrock = createLazyProviderStream(
+	(): typeof BedrockProvider => require("./amazon-bedrock"),
+	(builtin): ProviderStream<"bedrock-converse-stream"> =>
+		(model, context, options) =>
+			(bedrockStreamOverride ?? builtin.streamBedrock)(model, context, options),
 );

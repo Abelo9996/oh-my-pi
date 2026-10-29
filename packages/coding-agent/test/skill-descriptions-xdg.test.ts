@@ -7,6 +7,8 @@ import * as agentCore from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { __resetProfileSnapshotForTests, getAgentDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
+import { resolveRoleChain, resolveRoleSelection } from "../src/config/model-resolver";
+import { cfgDisabledProviders } from "../src/config/model-settings";
 import { Settings } from "../src/config/settings";
 import {
 	createSkillDescriptionCompressor,
@@ -356,10 +358,11 @@ describe("skill description compressor model selection", () => {
 	const authStorages: AuthStorage[] = [];
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		for (const storage of authStorages.splice(0)) storage.close();
 	});
 
-	function modelKey(modelRoles: Record<string, string>): string | undefined {
+	function fixture(modelRoles: Record<string, string>) {
 		const authStorage = createInMemoryAuthStorage();
 		authStorages.push(authStorage);
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -371,16 +374,103 @@ describe("skill description compressor model selection", () => {
 				settings,
 			},
 		);
-		return createSkillDescriptionCompressor(registry, settings).modelKey();
+		return { registry, settings, authStorage, compressor: createSkillDescriptionCompressor(registry, settings) };
 	}
 
+	it("does not materialize unrelated catalogs for the first exact role selection", () => {
+		const { registry, compressor } = fixture({ default: "anthropic/claude-opus-4-5" });
+		const all = spyOn(registry, "getAvailable").mockImplementation(() => {
+			throw new Error("Unrelated catalogs must stay lazy");
+		});
+		const scoped = spyOn(registry, "getAvailableForProviders");
+		expect(compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
+		expect(compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
+		expect(scoped).toHaveBeenCalledWith(new Set(["anthropic"]));
+		expect(all).not.toHaveBeenCalled();
+	});
+
+	it("keeps complete selector and fallback precedence when a scoped exact match misses", () => {
+		const { registry, settings, compressor } = fixture({});
+		registry.registerProvider("skill-custom", {
+			baseUrl: "https://example.invalid/v1",
+			api: "openai-completions",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "anthropic/claude-opus-4-5:high",
+					name: "Literal suffix",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 1024,
+				},
+			],
+		});
+		for (const selector of [
+			"anthropic/claude-opus-4-5:high",
+			"missing-provider/missing,anthropic/claude-haiku-4-5",
+			"claude-haiku-4-5",
+			"skill-custom/anthropic/claude-opus-4-5:high",
+			"missing-provider/missing",
+		]) {
+			settings.setModelRole("smol", selector);
+			const available = registry.getAvailable();
+			const expected =
+				resolveRoleChain("smol", settings, available)[0]?.model ??
+				resolveRoleSelection(["tiny"], settings, available)?.model;
+			expect(compressor.modelKey()).toBe(expected ? `${expected.provider}/${expected.id}` : undefined);
+		}
+		settings.setModelRole("smol", "anthropic/claude-opus-4-5:high");
+		expect(compressor.modelKey()).toBe("skill-custom/anthropic/claude-opus-4-5:high");
+	});
+
+	it("observes live role, disabled-provider and runtime catalog changes after a scoped lookup", () => {
+		const { registry, settings, compressor } = fixture({ smol: "anthropic/claude-haiku-4-5" });
+		expect(compressor.modelKey()).toBe("anthropic/claude-haiku-4-5");
+		settings.setModelRole("smol", "anthropic/claude-opus-4-5");
+		expect(compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
+		cfgDisabledProviders.set(settings, ["anthropic"]);
+		const available = registry.getAvailable();
+		const expected =
+			resolveRoleChain("smol", settings, available)[0]?.model ??
+			resolveRoleSelection(["tiny"], settings, available)?.model;
+		expect(compressor.modelKey()).toBe(expected ? `${expected.provider}/${expected.id}` : undefined);
+		cfgDisabledProviders.set(settings, []);
+		expect(compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
+
+		settings.setModelRole("smol", "skill-runtime/first");
+		const register = (id: string) =>
+			registry.registerProvider("skill-runtime", {
+				baseUrl: "https://example.invalid/v1",
+				api: "openai-completions",
+				apiKey: "test-key",
+				models: [
+					{
+						id,
+						name: id,
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 8192,
+						maxTokens: 1024,
+					},
+				],
+			});
+		register("first");
+		expect(compressor.modelKey()).toBe("skill-runtime/first");
+		register("second");
+		settings.setModelRole("smol", "skill-runtime/second");
+		expect(compressor.modelKey()).toBe("skill-runtime/second");
+	});
+
 	it("uses the configured default for an unset smol role instead of the built-in smol chain", () => {
-		expect(modelKey({ default: "anthropic/claude-opus-4-5" })).toBe("anthropic/claude-opus-4-5");
+		expect(fixture({ default: "anthropic/claude-opus-4-5" }).compressor.modelKey()).toBe("anthropic/claude-opus-4-5");
 	});
 
 	it("prefers a configured smol role over the configured default", () => {
-		expect(modelKey({ default: "anthropic/claude-opus-4-5", smol: "anthropic/claude-haiku-4-5" })).toBe(
-			"anthropic/claude-haiku-4-5",
-		);
+		expect(
+			fixture({ default: "anthropic/claude-opus-4-5", smol: "anthropic/claude-haiku-4-5" }).compressor.modelKey(),
+		).toBe("anthropic/claude-haiku-4-5");
 	});
 });
