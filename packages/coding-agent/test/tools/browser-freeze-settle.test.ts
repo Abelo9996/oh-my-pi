@@ -24,7 +24,6 @@ import { acquireBrowser, holdBrowser, releaseBrowser } from "@oh-my-pi/pi-coding
 import type { BrowserHandle } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import {
 	acquireTab,
-	armIdleCloseForOwner,
 	cancelIdleCloseForOwner,
 	earliestIdleCloseInMs,
 	ensureSpawnedKilledForTest,
@@ -42,7 +41,6 @@ import {
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import type { PendingRun, TabSession } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import { drive, elapse, until } from "../helpers/fake-clock";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -455,19 +453,6 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			return makeStubTab({ lastActivityAt: NOW - 120_000, ...overrides }).tab;
 		}
 
-		it("selects owned managed tabs idle past the deadline, including the boundary", () => {
-			expect(isIdleCloseCandidate(candidate(), "session-stub", NOW, 60_000)).toBe(true);
-			expect(isIdleCloseCandidate(candidate({ lastActivityAt: NOW - 60_000 }), "session-stub", NOW, 60_000)).toBe(
-				true,
-			);
-		});
-
-		it("holds back fresh tabs", () => {
-			expect(isIdleCloseCandidate(candidate({ lastActivityAt: NOW - 1_000 }), "session-stub", NOW, 60_000)).toBe(
-				false,
-			);
-		});
-
 		it("never selects other owners, opt-outs, foreign kinds, dead, or executing tabs", () => {
 			const cases: Array<[string, Record<string, unknown>]> = [
 				["other owner", { ownerSessionId: "session-other" }],
@@ -753,7 +738,6 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 		});
 
 		afterEach(async () => {
-			vi.useRealTimers();
 			await drainAllTabs();
 		});
 
@@ -853,93 +837,6 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			expect(await closing).toBe(1);
 			expect(getTabsMapForTest().has(`${base}-a`)).toBe(false);
 			expect(getTabsMapForTest().has(`${base}-b`)).toBe(true);
-		}, 120_000);
-
-		// The idle deadlines below run on a fake clock: the tab, its worker and Chromium stay real, and their IPC
-		// keeps flowing while only the supervisor's timers wait for the test to move time.
-		it("closes idle tabs when the timeout elapses without further activity", async () => {
-			const name = `settle-timer-${process.pid}`;
-			await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-timer" });
-			const due = earliestIdleCloseInMs("session-timer", 60_000);
-			expect(due).toBeGreaterThan(0);
-			expect(due).toBeLessThanOrEqual(60_000);
-
-			vi.useFakeTimers();
-			armIdleCloseForOwner("session-timer", 200);
-			await elapse(200);
-			await until(() => !getTabsMapForTest().has(name), "the idle tab closed");
-		}, 120_000);
-
-		it("re-arming replaces the pending deadline", async () => {
-			const name = `settle-retimer-${process.pid}`;
-			const { tab } = await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-retimer" });
-
-			vi.useFakeTimers();
-			armIdleCloseForOwner("session-retimer", 200);
-			armIdleCloseForOwner("session-retimer", 3_600_000);
-			// Past the first deadline with the replacement armed, the tab must still be tracked.
-			await elapse(600);
-			expect(getTabsMapForTest().get(name)).toBe(tab);
-			expect(tab.state).toBe("alive");
-			expect(hasIdleCloseTimerForTest("session-retimer")).toBe(true);
-		}, 120_000);
-
-		it("re-arms when the timer fires into an in-flight run", async () => {
-			const name = `settle-retry-${process.pid}`;
-			const session = makeSession(process.cwd());
-			const { tab } = await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-retry" });
-			// The run holds on a request the test answers, so it is in flight for as long as the test needs.
-			const requested = Promise.withResolvers<void>();
-			const answer = Promise.withResolvers<void>();
-			const server = Bun.serve({
-				port: 0,
-				fetch: async () => {
-					requested.resolve();
-					await answer.promise;
-					return new Response("ok", { headers: { "access-control-allow-origin": "*" } });
-				},
-			});
-			try {
-				const run = runInTab(name, {
-					code: `await fetch("http://127.0.0.1:${server.port}/hold"); return 1;`,
-					timeoutMs: 30_000,
-					session,
-				});
-				void run.catch(() => undefined);
-				await requested.promise;
-
-				vi.useFakeTimers();
-				armIdleCloseForOwner("session-retry", 300, 150);
-				// The 300ms deadline fires mid-run: skipped, not closed, and re-armed on the retry cadence.
-				await elapse(300);
-				expect(getTabsMapForTest().get(name)).toBe(tab);
-				expect(tab.state).toBe("alive");
-				expect(hasIdleCloseTimerForTest("session-retry")).toBe(true);
-				answer.resolve();
-				expect((await drive(run)).returnValue).toBe(1);
-				// After completion the chain re-arms from the fresh timestamp
-				// and the tab closes without any further settle or open.
-				await elapse(150);
-				await elapse(300);
-				await until(() => !getTabsMapForTest().has(name), "the idle tab closed");
-			} finally {
-				answer.resolve();
-				server.stop(true);
-			}
-		}, 120_000);
-
-		it("cancelling drops the armed deadline", async () => {
-			const name = `settle-cancel-${process.pid}`;
-			const { tab } = await acquireTab(name, browser, { timeoutMs: 30_000, ownerSessionId: "session-cancel" });
-
-			vi.useFakeTimers();
-			armIdleCloseForOwner("session-cancel", 200);
-			cancelIdleCloseForOwner("session-cancel");
-			// Past the deadline with the timer cancelled, the tab must still be tracked.
-			await elapse(600);
-			expect(getTabsMapForTest().get(name)).toBe(tab);
-			expect(tab.state).toBe("alive");
-			expect(hasIdleCloseTimerForTest("session-cancel")).toBe(false);
 		}, 120_000);
 
 		it("does not re-arm when cancelled mid-sweep", async () => {

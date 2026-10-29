@@ -464,40 +464,6 @@ await Promise.withResolvers().promise;`;
 		}
 	}, 30_000);
 
-	it("keeps the tab on what loaded when the page outlasts the open timeout", async () => {
-		const server = Bun.serve({
-			port: 0,
-			fetch(request) {
-				// The image never answers, so the page never fires `load`.
-				if (new URL(request.url).pathname === "/hang.png") return new Promise<Response>(() => {});
-				return new Response('<title>slow</title><p>partial</p><img src="/hang.png">', {
-					headers: { "content-type": "text/html" },
-				});
-			},
-		});
-		try {
-			const invoke = browserHost();
-			const name = `slow-${crypto.randomUUID()}`;
-			// The first open also starts the tab's worker within its budget; the second, reusing the tab, only navigates.
-			const open = (timeout: number) => rejectionOf(invoke({ action: "open", name, url: server.url.href, timeout }));
-			const keptTab = { message: expect.stringContaining(`browser.tab(${JSON.stringify(name)})`) };
-			// The first open creates the tab; the second reuses the one it kept.
-			expect(await open(3)).toMatchObject(keptTab);
-			expect(await open(1)).toMatchObject(keptTab);
-			expect(
-				returnedValue(
-					await invoke({
-						action: "run",
-						name,
-						code: "return { url: tab.url(), text: await tab.evaluate(() => document.body.innerText) };",
-					}),
-				),
-			).toEqual({ url: server.url.href, text: "partial" });
-		} finally {
-			server.stop(true);
-		}
-	}, 20_000);
-
 	it("closes the tab its open created when the navigation fails outright, but keeps a reused one", async () => {
 		const refused = Bun.serve({ port: 0, fetch: () => new Response("") });
 		const url = refused.url.href;

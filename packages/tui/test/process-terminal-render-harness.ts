@@ -47,13 +47,6 @@ export interface ProcessTerminalRenderHarness {
 	readonly signals: Array<{ pid: number; signal: string | number | undefined }>;
 	/** Let {@link SETTLE_MS} of virtual time pass, flushing any pending paint. */
 	settle(): Promise<void>;
-	/**
-	 * Let `ms` of virtual time pass one millisecond at a time, yielding the event
-	 * loop between steps so timers armed by promise continuations (the exit
-	 * drain's idle wait, the render throttle behind `setImmediate`) come due in
-	 * the same order they would in real time.
-	 */
-	elapse(ms: number): Promise<void>;
 	/** Simulate an OS resize (SIGWINCH / ConPTY): refresh stdout dims, fire `resize`. */
 	osResize(columns: number, rows: number): Promise<void>;
 	/** Feed a complete DEC 2048 in-band resize report (`CSI 48 ; rows ; cols ; yPx ; xPx t`). */
@@ -135,6 +128,9 @@ export function createProcessTerminalRenderHarness(
 		throw err;
 	}
 
+	// Step one millisecond at a time, yielding between steps so timers armed by
+	// promise continuations (the render throttle behind `setImmediate`) come due
+	// in the order they would in real time.
 	const elapse = async (ms: number) => {
 		for (let step = 0; step < ms; step++) {
 			await scheduler.yield();
@@ -151,7 +147,6 @@ export function createProcessTerminalRenderHarness(
 		writes,
 		signals,
 		settle,
-		elapse,
 		async osResize(columns, rows) {
 			Object.defineProperty(process.stdout, "columns", { value: columns, configurable: true });
 			Object.defineProperty(process.stdout, "rows", { value: rows, configurable: true });

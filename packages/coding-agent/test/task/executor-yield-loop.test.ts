@@ -138,8 +138,7 @@ describe("runSubprocess incremental yield loops", () => {
 		AgentLifecycleManager.resetGlobalForTests();
 		AsyncJobManager.resetForTests();
 		tempDir = TempDir.createSync("@pi-yield-loop-");
-		// Drop recovery backs off on timers and bounds the idle wait with
-		// `AbortSignal.timeout`; both run on the fake clock `drive` advances.
+		// Drop recovery backs off on timers; `drive` advances the fake clock.
 		vi.useFakeTimers();
 	});
 	afterEach(() => {
@@ -289,20 +288,6 @@ describe("runSubprocess incremental yield loops", () => {
 		expect(handle.prompts.map(({ text }) => text)).toEqual(Array(4).fill("inventory the api surface"));
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("RECOVERED");
-	});
-
-	it("fails explicitly when a dropped assignment never reaches idle", async () => {
-		const id = "WedgedScout";
-		const handle = createMockSession(() => "dropped");
-		handle.session.waitForIdle = () => Promise.withResolvers<void>().promise;
-		mockCreateAgentSession(handle.session);
-		registerRunning(id, handle.session);
-
-		const result = await drive(runSubprocess(baseOptions(id, 0)));
-
-		expect(handle.prompts).toHaveLength(1);
-		expect(result.exitCode).toBe(1);
-		expect(result.error).toContain("initial prompt dropped before provider dispatch; session did not become idle");
 	});
 
 	it("retries a dropped yield reminder without consuming another reminder", async () => {

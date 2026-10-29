@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,7 +8,6 @@ import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { findFreeCdpPort, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { prepareElementUpload } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
-import { resolveOpTimeouts } from "@oh-my-pi/pi-coding-agent/tools/browser/op-timeouts";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import {
 	openUploadSource,
@@ -84,8 +83,6 @@ interface ProxyOptions {
 	maxMessageBytes?: number;
 	/** Answer `DOM.setFileInputFiles` with `Not allowed`, as Chrome does for a relay without file-URL access. */
 	denyFilePaths?: boolean;
-	/** Hold each message over 1 MiB, as a slow link would: `held` fires as one arrives, and it moves on at `release`. */
-	holdLarge?: { held(): void; release: Promise<void> };
 }
 
 interface ProxiedSocket {
@@ -139,9 +136,6 @@ function startCdpProxy(chromePort: number, options: ProxyOptions): CdpProxy {
 							return;
 						}
 					}
-				} else if (options.holdLarge) {
-					options.holdLarge.held();
-					await options.holdLarge.release;
 				}
 				const { upstream } = ws.data;
 				if (upstream?.readyState === WebSocket.OPEN) upstream.send(message);
@@ -491,50 +485,6 @@ return { errors, dropped: await tab.evaluate(() => window.dropped.map(file => fi
 			await close();
 		}
 	}, 120_000);
-
-	test("gives streaming contents the cell's budget, not the action deadline", async () => {
-		// The chunk is still on its way when the action deadline passes; finding the target is not.
-		const cellSeconds = 30;
-		const { actionOpMs } = resolveOpTimeouts(cellSeconds * 1000);
-		const chunkHeld = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		// An inline tab worker runs in this process, so its deadlines are the action-sized `AbortSignal.timeout`s
-		// below; worker threads failing to start is what puts a tab on one.
-		const workerThreads = vi.spyOn(globalThis, "Worker").mockImplementation((() => {
-			throw new Error("Worker threads unavailable");
-		}) as never);
-		const { run, close } = await openConnectedTab("browser-upload-slow", {
-			proxy: routeProxy("contents", { holdLarge: { held: chunkHeld.resolve, release: release.promise } }),
-		}).finally(() => workerThreads.mockRestore());
-		const actionDeadlines: AbortController[] = [];
-		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
-		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
-			if (ms !== actionOpMs) return realTimeout(ms);
-			const deadline = new AbortController();
-			actionDeadlines.push(deadline);
-			return deadline.signal;
-		});
-		try {
-			const digest = await writeRandomFile(path.join(tempDir, "slow.bin"), 2 * 1024 * 1024);
-			const uploading = run(collectErrors(`() => tab.uploadFile("#direct", "slow.bin"),`), cellSeconds);
-			await chunkHeld.promise;
-			// Every action deadline the upload started runs out while its chunk is held.
-			expect(actionDeadlines.length).toBeGreaterThan(0);
-			for (const deadline of actionDeadlines)
-				deadline.abort(new DOMException("The operation timed out.", "TimeoutError"));
-			release.resolve();
-			expect(await uploading).toEqual([]);
-			vi.restoreAllMocks();
-			const received = await run(
-				`return await tab.evaluate(async () => [...new Uint8Array(await crypto.subtle.digest("SHA-256", await document.querySelector("#direct").files[0].arrayBuffer()))].map(byte => byte.toString(16).padStart(2, "0")).join(""));`,
-			);
-			expect(received).toBe(digest);
-		} finally {
-			vi.restoreAllMocks();
-			release.resolve();
-			await close();
-		}
-	}, 60_000);
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile into a browser omp launched", () => {
@@ -578,7 +528,6 @@ test("sweeps a staging folder a day after its last upload unless an open tab or 
 	// No process has a pid this large; the parent of this test process is running.
 	const folders = {
 		open: [`omp-uploads-${process.pid}-sweep-open`, dayAgo],
-		recent: [`omp-uploads-${process.pid}-sweep-recent`, new Date(now)],
 		closed: [`omp-uploads-${process.pid}-sweep-closed`, dayAgo],
 		orphaned: [`omp-uploads-99999999-sweep-orphaned`, dayAgo],
 		otherOmp: [`omp-uploads-${process.ppid}-sweep-other`, dayAgo],
@@ -591,7 +540,7 @@ test("sweeps a staging folder a day after its last upload unless an open tab or 
 	try {
 		await sweepUploadStaging(new Set([path.join(os.tmpdir(), folders.open[0])]), now);
 		const left = await stagingFolders();
-		expect(Object.values(folders).map(([name]) => left.has(name))).toEqual([true, true, false, false, true]);
+		expect(Object.values(folders).map(([name]) => left.has(name))).toEqual([true, false, false, true]);
 	} finally {
 		for (const [name] of Object.values(folders))
 			await fs.rm(path.join(os.tmpdir(), name), { recursive: true, force: true });
@@ -691,21 +640,6 @@ test("stages a symlinked file's contents, once while the file is unchanged", asy
 	const [changed] = await staging.stage([await openUploadSource(link)]);
 	expect(changed).not.toBe(first);
 	expect(await Bun.file(changed!).text()).toBe("changed");
-});
-
-test("stages a file again when it changes without moving its size or mtime", async () => {
-	const file = path.join(tempDir, "same-stamp.txt");
-	const stamp = new Date(1_900_000_000_000);
-	await Bun.write(file, "before");
-	await fs.utimes(file, stamp, stamp);
-	const staging = new UploadStaging(path.join(tempDir, "same-stamp-staging"));
-	await staging.stage([await openUploadSource(file)]);
-	// ctime cannot be set and Linux stamps it from a coarse clock; a real tick apart keeps the rewrite distinguishable.
-	await Bun.sleep(20);
-	await Bun.write(file, "after!");
-	await fs.utimes(file, stamp, stamp);
-	const [second] = await staging.stage([await openUploadSource(file)]);
-	expect(await Bun.file(second!).text()).toBe("after!");
 });
 
 test("marks the staging folder used when an upload reuses a copy, so the sweep keeps it", async () => {

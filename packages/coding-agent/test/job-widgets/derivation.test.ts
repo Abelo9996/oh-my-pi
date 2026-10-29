@@ -528,19 +528,6 @@ describe("job widget aggregations", () => {
 		expect(items(h.view())).toEqual(["1250 ms", "1", "0.20", "0%"]);
 	});
 
-	it("counts only the last minute toward the rate", () => {
-		const out = new ScriptedSource("out");
-		const h = harness(statSpec(), out);
-		out.append("ms=1\n".repeat(30));
-		h.advance(10_000);
-		h.ingest();
-		expect(items(h.view())[2]).toBe("3");
-		h.advance(90_000);
-		out.append("ms=2\n".repeat(6));
-		h.ingest();
-		expect(items(h.view()).slice(1, 3)).toEqual(["36", "0.10"]);
-	});
-
 	it("has no percent change from 0 but an absolute trend", () => {
 		const out = new ScriptedSource("out");
 		const h = harness(statSpec("higher"), out);

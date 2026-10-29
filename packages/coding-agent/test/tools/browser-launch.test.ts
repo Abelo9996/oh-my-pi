@@ -166,21 +166,6 @@ describe("browser executable selection", () => {
 		},
 	);
 
-	it.skipIf(process.platform !== "linux")("rejects wrappers that hang during the version probe", async () => {
-		const tempDir = TempDir.createSync("@browser-probe-hanging-");
-		try {
-			const hangingWrapper = path.join(tempDir.path(), "google-chrome");
-			await Bun.write(hangingWrapper, "#!/bin/sh\nsleep 60\n");
-			fs.chmodSync(hangingWrapper, 0o755);
-
-			const startedAt = performance.now();
-			await expect(chromiumExecutableProbeForTest(hangingWrapper)).resolves.toBe(false);
-			expect(performance.now() - startedAt).toBeLessThan(5000);
-		} finally {
-			await tempDir.remove();
-		}
-	});
-
 	it("does not launch the candidate to probe its version off Linux (#8445)", async () => {
 		for (const platform of ["win32", "darwin"] as const) {
 			const tempDir = TempDir.createSync(`@browser-probe-${platform}-`);

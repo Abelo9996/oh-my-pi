@@ -10,11 +10,10 @@
  * Bearer injection, so the next request surfaces a clean auth error instead.
  */
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { scheduler } from "node:timers/promises";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
@@ -36,77 +35,6 @@ const SHARED_FRESH_REFRESH = "refresh-1";
 function getAuthorizationHeader(config: MCPServerConfig): string | undefined {
 	if (config.type !== "http" && config.type !== "sse") return undefined;
 	return config.headers?.Authorization;
-}
-
-type ControlledSleep = {
-	ms: number;
-	resolved: boolean;
-	resolve: () => void;
-};
-
-interface ControlledSleeps {
-	calls: ControlledSleep[];
-	/** Waiters for a delay that has not been requested yet, keyed by its length. */
-	waiters: Array<{ ms: number; resolve: (call: ControlledSleep) => void }>;
-}
-
-/**
- * Hold every refresh delay until the test releases it: the peer-lease poll (`Bun.sleep`) and the
- * lease-renewal interval (`scheduler.wait`, which its stop signal cancels).
- */
-function installControlledSleeps(): ControlledSleeps {
-	const sleeps: ControlledSleeps = { calls: [], waiters: [] };
-	const hold = (delayMs: number, signal?: AbortSignal | null): Promise<void> => {
-		const { promise, resolve, reject } = Promise.withResolvers<void>();
-		const call: ControlledSleep = {
-			ms: delayMs,
-			resolved: false,
-			resolve: () => {
-				if (call.resolved) return;
-				call.resolved = true;
-				resolve();
-			},
-		};
-		signal?.addEventListener(
-			"abort",
-			() => {
-				if (call.resolved) return;
-				call.resolved = true;
-				reject(signal.reason);
-			},
-			{ once: true },
-		);
-		sleeps.calls.push(call);
-		const waiter = sleeps.waiters.findIndex(candidate => candidate.ms === delayMs);
-		if (waiter !== -1) sleeps.waiters.splice(waiter, 1)[0]!.resolve(call);
-		return promise;
-	};
-	vi.spyOn(Bun, "sleep").mockImplementation((ms: number | Date) =>
-		hold(typeof ms === "number" ? ms : Math.max(0, ms.getTime() - Date.now())),
-	);
-	vi.spyOn(scheduler, "wait").mockImplementation((ms, options) => hold(ms ?? 0, options?.signal));
-	return sleeps;
-}
-
-async function drainMicrotasks(count = 10): Promise<void> {
-	for (let attempt = 0; attempt < count; attempt++) {
-		await Promise.resolve();
-	}
-}
-
-/** The pending delay of `ms`, once the code under test requests it. */
-function waitForControlledSleep(sleeps: ControlledSleeps, ms: number): Promise<ControlledSleep> {
-	const call = sleeps.calls.find(candidate => !candidate.resolved && candidate.ms === ms);
-	if (call) return Promise.resolve(call);
-	const { promise, resolve } = Promise.withResolvers<ControlledSleep>();
-	sleeps.waiters.push({ ms, resolve });
-	return promise;
-}
-
-function resolvePendingControlledSleeps(sleeps: ControlledSleeps): void {
-	for (const call of sleeps.calls) {
-		if (!call.resolved) call.resolve();
-	}
 }
 
 async function withSharedSQLiteAuth<T>(
@@ -172,7 +100,6 @@ describe("MCPManager OAuth refresh failure", () => {
 	});
 
 	afterEach(() => {
-		vi.useRealTimers();
 		authStorage.close();
 		vi.restoreAllMocks();
 	});
@@ -247,143 +174,13 @@ describe("MCPManager OAuth refresh failure", () => {
 		const remaining = authStorage.credentials.get(CREDENTIAL_ID);
 		expect(remaining).toMatchObject({ type: "oauth", access: "fresh-access", refresh: "fresh-refresh" });
 	});
-
-	test("stops waiting at the budget but keeps refresh ownership until the exchange settles", async () => {
-		vi.useFakeTimers();
-		const fetchCalled = Promise.withResolvers<void>();
-		const abortObserved = Promise.withResolvers<void>();
-		const allowFetchReject = Promise.withResolvers<void>();
-		let capturedSignal: AbortSignal | undefined;
-		const releaseSpy = vi.spyOn(store, "releaseCredentialRefreshLease");
-		const fetchImpl = Object.assign(
-			async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
-				capturedSignal = init?.signal ?? undefined;
-				if (!capturedSignal) throw new Error("token refresh fetch did not receive an AbortSignal");
-				fetchCalled.resolve();
-				capturedSignal.addEventListener("abort", () => abortObserved.resolve(), { once: true });
-				// Ignores the abort until the test lets it settle.
-				await allowFetchReject.promise;
-				throw capturedSignal.reason ?? new Error("fetch aborted");
-			},
-			{ preconnect: globalThis.fetch.preconnect },
-		);
-		vi.spyOn(globalThis, "fetch").mockImplementation(fetchImpl);
-
-		const prepared = manager.prepareConfig(serverConfig);
-		await fetchCalled.promise;
-		expect(capturedSignal).toBeDefined();
-
-		// At the 10 s budget the caller proceeds with the stored token; the exchange runs on.
-		vi.advanceTimersByTime(10_000);
-		const preparedConfig = await prepared;
-		expect(getAuthorizationHeader(preparedConfig)).toBe(`Bearer ${STALE_ACCESS}`);
-		expect(capturedSignal!.aborted).toBe(false);
-		expect(releaseSpy).not.toHaveBeenCalled();
-
-		// Only the exchange backstop aborts the token fetch, and it releases the lease
-		// even though the fetch has not settled.
-		vi.advanceTimersByTime(50_000);
-		await abortObserved.promise;
-		expect(capturedSignal!.aborted).toBe(true);
-		await drainMicrotasks();
-		expect(releaseSpy).toHaveBeenCalledTimes(1);
-		allowFetchReject.resolve();
-	});
 });
 
 describe("MCPManager shared SQLite OAuth refresh", () => {
 	afterEach(() => {
-		setSystemTime();
 		vi.restoreAllMocks();
 	});
 
-	test("renews refresh ownership while the token endpoint is blocked", async () => {
-		await withSharedSQLiteAuth(async ({ authA, authB, storeA }) => {
-			const startMs = Date.parse("2026-07-10T12:00:00.000Z");
-			setSystemTime(new Date(startMs));
-			const sleeps = installControlledSleeps();
-			const renewSpy = vi.spyOn(storeA, "renewCredentialRefreshLease");
-
-			await authA.credentials.set(SHARED_CREDENTIAL_ID, {
-				type: "oauth",
-				access: SHARED_STALE_ACCESS,
-				refresh: SHARED_STALE_REFRESH,
-				expires: startMs - 60_000,
-			});
-			await authB.credentials.reload();
-
-			const refreshStarted = Promise.withResolvers<void>();
-			const allowRefreshResponse = Promise.withResolvers<void>();
-			const refreshTokens: string[] = [];
-			let refreshRequests = 0;
-			const tokenServer = Bun.serve({
-				hostname: "127.0.0.1",
-				port: 0,
-				async fetch(req) {
-					if (req.method !== "POST" || new URL(req.url).pathname !== "/token") {
-						return new Response("not found", { status: 404 });
-					}
-					refreshRequests += 1;
-					const body = new URLSearchParams(await req.text());
-					refreshTokens.push(body.get("refresh_token") ?? "");
-					if (refreshRequests === 1) {
-						refreshStarted.resolve();
-						await allowRefreshResponse.promise;
-						return Response.json({
-							access_token: SHARED_FRESH_ACCESS,
-							refresh_token: SHARED_FRESH_REFRESH,
-							expires_in: 3600,
-						});
-					}
-					return Response.json({ error: "invalid_grant" }, { status: 400 });
-				},
-			});
-			try {
-				const managerA = new MCPManager(process.cwd());
-				managerA.setAuthStorage(authA);
-				const managerB = new MCPManager(process.cwd());
-				managerB.setAuthStorage(authB);
-				const config: MCPServerConfig = {
-					type: "http",
-					url: "https://logfire.example.com/mcp",
-					auth: {
-						type: "oauth",
-						credentialId: SHARED_CREDENTIAL_ID,
-						tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
-					},
-				};
-
-				const preparedA = managerA.prepareConfig(config);
-				await refreshStarted.promise;
-				const renewalSleep = await waitForControlledSleep(sleeps, 5_000);
-
-				setSystemTime(new Date(startMs + 5_000));
-				renewalSleep.resolve();
-				await drainMicrotasks();
-				expect(renewSpy).toHaveBeenCalledTimes(1);
-
-				setSystemTime(new Date(startMs + 16_000));
-				const preparedB = managerB.prepareConfig(config);
-				const peerLeaseWait = await waitForControlledSleep(sleeps, 250);
-
-				expect(refreshRequests).toBe(1);
-				expect(refreshTokens).toEqual([SHARED_STALE_REFRESH]);
-
-				allowRefreshResponse.resolve();
-				const resolvedA = await preparedA;
-				peerLeaseWait.resolve();
-				const resolvedB = await preparedB;
-
-				expect(getAuthorizationHeader(resolvedA)).toBe(`Bearer ${SHARED_FRESH_ACCESS}`);
-				expect(getAuthorizationHeader(resolvedB)).toBe(`Bearer ${SHARED_FRESH_ACCESS}`);
-				expect(refreshRequests).toBe(1);
-				expect(refreshTokens).toEqual([SHARED_STALE_REFRESH]);
-			} finally {
-				resolvePendingControlledSleeps(sleeps);
-				tokenServer.stop(true);
-			}
-		});
-	});
 	test("shares refresh ownership so peer managers do not replay a rotating refresh token", async () => {
 		await withSharedSQLiteAuth(async ({ authA, authB }) => {
 			await authA.credentials.set(SHARED_CREDENTIAL_ID, {

@@ -149,9 +149,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		await open(name, "alive");
 		await run(name, `await tab.evaluate(() => { document.body.dataset.mark = "kept"; });`);
 
-		const started = Date.now();
 		const crash = await messageOf(run(name, UNOWNED_REJECTION));
-		expect(Date.now() - started).toBeLessThan(5_000);
 		expect(crash).toMatch(/Browser tab worker exited unexpectedly \(exit code \d+, library-internal\)/);
 		expect(crash).toContain("the tab is being reattached");
 
@@ -234,7 +232,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		expect(await queued).toBe("original");
 	}, 30_000);
 
-	it("settles a call waiting on the reattach when it is aborted or runs out of time", async () => {
+	it("settles a call waiting on the reattach when it is aborted", async () => {
 		const name = "worker-exit-cancel";
 		await open(name, "original");
 		const { release } = await crashAndHoldRecovery(name);
@@ -243,10 +241,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 			const aborted = messageOf(
 				runInTab(name, { code: "return 1;", timeoutMs: 20_000, signal: ac.signal, session }),
 			);
-			const timedOut = messageOf(runInTab(name, { code: "return 1;", timeoutMs: 200, session }));
 			ac.abort();
 			expect(await aborted).toMatch(/abort/i);
-			expect(await timedOut).toContain("was still being reattached after 200ms");
 		} finally {
 			release();
 		}

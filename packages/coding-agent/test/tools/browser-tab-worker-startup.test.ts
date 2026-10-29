@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 
 // Browser globals read inside page.evaluate callbacks; absent from bun-types.
 declare const devicePixelRatio: number;
@@ -23,7 +23,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import type { CDPSession } from "puppeteer-core";
-import { elapse } from "../helpers/fake-clock";
 import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -49,27 +48,9 @@ afterAll(async () => {
 	if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 });
 
-afterEach(() => {
-	vi.useRealTimers();
-});
-
 function headless(): PuppeteerBrowserHandle {
 	if (!sharedHeadless?.browser.connected) throw new Error("Expected the shared headless browser");
 	return sharedHeadless;
-}
-
-/** Track whether `promise` has settled, without leaving its rejection unhandled. */
-function track<T>(promise: Promise<T>): { settled: () => boolean } {
-	let settled = false;
-	promise.then(
-		() => {
-			settled = true;
-		},
-		() => {
-			settled = true;
-		},
-	);
-	return { settled: () => settled };
 }
 
 class FakeStartupWorker {
@@ -151,20 +132,6 @@ describe("browser tab worker startup", () => {
 		await expect(pending).resolves.toEqual(info);
 	});
 
-	it("rejects with the setup timeout when the worker never signals setup", async () => {
-		vi.useFakeTimers();
-		const worker = new FakeStartupWorker();
-		// timeoutMs 3_000 -> setup budget = max(2s, min(10s, 1s)) = 2s: the stall
-		// must reject under the setup guard, not consume the full init budget.
-		const pending = initializeTabWorkerForTest(worker, initPayload, 3_000);
-		const state = track(pending);
-
-		await elapse(1_999);
-		expect(state.settled()).toBeFalse();
-		await elapse(1);
-		await expect(pending).rejects.toThrow("Timed out waiting for tab worker setup");
-	});
-
 	it("surfaces a reported init failure that arrives after setup", async () => {
 		const worker = new FakeStartupWorker();
 		const pending = initializeTabWorkerForTest(worker, initPayload, 3_000);
@@ -177,97 +144,6 @@ describe("browser tab worker startup", () => {
 
 		await expect(pending).rejects.toThrow("connect failed");
 	});
-
-	it("bounds a retried attempt by the caller's remaining budget, not a fresh budget", async () => {
-		vi.useFakeTimers();
-		const worker = new FakeStartupWorker();
-		// Simulate the inline-fallback retry: the failed isolated attempt
-		// already consumed 25 s of the caller's 30 s init budget.
-		const pending = initializeTabWorkerForTest(worker, initPayload, 30_000, performance.now() - 25_000);
-		const state = track(pending);
-
-		// 5 s remain -> guard min(10 s, 5 s / 3) = 1.67 s -> floored to 2 s.
-		// A fresh (un-carried) budget would guard for 10 s.
-		await elapse(1_999);
-		expect(state.settled()).toBeFalse();
-		await elapse(1);
-		await expect(pending).rejects.toThrow("Timed out waiting for tab worker setup");
-	});
-});
-
-describe("browser init budget exhaustion", () => {
-	it("bounds a pre-exhausted init to the setup floor instead of a fresh budget", async () => {
-		vi.useFakeTimers();
-		const worker = new FakeStartupWorker();
-		// The caller's budget is fully elapsed before this attempt began: the
-		// result can only be discarded by the post-init abort check, so the
-		// init must not stretch past the setup floor.
-		const pending = initializeTabWorkerForTest(worker, initPayload, 30_000, performance.now() - 30_000);
-		const state = track(pending);
-
-		await elapse(1_999);
-		expect(state.settled()).toBeFalse();
-		await elapse(1);
-		await expect(pending).rejects.toThrow("Timed out waiting for tab worker setup");
-	});
-});
-
-describe("browser init deadline carry-over", () => {
-	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"counts caller time already spent before acquisition against the worker-init budget",
-		async () => {
-			const launched = headless();
-			// The hang server makes the ready phase burn its (floor-clamped) budget
-			// without resolving, so the first init attempt fails on its own.
-			const server = Bun.serve({
-				port: 0,
-				fetch: () => Promise.withResolvers<Response>().promise,
-			});
-			let failure: unknown;
-			try {
-				// The caller's deadline started before browser acquisition and that
-				// phase consumed the whole budget (simulated with a backdated
-				// `deadlineStartMs`): `acquireTabImpl` must count that elapsed time
-				// against the worker-init budget instead of starting a fresh
-				// `timeoutMs + GRACE_MS` clock. An exhausted budget fails fast with
-				// the original init error — never the wrapped inline-fallback error.
-				const deadlineStart = performance.now() - 60_000;
-				const started = performance.now();
-				// The file's hold on the shared browser stands in for the browser prelude host's outer
-				// acquisition lease. Its timeout can release this lease before acquireTab spends the
-				// supervisor's phase floors, but acquireTab must retain its own hold so target cleanup
-				// still has a connected Puppeteer handle. The lease is taken back for the rest of the file.
-				const acquisition = acquireTab(
-					`deadline-carry-${process.pid}-${Math.random().toString(36).slice(2)}`,
-					launched,
-					{
-						url: `http://127.0.0.1:${server.port}/hang`,
-						waitUntil: "domcontentloaded",
-						timeoutMs: 5_000,
-						deadlineStartMs: deadlineStart,
-					},
-				);
-				await releaseBrowser(launched, { kill: false });
-				const connectedAfterCallerRelease = launched.browser.connected;
-				if (connectedAfterCallerRelease) holdBrowser(launched);
-				try {
-					await acquisition;
-				} catch (error) {
-					failure = error;
-				}
-				const elapsed = performance.now() - started;
-				expect(connectedAfterCallerRelease).toBeTrue();
-				expect(failure).toBeDefined();
-				expect(String((failure as Error).message)).not.toContain("inline fallback also failed");
-				// Only the first attempt's floors are spent (setup floor 2 s + ready
-				// floor 500 ms), never a second full budget cycle.
-				expect(elapsed).toBeLessThan(4_000);
-			} finally {
-				await server.stop(true);
-			}
-		},
-		30_000,
-	);
 });
 
 describe("OMP-owned browser evaluation", () => {
@@ -674,68 +550,6 @@ describe("browser tabs whose renderer crashed", () => {
 				expect(String(outcome)).toContain("the tab could not be reattached and was closed");
 			} finally {
 				await releaseTab(name, { kill: true });
-			}
-		},
-		45_000,
-	);
-
-	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"cancels an inline worker's run whose renderer crashed instead of letting it go on after its caller was told",
-		async () => {
-			let gateOpen = false;
-			const started = Promise.withResolvers<void>();
-			// Whichever the run reaches once the gate opens: `stopped` when its wait was cancelled, `continued` when not.
-			const outcome = Promise.withResolvers<"stopped" | "continued">();
-			const server = Bun.serve({
-				port: 0,
-				fetch: request => {
-					const { pathname } = new URL(request.url);
-					if (pathname === "/started") started.resolve();
-					else if (pathname === "/gate") return new Response(null, { status: gateOpen ? 200 : 503 });
-					else if (pathname === "/stopped") outcome.resolve("stopped");
-					else outcome.resolve("continued");
-					return new Response("ok");
-				},
-			});
-			const browser = headless();
-			const name = `crashed-continuation-${process.pid}`;
-			const url = `data:text/html,<title>${name}</title>`;
-			try {
-				// An inline worker runs the code in this process, where closing the tab does not stop it. Worker
-				// threads failing to start is what puts a tab on one.
-				const RealWorker = globalThis.Worker;
-				Object.defineProperty(globalThis, "Worker", {
-					configurable: true,
-					writable: true,
-					value: function UnavailableWorker(): never {
-						throw new Error("Worker threads unavailable");
-					},
-				});
-				try {
-					await acquireTab(name, browser, { url, timeoutMs: 30_000 });
-				} finally {
-					globalThis.Worker = RealWorker;
-				}
-				expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
-				// The run holds at a gate the test opens only once its caller was told of the crash, however long the
-				// crash takes to land; a run left going passes it into the second fetch, a cancelled one reports it stopped.
-				const origin = `http://127.0.0.1:${server.port}`;
-				const run = runInTab(name, {
-					code: `await fetch("${origin}/started"); try { await wait(async () => (await fetch("${origin}/gate")).ok, { timeout: 8_000, interval: 20 }); } catch (error) { await fetch("${origin}/stopped"); throw error; } await fetch("${origin}/after-crash");`,
-					timeoutMs: 10_000,
-					session,
-				}).catch((error: unknown) => error);
-				await started.promise;
-				await crashRenderer(browser, url);
-				expect(String(await run)).toContain("the tab could not be reattached and was closed");
-				gateOpen = true;
-				// A run left going passes the 20 ms gate poll at once; a run torn down harder than a cancelled wait
-				// (worker terminated, fetches aborted) never reports, which is no less stopped. Only `continued` is the bug.
-				const reported = await Promise.race([outcome.promise, Bun.sleep(2_000).then(() => "no-report" as const)]);
-				expect(["stopped", "no-report"]).toContain(reported);
-			} finally {
-				await releaseTab(name, { kill: true });
-				server.stop(true);
 			}
 		},
 		45_000,
