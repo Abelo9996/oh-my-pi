@@ -9,6 +9,7 @@
 
 ### Added
 
+- Added `auto` option to `tui.autoGraph` setting with default `auto`
 - Added `ReplyWriteComponent`, `isReplyWrite`, `toolResultReplies`, and `replyDisplayMessage` (`chat/reply-write`): `write` calls to `reply`-scoped URLs (`out://`) and tool-result `details.replies` draw as assistant prose; `createReplyWriteComponent()` builds one wired to the interactive context
 - `InternalUrlSchemeSpec` exposes `write.scope` (`SchemeWriteScope`, now including `reply`) and `InternalUrlSchemeHost` requires `specs()`; `BashToolDetails.replies` carries text a command wrote to `out://`
 - Added file-backed task previews and optional `taskFile` and `taskFileSha256` provenance on `AgentProgress` and `SingleResult` ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal)).
@@ -18,6 +19,7 @@
 - `setExtensionLinks()` makes markdown draw links of registered schemes as a dotted-underlined label without URL suffix or terminal hyperlink; `Composer.viewportLinkAt()` and `Composer.startLinkHints()` / `typeLinkHint()` pick them by click or keyboard tag (new `app.links.hint` keybinding, Alt+O) ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 ### Changed
 
+- Changed TableChartPlanner to allow undefined return, falling back to local guess when no judge is available
 - Rewind selector now automatically skips turns that render no output
 - Improved view placement for JSON trees when output lines are column‑capped
 - On a terminal expected to speak TSP, a `deferInput` start delivers plain typing (printable text, Backspace) to the focused component live; only the first other key and the keys after it wait for `TUI.releaseHeldInput()`
@@ -29,6 +31,7 @@
 - Typing `B)` or `8)` no longer turns into 😎 (so "option B)" and "step 8)" stay as typed); `B-)` and `8-)` still do
 ### Fixed
 
+- Fixed table charts marking the worse value "best" from header keywords: without a judge, a measure is better higher or lower only when its unit says so (rates per second, durations, scores, and sizes or money beside a baseline); `shouldJudge` now also sends single-measure tables the local guess would chart to the judge
 - Fixed the LSP diagnostics view showing "No issues" for files whose language server had not reported yet; they now show as unverified ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed Esc-Esc rewind in Tern opening on, and stepping onto, a turn that shows nothing (one interrupted before any output) instead of the last turn shown
 
