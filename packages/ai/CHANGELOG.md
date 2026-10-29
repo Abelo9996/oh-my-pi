@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
 ### Breaking Changes
 
 - Moved Anthropic header and endpoint helpers, along with Codex session/transport inspection and OpenAI Responses replay/storage helpers, to dedicated provider modules. Update imports from the previous locations.

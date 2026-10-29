@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
 ### Breaking Changes
 
 - Custom tool loaders now resolve the injected host SDK themselves; constructors take cwd as their first argument instead of a pi namespace.

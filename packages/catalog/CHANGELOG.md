@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
 ### Breaking Changes
 
 - Removed the raw `@oh-my-pi/pi-catalog/models.json` export; use the bundled model registry APIs instead.
