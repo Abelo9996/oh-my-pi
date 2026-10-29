@@ -416,13 +416,15 @@ jobs:
          # must never fail native_addons and with it every test job.
          # PR runs restore this entry on GitHub-hosted runners, which read
          # GitHub's cache; on vmon runners actions/cache goes to the node's
-         # local cache. The vmon runner keeps GitHub's results URL as
-         # ACTIONS_RESULTS_ORL, so the probe and save below talk to GitHub.
+         # local cache. The vmon runner hands GitHub's results URL to node
+         # actions (not run steps) as ACTIONS_RESULTS_ORL, so a script action
+         # looks it up and the probe and save below talk to GitHub.
          - name: Locate GitHub's cache service
            id: gh-results
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-           shell: bash
-           run: echo "url=${ACTIONS_RESULTS_ORL:-$ACTIONS_RESULTS_URL}" >> "$GITHUB_OUTPUT"
+           uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+           with:
+              script: core.setOutput("url", process.env.ACTIONS_RESULTS_ORL || process.env.ACTIONS_RESULTS_URL)
          - name: Probe native addon cache entry
            id: natives-cache-probe
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
