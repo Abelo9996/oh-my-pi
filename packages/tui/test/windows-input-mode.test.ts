@@ -267,7 +267,6 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		harness.tui.setFocus(recorder);
 		await harness.settle();
 		await harness.feed("\x1b[?1;2c");
-		vi.useFakeTimers();
 
 		// The paste-marker normalizer and the decoder both hold a relayed ESC; their
 		// 75 ms waits must not stack into ~150 ms.
@@ -285,12 +284,12 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		harness.tui.setFocus(recorder);
 		await harness.settle();
 		await harness.feed("\x1b[?1;2c");
-		vi.useFakeTimers();
 
 		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
 		process.stdin.emit("data", "\x1b[?0u");
 		expect(harness.terminal.kittyProtocolActive).toBe(true);
-		vi.runAllTimers();
+		// Past the 75 ms relayed-Escape wait window.
+		vi.advanceTimersByTime(75);
 		expect(recorder.received).toEqual(["\x1b"]);
 	});
 

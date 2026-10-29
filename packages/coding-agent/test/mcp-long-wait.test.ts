@@ -127,7 +127,7 @@ function emulateRuntimeIdleTimer(): void {
 			if ((init as { timeout?: unknown } | undefined)?.timeout === false) return realFetch(input, init);
 			const idle = new AbortController();
 			let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
-			let source: ReadableStreamDefaultReader<Uint8Array> | undefined;
+			const upstream: { reader?: { cancel(reason?: unknown): Promise<void> } } = {};
 			let timer: NodeJS.Timeout | undefined;
 			const disarm = (): void => clearTimeout(timer);
 			const arm = (): void => {
@@ -136,7 +136,7 @@ function emulateRuntimeIdleTimer(): void {
 					const error = new DOMException("The operation timed out.", "TimeoutError");
 					idle.abort(error);
 					bodyController?.error(error);
-					source?.cancel(error).catch(() => undefined);
+					upstream.reader?.cancel(error).catch(() => undefined);
 				}, RUNTIME_IDLE_MS);
 			};
 			arm();
@@ -154,7 +154,7 @@ function emulateRuntimeIdleTimer(): void {
 			}
 			arm();
 			const reader = response.body.getReader();
-			source = reader;
+			upstream.reader = reader;
 			const body = new ReadableStream<Uint8Array>({
 				start(controller) {
 					bodyController = controller;

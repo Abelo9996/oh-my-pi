@@ -49,6 +49,7 @@
 - Fixed post-edit diagnostics showing "OK" or "no issues" when one of several language servers, or one file of a batched edit, had not reported yet ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 - Fixed `lsp code_actions` passing diagnostics from an earlier version of a reopened file to quick-fix providers ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 - Fixed `lsp diagnostics` getting no report from language servers that check files only on save ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
+- Fixed live job widgets on subagent and background-job cards filling with words from files, web pages and search results the subagent read (for example a grid of dots labelled `Given`, `Never`, `[x]`): wildcard rules no longer read a subagent's tool results, a widget is checked against all output before it shows and dropped as soon as it stops fitting, and grid statuses only colour a cell when they start a word
 
 ## [18.13.3] - 2026-10-28
 

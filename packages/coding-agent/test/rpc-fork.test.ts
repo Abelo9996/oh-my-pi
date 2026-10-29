@@ -121,6 +121,8 @@ describe("RPC fork and tree navigation", () => {
 
 			expect(await rejectionOf(client.fork(firstReply))).toMatchObject({ command: "fork", code: "session_busy" });
 
+			// The fixture's "slow" turn streams until aborted.
+			await client.abort();
 			await withTimeout(idle.promise, 10_000, "Streaming turn did not finish");
 		} finally {
 			unsubscribe();
@@ -183,6 +185,8 @@ describe("RPC fork and tree navigation", () => {
 			command: "navigate_tree",
 			code: "session_busy",
 		});
+		// The fixture's "slow" turn streams until aborted.
+		await client.abort();
 		await withTimeout(idle, 10_000, "Streaming turn did not finish");
 		expect((await client.getState()).messageCount).toBe(6);
 	}, 30_000);
@@ -191,12 +195,15 @@ describe("RPC fork and tree navigation", () => {
 		const [, firstReply] = await seedTwoTurns();
 		const started = nextEvent(type => type === "notice");
 
-		const navigated = client.navigateTree(firstReply!, { summarize: true, customInstructions: "slow-summary" });
+		// The fixture answers this summary only once a user bash command is running.
+		const navigated = client.navigateTree(firstReply!, { summarize: true, customInstructions: "bash-summary" });
 		await withTimeout(started, 10_000, "Branch summary never started");
-		// `bash` skips the command queue, so it runs while the summary is still being generated.
-		const bash = client.bash("sleep 3");
+		// `bash` skips the command queue, so it runs while the summary is still being generated,
+		// and keeps running until aborted below.
+		const bash = client.bash("sleep 60");
 
 		expect(await rejectionOf(navigated)).toMatchObject({ command: "navigate_tree", code: "session_busy" });
+		await client.abortBash();
 		await bash;
 		const roles = (await client.getMessages()).map(message => message.role);
 		expect(roles.slice(0, 4)).toEqual(["user", "assistant", "user", "assistant"]);

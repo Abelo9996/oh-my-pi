@@ -18,13 +18,14 @@ afterEach(async () => {
 });
 
 /**
- * The harness needs three preconditions it cannot synthesize: POSIX `chmod`
- * (0o500 denies writes only to a non-root user), a non-blocking FIFO read, and
- * the `mkfifo` tool. Where any is missing the test skips rather than erroring.
+ * The harness needs preconditions it cannot synthesize: POSIX `chmod` (0o500
+ * denies writes only to a non-root user), FIFOs, and the `mkfifo` and `cat`
+ * tools. Where any is missing the test skips rather than erroring.
  */
 const unsupportedHarness =
 	process.platform === "win32" ||
 	Bun.which("mkfifo") === null ||
+	Bun.which("cat") === null ||
 	(typeof process.getuid === "function" && process.getuid() === 0);
 
 /**
@@ -36,9 +37,16 @@ function spawnRpcChild(options: { root: string; sessionDir: string }) {
 	const fifoPath = path.join(options.root, "stdout.fifo");
 	const mkfifo = Bun.spawnSync(["mkfifo", fifoPath]);
 	expect(mkfifo.exitCode, mkfifo.stderr.toString()).toBe(0);
-	// O_NONBLOCK is explicit: an empty blocking read on a FIFO never returns, and
-	// the drain loop's deadline check can only run between reads.
+	// O_RDWR opens without waiting for a reader and keeps the buffered frames
+	// alive until the parent drains, even if the child exits first. O_NONBLOCK
+	// gives the child the non-blocking stdout a pipe would.
 	const fifo = fs.openSync(fifoPath, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
+	let fifoOpen = true;
+	const releaseFifo = (): void => {
+		if (!fifoOpen) return;
+		fifoOpen = false;
+		fs.closeSync(fifo);
+	};
 
 	const agentDir = path.join(options.root, "agent");
 	fs.mkdirSync(agentDir, { recursive: true });
@@ -76,24 +84,55 @@ function spawnRpcChild(options: { root: string; sessionDir: string }) {
 	// the signal that the failure is in place before the directory is reopened.
 	const decoder = new TextDecoder();
 	let stderrText = "";
+	const stderrListeners = new Set<() => void>();
 	void (async () => {
 		for await (const chunk of child.stderr as ReadableStream<Uint8Array>) {
 			stderrText += decoder.decode(chunk);
+			for (const listener of stderrListeners) listener();
 		}
 	})();
 
 	return {
 		child,
-		fifo,
-		release: () => fs.closeSync(fifo),
+		release: () => {
+			releaseFifo();
+			child.kill();
+		},
 		stderrText: () => stderrText,
-		waitForStderr: async (needle: string, budgetMs: number): Promise<boolean> => {
-			const deadline = Date.now() + budgetMs;
-			while (!stderrText.includes(needle)) {
-				if (Date.now() > deadline) return false;
-				await Bun.sleep(10);
+		/** Resolves on the stderr chunk carrying `needle`; the budget only bounds a hung child. */
+		waitForStderr: (needle: string, budgetMs: number): Promise<boolean> => {
+			const { promise, resolve } = Promise.withResolvers<boolean>();
+			const settle = (found: boolean): void => {
+				clearTimeout(timer);
+				stderrListeners.delete(check);
+				resolve(found);
+			};
+			const check = (): void => {
+				if (stderrText.includes(needle)) settle(true);
+			};
+			const timer = setTimeout(() => settle(false), budgetMs);
+			stderrListeners.add(check);
+			check();
+			return promise;
+		},
+		/**
+		 * Read every frame the child writes until it exits. `cat` blocks in the
+		 * kernel until data arrives, so the parent awaits real I/O instead of
+		 * polling for EAGAIN. The parent's end is released once the child is gone;
+		 * with no writer left, `cat` reaches EOF after the last buffered byte. The
+		 * budget only bounds a child that never exits.
+		 */
+		drain: async (budgetMs: number): Promise<string> => {
+			const reader = Bun.spawn(["cat", fifoPath], { stdout: "pipe", stderr: "ignore" });
+			const output = new Response(reader.stdout).text();
+			const timer = setTimeout(() => child.kill(), budgetMs);
+			try {
+				await child.exited;
+			} finally {
+				clearTimeout(timer);
+				releaseFifo();
 			}
-			return true;
+			return output;
 		},
 	};
 }
@@ -106,37 +145,6 @@ function backlogFrames(): string {
 	}
 	frames.push(JSON.stringify({ id: "boom", type: "new_session" }));
 	return `${frames.join("\n")}\n`;
-}
-
-/** Read the child's FIFO until it is gone; EAGAIN means the buffer is empty. */
-async function drainFifo(
-	child: { exitCode: number | null; kill: () => void },
-	fifo: number,
-	budgetMs: number,
-): Promise<string> {
-	const decoder = new TextDecoder();
-	const readBuffer = Buffer.alloc(64 * 1024);
-	const deadline = Date.now() + budgetMs;
-	let output = "";
-	for (;;) {
-		let read = -1;
-		try {
-			read = fs.readSync(fifo, readBuffer, 0, readBuffer.length, null);
-		} catch {
-			read = -1;
-		}
-		if (read > 0) {
-			output += decoder.decode(readBuffer.subarray(0, read));
-			continue;
-		}
-		if (child.exitCode !== null) break;
-		if (Date.now() > deadline) {
-			child.kill();
-			break;
-		}
-		await Bun.sleep(2);
-	}
-	return output;
 }
 
 function findPersistenceNotice(output: string): Record<string, unknown> | undefined {
@@ -172,14 +180,14 @@ describe.skipIf(unsupportedHarness)("RPC shutdown on a failed session store", ()
 		fs.mkdirSync(sessionDir, { recursive: true });
 		fs.chmodSync(sessionDir, 0o500);
 
-		const { child, fifo, release, stderrText } = spawnRpcChild({ root, sessionDir });
+		const { child, release, stderrText, drain } = spawnRpcChild({ root, sessionDir });
 		try {
 			child.stdin.write(backlogFrames());
 			await child.stdin.flush();
 			child.stdin.end();
 
 			const wasQueuedAtDrain = await exitedWhileQueued(child);
-			const output = await drainFifo(child, fifo, 20_000);
+			const output = await drain(20_000);
 			const exitCode = await child.exited;
 
 			expect(exitCode).toBe(1);
@@ -206,7 +214,7 @@ describe.skipIf(unsupportedHarness)("RPC shutdown on a failed session store", ()
 		fs.mkdirSync(sessionDir, { recursive: true });
 		fs.chmodSync(sessionDir, 0o500);
 
-		const { child, fifo, release, waitForStderr } = spawnRpcChild({ root, sessionDir });
+		const { child, release, waitForStderr, drain } = spawnRpcChild({ root, sessionDir });
 		try {
 			child.stdin.write(backlogFrames());
 			await child.stdin.flush();
@@ -224,7 +232,7 @@ describe.skipIf(unsupportedHarness)("RPC shutdown on a failed session store", ()
 			child.stdin.end();
 
 			const wasQueuedAtDrain = await exitedWhileQueued(child);
-			const output = await drainFifo(child, fifo, 20_000);
+			const output = await drain(20_000);
 			const exitCode = await child.exited;
 
 			expect(exitCode).toBe(0);
