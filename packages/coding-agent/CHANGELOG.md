@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Fixed MCP servers that connect while vibe mode is on adding every MCP tool to the vibe director, which could push Anthropic requests past the 512 `tool_addition` limit; they activate when vibe mode exits ([#17340](https://github.com/can1357/oh-my-pi/issues/17340))
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
