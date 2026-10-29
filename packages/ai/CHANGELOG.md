@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Optimized provider implementation loading by switching from static imports to lazy dynamic `import` calls
 - Built-in stream dispatch loads each provider implementation on first use while preserving its existing timeout, cancellation, and host-override behavior
 - `auth.accountPolicies` `priority` now outranks a momentarily missing usage report, so new sessions stay on the preferred account ([#15124](https://github.com/can1357/oh-my-pi/pull/15124) by [@will-bogusz](https://github.com/will-bogusz))
 ### Breaking Changes

@@ -14,19 +14,8 @@ import {
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import type * as AnthropicProvider from "./anthropic";
-import type * as AzureOpenAIResponsesProvider from "./azure-openai-responses";
 import type * as BedrockProvider from "./amazon-bedrock";
 import type * as CursorProvider from "./cursor";
-import type * as AppleFoundationModelsProvider from "./apple-foundation-models";
-import type * as DevinProvider from "./devin";
-import type * as GoogleProvider from "./google";
-import type * as GoogleGeminiCliProvider from "./google-gemini-cli";
-import type * as GoogleVertexProvider from "./google-vertex";
-import type * as OllamaProvider from "./ollama";
-import type * as OpenAICodexResponsesProvider from "./openai-codex-responses";
-import type * as OpenAICompletionsProvider from "./openai-completions";
-import type * as OpenAIResponsesProvider from "./openai-responses";
 
 type ProviderStream<TApi extends Api> = (
 	model: Model<TApi>,
@@ -213,34 +202,31 @@ function createProviderStreamError<TApi extends Api>(
 /**
  * Wraps a provider stream whose module loads on first call.
  *
- * `load` MUST call `require` with a string literal: `Bun.build` bundles only
+ * `load` MUST call `import` with a string literal: `Bun.build` bundles only
  * literal specifiers, so a forwarded module name fails in compiled binaries.
- * The first call rebinds to the stream `pick` selects, so later calls skip
- * module resolution; a throwing `load` keeps the loader for the next call.
+ * A failed load or a throwing provider surfaces as the stream's `error` event.
  */
 function createLazyProviderStream<TModule, TApi extends Api>(
-	load: () => TModule,
+	load: () => Promise<TModule>,
 	pick: (mod: TModule) => ProviderStream<TApi>,
 	limits?: StreamLimits,
 ): (model: Model<TApi>, context: Context, options: OptionsForApi<TApi>) => EventStreamImpl {
-	let stream: ProviderStream<TApi> = (model, context, options) => {
-		stream = pick(load());
-		return stream(model, context, options);
-	};
 	return (model, context, options) => {
 		const outer = new EventStreamImpl();
 		const streamOptions: OptionsForApi<TApi> = options ?? {};
 
-		try {
-			const abortTracker = createAbortSourceTracker(streamOptions.signal);
-			const providerOptions: OptionsForApi<TApi> = { ...streamOptions, signal: abortTracker.requestSignal };
-			const inner = stream(model, context, providerOptions);
-			forwardStream(outer, inner, model, streamOptions, abortTracker, limits);
-		} catch (error) {
-			const message = createProviderStreamError(model, error);
-			outer.push({ type: "error", reason: "error", error: message });
-			outer.end(message);
-		}
+		load()
+			.then(mod => {
+				const abortTracker = createAbortSourceTracker(streamOptions.signal);
+				const providerOptions: OptionsForApi<TApi> = { ...streamOptions, signal: abortTracker.requestSignal };
+				const inner = pick(mod)(model, context, providerOptions);
+				forwardStream(outer, inner, model, streamOptions, abortTracker, limits);
+			})
+			.catch(error => {
+				const message = createProviderStreamError(model, error);
+				outer.push({ type: "error", reason: "error", error: message });
+				outer.end(message);
+			});
 
 		return outer;
 	};
@@ -248,61 +234,61 @@ function createLazyProviderStream<TModule, TApi extends Api>(
 
 /** Stream Anthropic responses with provider-owned timeout handling. */
 export const streamAnthropic = createLazyProviderStream(
-	(): typeof AnthropicProvider => require("./anthropic"),
+	() => import("./anthropic"),
 	mod => mod.streamAnthropic,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream Azure Responses with provider-owned timeout handling. */
 export const streamAzureOpenAIResponses = createLazyProviderStream(
-	(): typeof AzureOpenAIResponsesProvider => require("./azure-openai-responses"),
+	() => import("./azure-openai-responses"),
 	mod => mod.streamAzureOpenAIResponses,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream Google's direct API through the shared watchdog. */
 export const streamGoogle = createLazyProviderStream(
-	(): typeof GoogleProvider => require("./google"),
+	() => import("./google"),
 	mod => mod.streamGoogle,
 );
 
 /** Stream Cloud Code Assist while retaining its first-event watchdog. */
 export const streamGoogleGeminiCli = createLazyProviderStream(
-	(): typeof GoogleGeminiCliProvider => require("./google-gemini-cli"),
+	() => import("./google-gemini-cli"),
 	mod => mod.streamGoogleGeminiCli,
 	GOOGLE_GEMINI_CLI_STREAM_LIMITS,
 );
 
 /** Stream the Vertex API through the shared watchdog. */
 export const streamGoogleVertex = createLazyProviderStream(
-	(): typeof GoogleVertexProvider => require("./google-vertex"),
+	() => import("./google-vertex"),
 	mod => mod.streamGoogleVertex,
 );
 
 /** Stream Codex with provider-owned timeout handling. */
 export const streamOpenAICodexResponses = createLazyProviderStream(
-	(): typeof OpenAICodexResponsesProvider => require("./openai-codex-responses"),
+	() => import("./openai-codex-responses"),
 	mod => mod.streamOpenAICodexResponses,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream Chat Completions with provider-owned timeout handling. */
 export const streamOpenAICompletions = createLazyProviderStream(
-	(): typeof OpenAICompletionsProvider => require("./openai-completions"),
+	() => import("./openai-completions"),
 	mod => mod.streamOpenAICompletions,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream Responses with provider-owned timeout handling. */
 export const streamOpenAIResponses = createLazyProviderStream(
-	(): typeof OpenAIResponsesProvider => require("./openai-responses"),
+	() => import("./openai-responses"),
 	mod => mod.streamOpenAIResponses,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream through the host Cursor transport when installed, otherwise the built-in transport. */
 export const streamCursor = createLazyProviderStream(
-	(): typeof CursorProvider => require("./cursor"),
+	() => import("./cursor"),
 	(builtin): ProviderStream<"cursor-agent"> =>
 		(model, context, options) =>
 			(cursorStreamOverride ?? builtin.streamCursor)(model, context, options),
@@ -310,26 +296,26 @@ export const streamCursor = createLazyProviderStream(
 
 /** Stream Devin through the shared watchdog. */
 export const streamDevin = createLazyProviderStream(
-	(): typeof DevinProvider => require("./devin"),
+	() => import("./devin"),
 	mod => mod.streamDevin,
 );
 
 /** Stream Apple's on-device Foundation Model through the shared watchdog. */
 export const streamAppleFoundationModels = createLazyProviderStream(
-	(): typeof AppleFoundationModelsProvider => require("./apple-foundation-models"),
+	() => import("./apple-foundation-models"),
 	mod => mod.streamAppleFoundationModels,
 );
 
 /** Stream Ollama with OpenAI-compatible idle timeout precedence. */
 export const streamOllama = createLazyProviderStream(
-	(): typeof OllamaProvider => require("./ollama"),
+	() => import("./ollama"),
 	mod => mod.streamOllama,
 	OPENAI_IDLE_FLOORED_STREAM_LIMITS,
 );
 
 /** Stream through the host Bedrock transport when installed, otherwise the built-in transport. */
 export const streamBedrock = createLazyProviderStream(
-	(): typeof BedrockProvider => require("./amazon-bedrock"),
+	() => import("./amazon-bedrock"),
 	(builtin): ProviderStream<"bedrock-converse-stream"> =>
 		(model, context, options) =>
 			(bedrockStreamOverride ?? builtin.streamBedrock)(model, context, options),

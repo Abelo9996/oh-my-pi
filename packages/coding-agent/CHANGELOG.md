@@ -25,6 +25,7 @@
 
 ### Changed
 
+- Optimized agent startup by deferring loading of non-critical UI modules, accessibility bundles, and provider transports
 - Skill-description setup resolves exact role selectors against their provider without expanding unrelated catalogs; provider-scoped model reads reuse snapshots while keeping credential availability and runtime modifiers live
 - Normal print-mode startup defers slash-command implementation loading until a command is dispatched or an extension requests the command list
 - Session startup overlaps credential-usage reads with tool/context loading and refreshes repository context, context files, and rules concurrently; `PI_TIMING` now separates credential validation from other first-prompt preparation

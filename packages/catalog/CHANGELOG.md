@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the raw `@oh-my-pi/pi-catalog/models.json` export; use the bundled model registry APIs instead
+
 ### Added
 
 - Added `retainModelCacheConnection(dbPath)`, which keeps one connection to a non-default model cache path open until disposed, so batched reads and writes stop reopening the database each time
@@ -10,6 +14,7 @@
 
 ### Changed
 
+- Reduced bundled model catalog size and loading overhead
 - Made Factory Droid's image models the last `image` role defaults, so `generate_image` works with only a Factory login ([#17351](https://github.com/can1357/oh-my-pi/pull/17351) by [@will-bogusz](https://github.com/will-bogusz))
 - Removed `cerebras/zai-glm` from the `smol` role defaults and `openai-codex/gpt-5.5` from the `slow` ones: no bundled model has either id, and `cerebras/zai-glm-4.6` and `openai-codex/gpt-5.6-sol` already come earlier in those lists ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
