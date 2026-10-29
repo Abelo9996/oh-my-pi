@@ -359,8 +359,10 @@ export const cfgTaskPerCallModelAllow = register({
 		group: "Subagents",
 		label: "Per-Call Model Allowlist",
 		editor: "json",
+		// The editor writes the global layer; hide a project-supplied list so the repository cannot promote it.
+		condition: "perCallModelAllowNotProject",
 		description:
-			'Exact provider/model-id entries, e.g. ["anthropic/claude-sonnet-4-5"]. When set, a per-call model must also be listed here. Empty: every model the configuration grants.',
+			"Exact selectors: `provider/model-id`; OpenRouter/Vercel models must include `@upstream` (e.g. `openrouter/x@y`), even when only one route exists. When set, a per-call model must also be listed here. Empty: every model the configuration grants.",
 	},
 });
 
@@ -536,7 +538,7 @@ export const cfgTaskMaxEffort = register({
 		group: "Subagents",
 		label: "Maximum Per-Spawn Effort",
 		description:
-			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint or an explicit `:level` on a per-call model. Unset, `:inherit` and `:off` keep their existing meaning. A per-call model must support an effort at or below this ceiling; the default preserves the model's full range.",
+			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint or a per-call model. An explicit `:level` is clamped to the highest supported effort at or below this ceiling, and an omitted `:level` inherits the agent's thinking level capped at this value; cold revival re-applies the cap. Unset, `:inherit` and `:off` keep their existing meaning. A per-call model must support an effort at or below this ceiling; the default preserves the model's full range.",
 		options: THINKING_EFFORTS.map(getThinkingLevelMetadata),
 	},
 });

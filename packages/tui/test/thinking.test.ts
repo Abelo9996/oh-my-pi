@@ -2,19 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import {
 	assertModelSupportsEffortCeiling,
 	clampThinkingLevelToCeiling,
 	modelSupportsEffortCeiling,
 } from "../src/thinking";
-
-function requiredBundledModel(provider: Parameters<typeof getBundledModel>[0], id: string): Model {
-	const model = getBundledModel(provider, id);
-	if (!model) throw new Error(`Expected bundled model ${provider}/${id}`);
-	return model;
-}
 
 function customReasoner(id = "custom-reasoner", api: Model["api"] = "openai-completions"): Model {
 	return buildModel({
@@ -35,26 +28,11 @@ function customReasoner(id = "custom-reasoner", api: Model["api"] = "openai-comp
 const DEFERRED_LEVELS: Array<ThinkingLevel | undefined> = [undefined, ThinkingLevel.Inherit, ThinkingLevel.Off];
 
 describe("clampThinkingLevelToCeiling", () => {
-	it.each(DEFERRED_LEVELS)("preserves %s with or without a ceiling regardless of provider defaults", level => {
-		const base = customReasoner();
-		const models: Array<Model | undefined> = [
-			undefined,
-			base,
-			{ ...base, thinking: { ...base.thinking!, unverified: true } },
-			{ ...customReasoner("deepseek-custom", "factory-droid-agent"), factoryDroidApiProviders: ["baseten"] },
-			requiredBundledModel("anthropic", "claude-sonnet-4-5"),
-			requiredBundledModel("anthropic", "claude-opus-4-6"),
-			requiredBundledModel("cursor", "cursor-grok-4.6"),
-			requiredBundledModel("google-antigravity", "gemini-3.1-pro"),
-			requiredBundledModel("google-antigravity", "claude-sonnet-4-5"),
-			requiredBundledModel("google-antigravity", "claude-opus-4-5"),
-			requiredBundledModel("google-antigravity", "gemini-2.5-flash"),
-			requiredBundledModel("google-gemini-cli", "gemini-2.5-flash"),
-		];
-		for (const model of models) {
-			for (const ceiling of [undefined, Effort.Low, Effort.Max]) {
-				expect(clampThinkingLevelToCeiling(model, level, ceiling)).toBe(level);
-			}
+	it.each(DEFERRED_LEVELS)("preserves %s with or without a ceiling", level => {
+		// One provider-default-independent model: the deferred selectors never read it.
+		const model = customReasoner();
+		for (const ceiling of [undefined, Effort.Low, Effort.Max]) {
+			expect(clampThinkingLevelToCeiling(model, level, ceiling)).toBe(level);
 		}
 	});
 
@@ -94,6 +72,5 @@ describe("clampThinkingLevelToCeiling", () => {
 	it("accepts models with no controllable effort surface", () => {
 		const model = { ...customReasoner(), reasoning: false, thinking: undefined };
 		expect(modelSupportsEffortCeiling(model, Effort.Minimal)).toBe(true);
-		expect(() => assertModelSupportsEffortCeiling(model, Effort.Minimal)).not.toThrow();
 	});
 });

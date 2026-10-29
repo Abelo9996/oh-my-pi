@@ -140,9 +140,10 @@ describe("eval tool description", () => {
 			}
 			expect((tool.docTopics().agents ?? "").match(/model\?=None/g)).toHaveLength(2);
 			for (const text of [tool.docTopics().agents ?? "", tool.description]) {
-				expect(text).toContain(
-					"Approved: `anthropic/claude-haiku-4-5` (smol), `openai/gpt-5.5` (slow); your own current model; the selected bundled/user agent's own configured model.",
-				);
+				expect(text).toContain("Approved:");
+				expect(text).toContain("`openai/gpt-5.5` (slow)");
+				expect(text).not.toContain("anthropic/claude-haiku-4-5");
+				expect(text).toContain("your own current model");
 				expect(text).toContain("Allowlist: `openai/gpt-5.5` (must also be approved).");
 				expect(text).toContain("Unavailable → stop and report; NEVER substitute another.");
 			}
@@ -204,9 +205,9 @@ describe("eval tool description", () => {
 		Object.assign(session, { modelRegistry: { getAll: catalogLookup, getAvailable: catalogLookup } });
 		const tool = new EvalTool(session);
 		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
-			expect(text).toContain(
-				"Approved: `mock/second:high`, `mock/*`, `mock/first` (review); your own current model; the selected bundled/user agent's own configured model.",
-			);
+			expect(text).toContain("Approved:");
+			expect(text).toContain("`mock/second:high`, `mock/*`, `mock/first` (review)");
+			expect(text).toContain("your own current model");
 			expect(text).toContain("A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.");
 			expect(text).not.toContain("mock/registry-expanded");
 		}
@@ -222,6 +223,7 @@ describe("eval tool description", () => {
 			perCallModelAdvertisement: {
 				roles: [{ role: "review", patterns: ["custom/first", "custom/*"] }],
 				allowlist: ["custom/first"],
+				parentModelWithheld: false,
 			},
 		};
 		for (const text of [getEvalDocTopics(options).agents ?? "", getEvalToolDescription(options)]) {

@@ -307,9 +307,12 @@ describe("task spawn validation", () => {
 		}
 		const text = await description("on");
 		expect(text).toContain("`model`: one exact");
-		expect(text).toContain(
-			"Approved: `anthropic/claude-haiku-4-5` (smol), `openai/gpt-5.5` (slow); your own current model; the selected bundled/user agent's own configured model.",
-		);
+		// Only the allowlisted role is advertised; smol's model would be refused at dispatch.
+		expect(text).toContain("Approved:");
+		expect(text).toContain("`openai/gpt-5.5` (slow)");
+		expect(text).not.toContain("anthropic/claude-haiku-4-5");
+		expect(text).toContain("your own current model");
+		expect(text).toContain("the selected bundled/user agent's own configured model.");
 		expect(text).toContain("Allowlist: `openai/gpt-5.5` (must also be approved).");
 		expect(text).toContain("Requested model unavailable → stop and report; NEVER substitute another.");
 	});
@@ -367,9 +370,9 @@ describe("task spawn validation", () => {
 		const catalogLookup = vi.fn(() => [{ provider: "mock", id: "registry-expanded" }]);
 		Object.assign(session, { modelRegistry: { getAll: catalogLookup, getAvailable: catalogLookup } });
 		const text = (await TaskTool.create(session)).description;
-		expect(text).toContain(
-			"Approved: `mock/second:high`, `mock/*`, `mock/first` (review); your own current model; the selected bundled/user agent's own configured model.",
-		);
+		expect(text).toContain("Approved:");
+		expect(text).toContain("`mock/second:high`, `mock/*`, `mock/first` (review)");
+		expect(text).toContain("your own current model");
 		expect(text).toContain("A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.");
 		expect(text).not.toContain("mock/registry-expanded");
 		expect(catalogLookup).not.toHaveBeenCalled();

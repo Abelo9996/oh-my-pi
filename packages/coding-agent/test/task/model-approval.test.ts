@@ -337,7 +337,11 @@ const rows: Row[] = [
 
 describe("per-call model advertisement", () => {
 	it("advertises no built-in role defaults", () => {
-		expect(getPerCallModelAdvertisement(Settings.isolated())).toEqual({ roles: [], allowlist: [] });
+		expect(getPerCallModelAdvertisement(Settings.isolated())).toEqual({
+			roles: [],
+			allowlist: [],
+			parentModelWithheld: false,
+		});
 	});
 
 	it("keeps configured role order and selectors while filtering and deduplicating grants", () => {
@@ -357,14 +361,26 @@ describe("per-call model advertisement", () => {
 			},
 			"task.perCallModelAllow": ["mock/target", " mock/target ", "unavailable/model@upstream"],
 		});
+		// The allowlist narrows the advertisement: a role is listed only while an entry could admit it.
 		expect(getPerCallModelAdvertisement(settings)).toEqual({
 			roles: [
-				{ role: "smol", patterns: ["anthropic/claude-haiku-4-5"] },
 				{ role: "slow", patterns: ["unavailable/model@upstream:high"] },
-				{ role: "custom", patterns: ["anthropic/*", "mock/target"] },
+				{ role: "custom", patterns: ["mock/target"] },
 			],
 			allowlist: ["mock/target", "unavailable/model@upstream"],
+			parentModelWithheld: false,
 		});
+	});
+
+	it("withholds the own-model clause when the parent's routing cannot be written as one selector", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "mock/target" } });
+		const multiRoute = {
+			...sonnet,
+			compat: { ...sonnet.compat, openRouterRouting: { only: ["anthropic", "google-vertex"] } },
+		} as Model;
+		expect(getPerCallModelAdvertisement(settings, multiRoute).parentModelWithheld).toBe(true);
+		expect(getPerCallModelAdvertisement(settings, sonnet).parentModelWithheld).toBe(false);
+		expect(getPerCallModelAdvertisement(settings).parentModelWithheld).toBe(false);
 	});
 
 	it("reads live grant authority, excluding derived settings but honoring host overlays", () => {
@@ -382,6 +398,7 @@ describe("per-call model advertisement", () => {
 		expect(getPerCallModelAdvertisement(child)).toEqual({
 			roles: [{ role: "smol", patterns: ["mock/edited"] }],
 			allowlist: ["mock/edited"],
+			parentModelWithheld: false,
 		});
 
 		const host = root.overlay({
@@ -389,11 +406,9 @@ describe("per-call model advertisement", () => {
 			"task.perCallModelAllow": ["host/model"],
 		});
 		expect(getPerCallModelAdvertisement(host)).toEqual({
-			roles: [
-				{ role: "slow", patterns: ["host/model"] },
-				{ role: "smol", patterns: ["mock/edited"] },
-			],
+			roles: [{ role: "slow", patterns: ["host/model"] }],
 			allowlist: ["host/model"],
+			parentModelWithheld: false,
 		});
 	});
 });
