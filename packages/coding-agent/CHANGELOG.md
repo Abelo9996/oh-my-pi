@@ -68,6 +68,7 @@
 - Fixed an advisor batch that keeps failing (for example on a proxy rate limit) being retried without end instead of dropped after three failures when context maintenance re-primes the advisor before every attempt ([#17281](https://github.com/can1357/oh-my-pi/issues/17281), [#17291](https://github.com/can1357/oh-my-pi/pull/17291) by [@joshuaswarren](https://github.com/joshuaswarren))
 - Fixed a `models.yml` `thinking` override on prefix-bound Claude models dropping the catalog's prefix binding, which disabled bound-prefix preservation during pruning/compaction and the retry after a prefix-mismatch 400 ([#17276](https://github.com/can1357/oh-my-pi/issues/17276))
 - Fixed failed JSON queries on large values showing pages of the rejected value instead of the error reason and key ([#17269](https://github.com/can1357/oh-my-pi/issues/17269))
+- Fixed <kbd>F5</kbd> reporting "Nothing to retry" under the "F5 to retry" hint when a background job's result arrived after you cancelled `ask` or interrupted a tool call ([#17266](https://github.com/can1357/oh-my-pi/issues/17266))
 
 ## [18.13.3] - 2026-10-28
 
