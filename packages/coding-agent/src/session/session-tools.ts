@@ -923,6 +923,7 @@ export class SessionTools {
 		return this.runToolRegistryMutation(async () => {
 			const deferredMcpToolNames = this.#uninstallVibeTools();
 			await this.#applyActiveToolsByName([...new Set([...nextToolNames, ...deferredMcpToolNames])]);
+			this.#vibeDeferredMcpRefresh = false;
 		});
 	}
 
@@ -933,6 +934,7 @@ export class SessionTools {
 			const deferredMcpToolNames = this.#uninstallVibeTools();
 			const nextEnabled = this.getEnabledToolNames().filter(name => !removed.has(name));
 			await this.#applyActiveToolsByName([...new Set([...nextEnabled, ...deferredMcpToolNames])]);
+			this.#vibeDeferredMcpRefresh = false;
 		});
 	}
 
@@ -944,7 +946,6 @@ export class SessionTools {
 		}
 		this.#installedVibeToolNames.clear();
 		const deferredMcpToolNames = this.#vibeDeferredMcpRefresh ? [...this.#mcpManagerToolNames] : [];
-		this.#vibeDeferredMcpRefresh = false;
 		return deferredMcpToolNames;
 	}
 
