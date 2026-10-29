@@ -5451,26 +5451,27 @@ describe("lsp regressions", () => {
 			const siblingFile = path.join(siblingRoot, "src", "target.py");
 			const events: string[] = [];
 			try {
+				let indexing = false;
 				useServer(
-					FOLDER_CHANGES,
+					{ ...FOLDER_CHANGES, diagnosticProvider: true },
 					(message, srv) => {
 						if (message.method === "initialized") {
 							progress(srv, "init", "begin");
 							progress(srv, "init", "end");
 						} else if (message.method === "workspace/didChangeWorkspaceFolders") {
+							events.push("folder");
+							indexing = true;
 							progress(srv, "index", "begin");
-							// A real delay: what is tested is the client's wait against the server's own clock.
-							setTimeout(() => {
+						} else if (message.method === "textDocument/didOpen") {
+							// The checkout's index ends once its file is open, which the client does before its load wait.
+							if (indexing) {
+								indexing = false;
 								events.push("indexed");
 								progress(srv, "index", "end");
-							}, 100);
-						} else if (message.method === "textDocument/didOpen") {
-							events.push("didOpen");
-							srv.send({
-								jsonrpc: "2.0",
-								method: "textDocument/publishDiagnostics",
-								params: { uri: fileToUri(siblingFile), version: 1, diagnostics: [] },
-							});
+							}
+						} else if (message.method === "textDocument/diagnostic") {
+							events.push("pull");
+							srv.send({ jsonrpc: "2.0", id: message.id, result: { kind: "full", items: [] } });
 						} else {
 							return false;
 						}
@@ -5484,7 +5485,7 @@ describe("lsp regressions", () => {
 					file: siblingFile,
 				});
 
-				expect(events).toEqual(["indexed", "didOpen"]);
+				expect(events).toEqual(["folder", "indexed", "pull"]);
 			} finally {
 				configCache.delete(sessionRoot);
 				await lspClient.shutdownAll();

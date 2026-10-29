@@ -20,7 +20,6 @@ import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-t
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
-	ensureWorkspaceFolder,
 	ensureWorkspaceFolders,
 	getActiveClients,
 	getOrCreateClient,
@@ -385,8 +384,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							continue;
 						}
 						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
-						// Before the load wait, so it covers loading the file's checkout.
-						await ensureWorkspaceFolder(client, resolved, signal);
 						// Sync open dependencies, then make the server compute the target's
 						// diagnostics against current disk state. A report cached from an earlier
 						// call cannot be trusted: a dependency OMP never opened may have changed.
