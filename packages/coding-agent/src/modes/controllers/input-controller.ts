@@ -47,7 +47,6 @@ import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/ski
 import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensibility/slash-commands";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
-import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -1098,21 +1097,13 @@ export class InputController {
 
 			if (!text && !hasPendingImages) return;
 
-			// Continue shortcuts: "." or "c" resume the agent with a hidden agent-authored
-			// developer directive (no visible user message) instead of an empty turn, so the
-			// model continues the prior intent rather than second-guessing the interrupt.
-			// During a /guided-goal interview "c" is a plausible answer (e.g. option C),
-			// so it is sent as a normal reply there.
+			// Continue shortcuts: "." or "c" resume the agent without a visible user
+			// message (see AgentSession.resume). During a /guided-goal interview "c" is
+			// a plausible answer (e.g. option C), so it is sent as a normal reply there.
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
-					this.ctx.onInputCallback({
-						text: manualContinuePrompt,
-						cancelled: false,
-						started: true,
-						synthetic: true,
-						userInitiated: true,
-					});
+					this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true });
 				}
 				return;
 			}
@@ -1645,10 +1636,8 @@ export class InputController {
 		const isContinueShortcut = streamingBehavior === "steer" && !images && (text === "." || text === "c");
 		this.ctx.editor.clearDraft(text);
 		try {
-			// Synthetic directives must not use streamingBehavior: AgentSession would
-			// otherwise queue them as visible user messages while the target is busy.
 			if (isContinueShortcut) {
-				await target.prompt(manualContinuePrompt, { synthetic: true, userInitiated: true });
+				await target.resume();
 			} else {
 				await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
 					imageCount: images?.length ?? 0,

@@ -74,15 +74,9 @@ export type SubmittedUserInput = {
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
 	customType?: string;
-	/** Route through `session.prompt(text, { synthetic: true })` so the text lands
-	 *  as a hidden agent-authored `developer` message rather than a visible user
-	 *  turn. Used by the `c`/`.` continue shortcut. */
-	synthetic?: boolean;
-	/** Marks this submission as a deliberate user resume (set by the `.`/`c`
-	 *  continue shortcut, which is also `synthetic`). Forwarded to
-	 *  `session.prompt({ userInitiated })` so it clears advisor auto-resume
-	 *  suppression even though it is synthetic. */
-	userInitiated?: boolean;
+	/** The `.`/`c` continue shortcut: dispatch through `session.resume()` instead of
+	 *  prompting with `text`, so no visible user turn is added. */
+	resume?: boolean;
 	display?: boolean;
 	/** Queue intent if the session is (or becomes) busy when this submission is
 	 *  dispatched: "steer" (interrupt the active turn) or "followUp" (process after
