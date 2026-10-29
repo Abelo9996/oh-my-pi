@@ -1,6 +1,6 @@
 //! Sloppy matching and application: pattern parsing, candidate location,
-//! rewrite planning, overlap reconciliation, echo recovery, and the atomic
-//! apply.
+//! rewrite planning, overlap reconciliation and sequencing, echo recovery, and
+//! the atomic apply.
 //!
 //! Port of `packages/coding-agent/src/edit/sloppy.ts` lines 1651–4258.
 
@@ -2302,31 +2302,51 @@ fn reconcile_overlap(
 	})
 }
 
-#[allow(clippy::suspicious_operation_groupings, reason = "paired index bounds are intentional")]
-fn apply_operations(
+/// Edits and advisories from locating operations against one base text.
+#[derive(Default)]
+struct Plan {
+	edits:      Vec<PlannedEdit>,
+	/// Advisories tagged with the operation number that raised them.
+	notes:      Vec<(usize, String)>,
+	/// Deletion advisories keyed by operation number.
+	deletions:  BTreeMap<usize, String>,
+	/// Match start of the last located candidate, for no-op previews.
+	last_match: usize,
+}
+
+/// Locate the operations at `indices` against `content` and plan their edits.
+///
+/// An ambiguous operation is retried once after the others, excluding the
+/// spans they already claimed.
+///
+/// # Errors
+/// The first operation that fails to locate, render, or change `content`.
+#[allow(
+	clippy::suspicious_operation_groupings,
+	reason = "operation and pattern flags are distinct conditions"
+)]
+fn plan_operations(
 	content: &str,
-	input: &str,
-	context: &mut ApplyContext<'_>,
-) -> Result<String, EditError> {
-	let payload = payload_hash(input);
-	let operations = parse_section(input, content, context.path, context.streaming)?;
-	let mut removed = vec![None; operations.len()];
-	let mut planned = Vec::new();
-	let mut recovery_notes = Vec::new();
-	let mut deletion_notes = BTreeMap::new();
-	let mut last_match = 0;
-	let mut queue = (0..operations.len()).collect::<Vec<_>>();
-	let mut deferred = HashSet::new();
+	operations: &[Operation],
+	indices: &[usize],
+	removed: &mut [Option<String>],
+	context: &ApplyContext<'_>,
+	payload: u64,
+) -> Result<Plan, EditError> {
+	let mut plan = Plan::default();
+	let mut queue = indices.to_vec();
+	let mut retried = HashSet::new();
 	let mut cursor = 0;
 	while cursor < queue.len() {
 		let index = queue[cursor];
 		cursor += 1;
 		let number = index + 1;
 		if let Some(note) = &operations[index].recovery_note {
-			recovery_notes.push(note.clone());
+			plan.notes.push((number, note.clone()));
 		}
-		let exclusions = if deferred.contains(&index) {
-			planned
+		let exclusions = if retried.contains(&index) {
+			plan
+				.edits
 				.iter()
 				.map(|edit: &PlannedEdit| (edit.start, edit.end))
 				.collect::<Vec<_>>()
@@ -2344,19 +2364,22 @@ fn apply_operations(
 		let (operation, pattern, mut candidates) = match located {
 			Ok(value) => value,
 			Err(error)
-				if !deferred.contains(&index) && error.to_string().contains(" is ambiguous: ") =>
+				if !retried.contains(&index) && error.to_string().contains(" is ambiguous: ") =>
 			{
-				deferred.insert(index);
+				retried.insert(index);
 				queue.push(index);
 				continue;
 			},
 			Err(error) => return Err(error),
 		};
 		if operation.whitespace_matched {
-			recovery_notes.push(format!(
-				"Note: operation {number}'s *** Find differed from the file in whitespace only and \
-				 was matched leniently. Inserted lines are written exactly as authored — verify their \
-				 indentation."
+			plan.notes.push((
+				number,
+				format!(
+					"Note: operation {number}'s *** Find differed from the file in whitespace only and \
+					 was matched leniently. Inserted lines are written exactly as authored — verify \
+					 their indentation."
+				),
 			));
 		}
 		if operation.all {
@@ -2387,19 +2410,19 @@ fn apply_operations(
 							(offset, format!("\n{body}"))
 						},
 					};
-					planned.push(PlannedEdit {
+					plan.edits.push(PlannedEdit {
 						start: offset,
 						end: offset,
 						replacement,
 						operation_number: number,
 					});
-					last_match = candidate.match_start;
+					plan.last_match = candidate.match_start;
 				}
 			},
 			OperationRewrite::Inline { replacements } => {
 				let replacements = replacements
 					.iter()
-					.map(|rewrite| resolve_references(rewrite, &removed))
+					.map(|rewrite| resolve_references(rewrite, removed))
 					.collect::<Result<Vec<_>, _>>()?;
 				if pattern.selection_pairs.len() != replacements.len() {
 					return Err(EditError::matched(format!(
@@ -2436,7 +2459,7 @@ fn apply_operations(
 						{
 							removed[index] = Some(deleted);
 						}
-						planned.push(PlannedEdit {
+						plan.edits.push(PlannedEdit {
 							start: prepared.start,
 							end: prepared.end,
 							replacement,
@@ -2444,7 +2467,7 @@ fn apply_operations(
 						});
 						changes += 1;
 					}
-					last_match = candidate.match_start;
+					plan.last_match = candidate.match_start;
 				}
 				if changes == 0 {
 					return Err(no_op_error(
@@ -2461,7 +2484,7 @@ fn apply_operations(
 				}
 			},
 			OperationRewrite::Explicit { text } => {
-				let resolved = resolve_references(text, &removed)?;
+				let resolved = resolve_references(text, removed)?;
 				let base = if resolved.trim().is_empty() {
 					if pattern.insertion {
 						"\n".to_owned()
@@ -2492,7 +2515,7 @@ fn apply_operations(
 							if content[start..end] == *replacement {
 								continue;
 							}
-							planned.push(PlannedEdit {
+							plan.edits.push(PlannedEdit {
 								start,
 								end,
 								replacement: replacement.clone(),
@@ -2500,7 +2523,7 @@ fn apply_operations(
 							});
 							changes += 1;
 						}
-						last_match = candidate.match_start;
+						plan.last_match = candidate.match_start;
 					}
 					if changes == 0 {
 						return Err(no_op_error(
@@ -2595,7 +2618,7 @@ fn apply_operations(
 							.lines()
 							.filter(|line| !line.trim().is_empty())
 							.count();
-						deletion_notes.insert(
+						plan.deletions.insert(
 							number,
 							if operation.assumed_deletion {
 								format!(
@@ -2611,7 +2634,7 @@ fn apply_operations(
 							},
 						);
 					}
-					last_match = candidate.match_start;
+					plan.last_match = candidate.match_start;
 					let same = content[candidate.start..candidate.end] == replacement
 						|| operation.desired_state
 							&& normalize_text(&replacement).text
@@ -2623,7 +2646,7 @@ fn apply_operations(
 						if let Some((start, end)) =
 							duplicate_collapse_span(content, &candidate, &replacement)
 						{
-							planned.push(PlannedEdit {
+							plan.edits.push(PlannedEdit {
 								start,
 								end,
 								replacement,
@@ -2633,9 +2656,12 @@ fn apply_operations(
 							continue;
 						}
 						if operation.desired_state {
-							recovery_notes.push(format!(
-								"Note: operation {number} already matches the file; no change was needed \
-								 there."
+							plan.notes.push((
+								number,
+								format!(
+									"Note: operation {number} already matches the file; no change was \
+									 needed there."
+								),
 							));
 							changes += 1;
 							continue;
@@ -2649,7 +2675,7 @@ fn apply_operations(
 							None,
 						));
 					}
-					planned.push(PlannedEdit {
+					plan.edits.push(PlannedEdit {
 						start: candidate.start,
 						end: candidate.end,
 						replacement,
@@ -2670,14 +2696,30 @@ fn apply_operations(
 			},
 		}
 	}
-	if planned.is_empty() {
-		return Err(no_op_error(context, payload, None, Some((content, last_match)), None, None));
-	}
-	planned.sort_by_key(|edit| (edit.start, edit.end));
-	let mut ordered: Vec<PlannedEdit> = Vec::new();
-	for current in planned {
-		let Some(previous) = ordered.last().cloned() else {
-			ordered.push(current);
+	Ok(plan)
+}
+
+/// Merge position-sorted `edits` into disjoint splices, skipping operations
+/// in `deferred`.
+///
+/// Overlapping edits merge when [`reconcile_overlap`] proves them compatible;
+/// of one operation's own overlapping edits, the first wins.
+///
+/// # Errors
+/// The `(earlier, later)` operation numbers of the first overlap that does not
+/// merge.
+fn merge_edits<'a>(
+	content: &str,
+	edits: &'a [PlannedEdit],
+	deferred: &BTreeMap<usize, usize>,
+) -> Result<Vec<Cow<'a, PlannedEdit>>, (usize, usize)> {
+	let mut merged: Vec<Cow<'a, PlannedEdit>> = Vec::new();
+	for current in edits
+		.iter()
+		.filter(|edit| !deferred.contains_key(&edit.operation_number))
+	{
+		let Some(previous) = merged.last_mut() else {
+			merged.push(Cow::Borrowed(current));
 			continue;
 		};
 		let overlaps = current.start < previous.end
@@ -2685,42 +2727,122 @@ fn apply_operations(
 				&& current.end == current.start
 				&& previous.end == previous.start;
 		if !overlaps {
-			ordered.push(current);
+			merged.push(Cow::Borrowed(current));
 			continue;
 		}
-		if let Some(merged) = reconcile_overlap(content, &previous, &current) {
-			*ordered.last_mut().expect("present") = merged;
-			continue;
+		if let Some(reconciled) = reconcile_overlap(content, previous, current) {
+			*previous = Cow::Owned(reconciled);
+		} else if previous.operation_number != current.operation_number {
+			let (left, right) = (previous.operation_number, current.operation_number);
+			return Err((left.min(right), left.max(right)));
 		}
-		if previous.operation_number == current.operation_number {
-			continue;
-		}
-		let first_line = line_number_at(content, previous.start);
-		let second_line = line_number_at(content, current.start);
-		return Err(EditError::matched(format!(
-			"Operations {} and {} target overlapping original spans near lines {first_line} and \
-			 {second_line}.\n\nConflicting candidates:\n\nOperation {} near line \
-			 {first_line}:\n{}\n\nOperation {} near line {second_line}:\n{}\n\nKeep whichever states \
-			 the intended final text and drop the other.",
-			previous.operation_number,
-			current.operation_number,
-			previous.operation_number,
-			operation_payload(&operations[previous.operation_number - 1], context.path, false, None),
-			current.operation_number,
-			operation_payload(&operations[current.operation_number - 1], context.path, false, None)
-		)));
 	}
-	let mut result = content.to_owned();
-	for edit in ordered.into_iter().rev() {
-		result.replace_range(edit.start..edit.end, &edit.replacement);
+	Ok(merged)
+}
+
+/// Rewrite `error`'s message, keeping its rejection reason; every other
+/// variant becomes a match failure.
+fn remessage(error: EditError, rewrite: impl FnOnce(String) -> String) -> EditError {
+	let reason = match &error {
+		EditError::Rejected { reason, .. } => Some(*reason),
+		_ => None,
+	};
+	let message = rewrite(error.to_string());
+	match reason {
+		Some(reason) => EditError::rejected(reason, message),
+		None => EditError::matched(message),
 	}
-	if result == content {
-		return Err(no_op_error(context, payload, None, Some((content, last_match)), None, None));
+}
+
+/// Locate every operation against `content` and splice the edits in one pass.
+///
+/// An operation whose edits overlap an earlier operation's without
+/// reconciling is withheld and located again in that pass's result, so
+/// overlapping operations apply consecutively in operation order.
+fn apply_operations(
+	content: &str,
+	input: &str,
+	context: &mut ApplyContext<'_>,
+) -> Result<String, EditError> {
+	let payload = payload_hash(input);
+	let operations = parse_section(input, content, context.path, context.streaming)?;
+	let overlap_note = |later: usize, earlier: usize| {
+		format!(
+			"Note: operation {later} overlaps operation {earlier}, so it was located in the file as \
+			 operation {earlier} left it."
+		)
+	};
+	let mut removed = vec![None; operations.len()];
+	let mut text = content.to_owned();
+	let mut notes = Vec::new();
+	let mut deletions = BTreeMap::new();
+	let mut last_match = None;
+	let mut pending = (0..operations.len()).collect::<Vec<_>>();
+	// Operation number withheld from the previous pass → the earlier
+	// operation it overlapped.
+	let mut overlapped = BTreeMap::<usize, usize>::new();
+	while !pending.is_empty() {
+		let mut plan = plan_operations(&text, &operations, &pending, &mut removed, context, payload)
+			.map_err(|error| {
+				if overlapped.is_empty() {
+					return error;
+				}
+				remessage(error, |message| {
+					let mut preamble = overlapped
+						.iter()
+						.map(|(&later, &earlier)| overlap_note(later, earlier))
+						.collect::<Vec<_>>();
+					preamble.push(message);
+					preamble.join("\n")
+				})
+			})?;
+		last_match.get_or_insert(plan.last_match);
+		plan.edits.sort_by_key(|edit| (edit.start, edit.end));
+		let mut deferred = BTreeMap::new();
+		let merged = loop {
+			match merge_edits(&text, &plan.edits, &deferred) {
+				Ok(merged) => break merged,
+				Err((earlier, later)) => {
+					deferred.insert(later, earlier);
+				},
+			}
+		};
+		for edit in merged.iter().rev() {
+			text.replace_range(edit.start..edit.end, &edit.replacement);
+		}
+		let applied = |number: &usize| !deferred.contains_key(number);
+		notes.extend(plan.notes.into_iter().filter(|(number, _)| applied(number)));
+		deletions.extend(
+			plan
+				.deletions
+				.into_iter()
+				.filter(|(number, _)| applied(number)),
+		);
+		notes.extend(
+			overlapped
+				.iter()
+				.filter(|(later, _)| applied(later))
+				.map(|(&later, &earlier)| (later, overlap_note(later, earlier))),
+		);
+		pending = deferred.keys().map(|number| number - 1).collect();
+		overlapped = deferred;
+	}
+	if text == content {
+		return Err(no_op_error(
+			context,
+			payload,
+			None,
+			Some((content, last_match.unwrap_or_default())),
+			None,
+			None,
+		));
 	}
 	context.store.reset_noop(context.canonical);
-	context.notes.extend(recovery_notes);
-	context.notes.extend(deletion_notes.into_values());
-	Ok(result)
+	context
+		.notes
+		.extend(notes.into_iter().map(|(_, note)| note));
+	context.notes.extend(deletions.into_values());
+	Ok(text)
 }
 
 /// Parse, locate, and atomically apply one sloppy section.
@@ -2730,19 +2852,12 @@ pub fn apply_sloppy(
 	mut context: ApplyContext<'_>,
 ) -> Result<String, EditError> {
 	apply_operations(content, input, &mut context).map_err(|error| {
-		let reason = match &error {
-			EditError::Rejected { reason, .. } => Some(*reason),
-			_ => None,
-		};
-		let message = error.to_string();
-		let message = if message.contains(ATOMICITY_NOTICE) {
-			message
-		} else {
-			format!("{ATOMICITY_NOTICE}\n{message}")
-		};
-		match reason {
-			Some(reason) => EditError::rejected(reason, message),
-			None => EditError::matched(message),
-		}
+		remessage(error, |message| {
+			if message.contains(ATOMICITY_NOTICE) {
+				message
+			} else {
+				format!("{ATOMICITY_NOTICE}\n{message}")
+			}
+		})
 	})
 }
