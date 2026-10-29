@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Fixed replayed Mistral thinking adding a LiteLLM `thinking_blocks` field that Mistral rejects with `422 extra_forbidden` ([#17375](https://github.com/can1357/oh-my-pi/issues/17375))
 - Fixed native Judge API requests omitting the `omp/<version>` User-Agent used to identify omp in upstream usage statistics ([#17311](https://github.com/can1357/oh-my-pi/pull/17311) by [@BizerNotNull](https://github.com/BizerNotNull))
 - Fixed Codex capacity errors on WebSocket and SSE streams dropping the provider's Retry-After, so retries fired before the requested wait ([#17362](https://github.com/can1357/oh-my-pi/pull/17362) by [@iFwu](https://github.com/iFwu))
 - Provider-specific auth-broker usage lookups no longer wait for unrelated providers; scoped caches retain the 15-second freshness window, shared cancellation isolation, and complete aggregate reports. The server-side latency reduction requires upgrading the broker
