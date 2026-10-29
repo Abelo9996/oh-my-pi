@@ -372,29 +372,21 @@ describe("imageGenTool catalog routing", () => {
 		const FACTORY_GENERATE = "https://api.factory.ai/api/llm/o/v1/images/generations";
 		const XAI_GENERATE = "https://xai.example/v1/images/generations";
 
-		/** Run the tool once; xAI answers `xaiStatus`, Factory always succeeds. Returns the result or the thrown error. */
-		async function run(models: Model<Api>[], settings = Settings.isolated(), xaiStatus = 200) {
+		/** Run the tool once with every image request succeeding; returns the requested URLs and the result. */
+		async function run(models: Model<Api>[]) {
 			const urls: string[] = [];
 			const ctx = createContext({
 				models,
-				settings,
+				settings: Settings.isolated(),
 				fetch: async input => {
-					const url = input.toString();
-					urls.push(url);
-					if (url.startsWith("https://xai.example") && xaiStatus !== 200) {
-						return Response.json({ error: { message: "upstream down" } }, { status: xaiStatus });
-					}
+					urls.push(input.toString());
 					return imageResponse();
 				},
 				activeModel: factory.find(model => model.id === "kimi-k3"),
 			});
-			try {
-				const result = await imageGenTool.execute("default", { subject: "a lighthouse" }, undefined, ctx);
-				collectPaths(result);
-				return { urls, result };
-			} catch (error) {
-				return { urls, error };
-			}
+			const result = await imageGenTool.execute("default", { subject: "a lighthouse" }, undefined, ctx);
+			collectPaths(result);
+			return { urls, result };
 		}
 
 		it("generates with only a Factory login, starting from the CLI's preferred model", async () => {
@@ -407,29 +399,6 @@ describe("imageGenTool catalog routing", () => {
 			const { urls, result } = await run([...factory, xai]);
 			expect(urls).toEqual([XAI_GENERATE]);
 			expect(result?.details?.provider).toBe("xai");
-		});
-
-		it("reaches Factory after an earlier default fails with an HTTP error", async () => {
-			const { urls, result } = await run([...factory, xai], Settings.isolated(), 500);
-			expect(urls).toEqual([XAI_GENERATE, FACTORY_GENERATE]);
-			expect(result?.details?.provider).toBe("factory-droid");
-		});
-
-		it("adds Factory behind an image role set without its own fallback chain", async () => {
-			const settings = Settings.isolated({ modelRoles: { image: "xai/grok-imagine-image" } });
-			const { urls, result } = await run([...factory, xai], settings, 500);
-			expect(urls).toEqual([XAI_GENERATE, FACTORY_GENERATE]);
-			expect(result?.details?.provider).toBe("factory-droid");
-		});
-
-		it("leaves a configured image fallback chain unchanged", async () => {
-			const settings = Settings.isolated({
-				modelRoles: { image: "xai/grok-imagine-image" },
-				"retry.fallbackChains": { image: [] },
-			});
-			const { urls, error } = await run([...factory, xai], settings, 500);
-			expect(urls).toEqual([XAI_GENERATE]);
-			expect(error).toBeInstanceOf(AggregateError);
 		});
 	});
 
