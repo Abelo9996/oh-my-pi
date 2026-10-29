@@ -419,6 +419,8 @@ export interface InteractiveModeContext {
 	runYieldCompaction(): void;
 	/** Hand a queued `/compact` and the input in the compaction queue back to the editor. */
 	restoreCompactionQueueToEditor(): void;
+	/** Resolves once follow-up-key submissions past their input hooks reached the session or finished locally. */
+	waitForFollowUpDispatches(): Promise<void>;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
 	/** No argument restores the default; a function label is re-read on every spinner tick. */

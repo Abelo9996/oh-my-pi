@@ -8702,6 +8702,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#applyExtensionLinks();
 		await this.#uiHelpers.renderInitialMessages(options);
 		this.syncRetryHintRow();
+		// A switch or tree move that replays the transcript strands a `/compact` queued for the old position.
+		this.#inputController.releaseStaleYieldCompaction();
 	}
 	/**
 	 * Reconcile the idle "F5 to Retry" status row with the transcript tail:
@@ -9244,6 +9246,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	restoreCompactionQueueToEditor(): void {
 		this.#inputController.restoreCompactionQueueToEditor();
+	}
+
+	waitForFollowUpDispatches(): Promise<void> {
+		return this.#inputController.waitForFollowUpDispatches();
 	}
 
 	handleImagePaste(): Promise<boolean> {

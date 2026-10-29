@@ -183,6 +183,7 @@ describe("compaction queued for the next yield", () => {
 			showWarning: vi.fn(),
 			restoreCompactionQueueToEditor: vi.fn(),
 			flushCompactionQueue,
+			waitForFollowUpDispatches: vi.fn(async () => {}),
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
 		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand");
@@ -280,5 +281,22 @@ describe("compaction queued for the next yield", () => {
 		await controller.runYieldCompaction();
 
 		expect(transitioningAtCompact).toEqual([false]);
+	});
+
+	it("lets a follow-up sent before it finish dispatching before compacting", async () => {
+		const { ctx, controller, handleCompactCommand } = buildYieldCtx();
+		// A Ctrl+Q skill sent before the `/compact` is still expanding when the run ends.
+		const skillDispatch = Promise.withResolvers<void>();
+		ctx.waitForFollowUpDispatches = () => skillDispatch.promise;
+		handleCompactCommand.mockResolvedValue("ok");
+
+		const running = controller.runYieldCompaction();
+		// Every other wait settles at once; drain them so only the pending dispatch can hold the pass.
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+
+		skillDispatch.resolve();
+		await running;
+		expect(handleCompactCommand).toHaveBeenCalledTimes(1);
 	});
 });

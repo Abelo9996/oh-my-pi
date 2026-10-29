@@ -937,6 +937,38 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.compactionQueuedMessages).toEqual([]);
 	});
 
+	it("counts a follow-up as dispatched once the session admits it", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		Object.assign(ctx.session, { isStreaming: true });
+		// Queued follow-ups resolve with the run; admission is what a queued `/compact` waits for.
+		spies.prompt.mockImplementation(() => new Promise(() => {}));
+		const controller = new InputController(ctx);
+
+		editor.setText("sent before the compaction");
+		void controller.handleFollowUp();
+		await controller.waitForFollowUpDispatches();
+
+		expect(spies.prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns a request stranded by a switch to the editor before routing new input", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		withCompactionQueue(ctx);
+		Object.assign(ctx.session, { isStreaming: true, isSessionTransitioning: false });
+		// Queued in another conversation; an extension switch replayed nothing to release it.
+		ctx.yieldCompaction = { text: "/compact", sessionId: "previous-session", leafId: null };
+
+		editor.setText("for the new conversation");
+		await new InputController(ctx).handleFollowUp();
+
+		expect(ctx.yieldCompaction).toBeUndefined();
+		expect(spies.prompt).toHaveBeenCalledWith("for the new conversation", {
+			streamingBehavior: "followUp",
+			images: undefined,
+		});
+		expect(editor.getText()).toBe("/compact");
+	});
+
 	it("continue shortcuts submit a resume instead of a prompt", async () => {
 		for (const shortcut of [".", "c"]) {
 			const { InputController, ctx, editor } = await createContext();

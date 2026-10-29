@@ -2086,6 +2086,8 @@ export class CommandController {
 			// A running agent owns the next settle, which runs the request.
 			if (session.agent.state.isStreaming) return;
 			await session.waitForIdle();
+			// Follow-ups sent before the request run first, also one still dispatching (skill expansion).
+			await this.ctx.waitForFollowUpDispatches();
 			await session.waitForAdmittedSubmissions();
 			// Let a session switch commit or roll back before judging which conversation is live.
 			if (session.isSessionTransitioning) await session.waitForSessionTransition();

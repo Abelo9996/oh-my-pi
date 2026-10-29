@@ -73,7 +73,7 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { resendProgramStatus } from "../../utils/run-status";
 import { loadImageInput } from "../../utils/image-loading";
 import { materializeImageChipLinks } from "../utils/ui-helpers";
-import { conversationPosition } from "../utils/conversation-position";
+import { type ConversationPosition, continuesConversation, conversationPosition } from "../utils/conversation-position";
 import { ensureSupportedImageInput, ImageInputTooLargeError } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { type ImageAttachmentSource, tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
@@ -326,6 +326,8 @@ export class InputController {
 	 * Each submission awaits the previous one's, so queue placement follows submission order.
 	 */
 	#submissionHookOrder: Promise<void> = Promise.resolve();
+	/** Follow-up-key submissions past their input hooks that the session has not admitted yet. */
+	readonly #followUpDispatches = new Set<Promise<void>>();
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -1976,6 +1978,7 @@ export class InputController {
 				: undefined;
 		if (options.detachedText === undefined) this.ctx.editor.clearDraft(options.historyText);
 
+		this.releaseStaleYieldCompaction();
 		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
 			for (let index = 0; index < messages.length; index++) {
 				this.ctx.compactionQueuedMessages.push({
@@ -2087,31 +2090,51 @@ export class InputController {
 		this.ctx.editor.clearDraft();
 		// The conversation this was sent in; a queued `/compact` must not land in another one.
 		const origin = conversationPosition(this.ctx.sessionManager);
-
-		// Input hooks pass in submission order (shared with Enter, see `#submissionHookOrder`), so a
-		// slow hook on a queued `/compact` cannot let later input reach the queues first. Dispatch past
-		// this point decides queue placement synchronously.
-		const earlier = this.#submissionHookOrder;
-		const hooksDone = Promise.withResolvers<void>();
-		this.#submissionHookOrder = hooksDone.promise;
+		// Until this submission reaches the session (`prompt()` admits it synchronously) or finishes
+		// locally, the session cannot see it; a queued `/compact` waits for it (`waitForFollowUpDispatches`).
+		const dispatch = Promise.withResolvers<void>();
+		this.#followUpDispatches.add(dispatch.promise);
+		const admitted = () => {
+			if (this.#followUpDispatches.delete(dispatch.promise)) dispatch.resolve();
+		};
 		try {
-			await earlier;
-			if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
-			if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
-				try {
-					const input = await this.#runInputHandlers(text, images, imageLinks);
-					if (!input) return;
-					({ text, images, imageLinks } = input);
-				} catch (error) {
-					restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
-					return;
+			// Input hooks pass in submission order (shared with Enter, see `#submissionHookOrder`), so a
+			// slow hook on a queued `/compact` cannot let later input reach the queues first. Dispatch past
+			// this point decides queue placement synchronously.
+			const earlier = this.#submissionHookOrder;
+			const hooksDone = Promise.withResolvers<void>();
+			this.#submissionHookOrder = hooksDone.promise;
+			try {
+				await earlier;
+				if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
+				if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
+					try {
+						const input = await this.#runInputHandlers(text, images, imageLinks);
+						if (!input) return;
+						({ text, images, imageLinks } = input);
+					} catch (error) {
+						restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return;
+					}
 				}
+			} finally {
+				hooksDone.resolve();
 			}
+			await this.#dispatchFollowUp(text, images, imageLinks, origin, admitted);
 		} finally {
-			hooksDone.resolve();
+			admitted();
 		}
+	}
 
+	/** Dispatch a follow-up-key submission that passed its input hooks. `admitted` fires once the session holds it. */
+	async #dispatchFollowUp(
+		text: string,
+		images: ImageContent[] | undefined,
+		imageLinks: (string | undefined)[] | undefined,
+		origin: ConversationPosition,
+		admitted: () => void,
+	): Promise<void> {
 		// Ctrl+Enter detached the draft before the first await, so a side command
 		// has no editor state left to release; a render failure hands it back.
 		const restoreSideDraft = { restore: () => restoreDetachedDraft(this.ctx.editor, text, images, imageLinks) };
@@ -2125,6 +2148,7 @@ export class InputController {
 		// main-turn prompt. Builtins keep precedence, as in the dispatch below.
 		// A compaction queued for the next yield holds later follow-ups the same
 		// way, so they run after it.
+		this.releaseStaleYieldCompaction();
 		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
 			if (
 				text &&
@@ -2186,7 +2210,11 @@ export class InputController {
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
-					() => this.ctx.session.prompt(text, { streamingBehavior: "followUp", images }),
+					() => {
+						const pending = this.ctx.session.prompt(text, { streamingBehavior: "followUp", images });
+						admitted();
+						return pending;
+					},
 					{ imageCount: images?.length ?? 0 },
 				);
 			} catch (error) {
@@ -2200,9 +2228,15 @@ export class InputController {
 		// Not streaming — just submit normally
 		this.ctx.editor.addToHistory(text);
 		try {
-			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images }), {
-				imageCount: images?.length ?? 0,
-			});
+			await this.ctx.withLocalSubmission(
+				text,
+				() => {
+					const pending = this.ctx.session.prompt(text, { images });
+					admitted();
+					return pending;
+				},
+				{ imageCount: images?.length ?? 0 },
+			);
 		} catch (error) {
 			restoreOnError(error);
 		}
@@ -2253,6 +2287,21 @@ export class InputController {
 			...held.map(e => ({ text: e.text, images: e.images })),
 		]);
 		this.ctx.showStatus("Conversation changed: queued input returned to the editor");
+	}
+
+	/** A queued `/compact` whose conversation is gone (switch, tree move) goes back to the editor. */
+	releaseStaleYieldCompaction(): void {
+		const request = this.ctx.yieldCompaction;
+		if (!request || this.ctx.session.isSessionTransitioning) return;
+		if (!continuesConversation(this.ctx.sessionManager, request)) this.restoreCompactionQueueToEditor();
+	}
+
+	/**
+	 * Resolves once every follow-up-key submission that has passed its input hooks reached the session
+	 * (prompt/custom-message admission) or finished dispatching locally.
+	 */
+	async waitForFollowUpDispatches(): Promise<void> {
+		while (this.#followUpDispatches.size > 0) await Promise.all(this.#followUpDispatches);
 	}
 
 	/**
