@@ -4822,28 +4822,68 @@ describe("window() waiting for a window to appear", () => {
 		return message;
 	}
 
+	/** One event-loop turn, which fake timers leave alone: every pending promise of the worker runs first. */
+	function turn(): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		return promise;
+	}
+
+	/**
+	 * Under fake timers, let `native` list `count` times, moving the clock one 100 ms poll interval after each
+	 * listing but the last, once the worker is asleep in that interval.
+	 */
+	async function pollListings(native: OpeningSession, count: number): Promise<void> {
+		for (let listed = 1; ; listed++) {
+			while (native.listings < listed) await turn();
+			if (listed === count) return;
+			await turn();
+			vi.advanceTimersByTime(100);
+		}
+	}
+
 	it("polls a filter with wait until the window appears in a read-only run", async () => {
-		const native = new OpeningSession(4);
-		const result = await run(
-			native,
-			'return (await desktop.window({ app: "Preview", title: "report.pdf", wait: 2000 })).id',
-			true,
-		);
-		if (!result.ok) throw new Error(result.error.message);
-		expect(result.payload.returnValue).toBe("151");
-		expect(native.listings).toBe(4);
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(4);
+			const pending = run(
+				native,
+				'return (await desktop.window({ app: "Preview", title: "report.pdf", wait: 2000 })).id',
+				true,
+			);
+			await pollListings(native, 4);
+			const result = await pending;
+			if (!result.ok) throw new Error(result.error.message);
+			expect(result.payload.returnValue).toBe("151");
+			expect(native.listings).toBe(4);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("stops polling when the run is cancelled by its deadline", async () => {
-		const native = new OpeningSession(Number.POSITIVE_INFINITY);
-		const result = await run(native, 'return await desktop.window({ app: "Preview", wait: 10000 })', false, 300);
-		expect(result.ok).toBe(false);
-		if (result.ok) return;
-		expect(result.error.message).toContain("timed out");
-		const listings = native.listings;
-		// AbortSignal.timeout uses the platform clock; let a native poll interval pass to expose a surviving loop.
-		await Bun.sleep(250);
-		expect(native.listings).toBe(listings);
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(Number.POSITIVE_INFINITY);
+			const pending = run(native, 'return await desktop.window({ app: "Preview", wait: 10000 })', false, 300);
+			// Listings at 0, 100 and 200 ms; the 300 ms deadline cancels the run during the next interval.
+			await pollListings(native, 3);
+			await turn();
+			vi.advanceTimersByTime(100);
+			const result = await pending;
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			expect(result.error.message).toContain("timed out");
+			// A loop that outlived its run would list again in each later interval.
+			for (let interval = 0; interval < 5; interval++) {
+				await turn();
+				vi.advanceTimersByTime(100);
+			}
+			await turn();
+			expect(native.listings).toBe(3);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("still fails at once without wait", async () => {
@@ -4865,13 +4905,21 @@ describe("window() waiting for a window to appear", () => {
 	});
 
 	it("reports the window miss after waiting when nothing appears", async () => {
-		const native = new OpeningSession(Number.POSITIVE_INFINITY);
-		const result = await run(native, 'return await desktop.window({ app: "Preview", wait: 300 })');
-		expect(result.ok).toBe(false);
-		if (result.ok) return;
-		expect(result.error.message).toStartWith('no window matches {"app":"Preview","wait":300}');
-		expect(result.error.message).toContain("Open windows by app");
-		expect(native.listings).toBeGreaterThan(1);
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(Number.POSITIVE_INFINITY);
+			const pending = run(native, 'return await desktop.window({ app: "Preview", wait: 300 })');
+			// Listings at 0, 100, 200 and 300 ms: one more interval would end past the 300 ms wait.
+			await pollListings(native, 4);
+			const result = await pending;
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			expect(result.error.message).toStartWith('no window matches {"app":"Preview","wait":300}');
+			expect(result.error.message).toContain("Open windows by app");
+			expect(native.listings).toBe(4);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it.each(["60000", "-1", '"soon"', "NaN"])("refuses an invalid wait of %s", async wait => {
