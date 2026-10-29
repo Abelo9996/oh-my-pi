@@ -2276,7 +2276,7 @@ export class InputController {
 	 * the request, or input typed while a compaction runs) back to the editor: the conversation it was
 	 * queued for is no longer the one that will receive it.
 	 */
-	restoreCompactionQueueToEditor(): void {
+	restoreCompactionQueueToEditor(status = "Conversation changed: queued input returned to the editor"): void {
 		const request = this.ctx.yieldCompaction;
 		const held = this.ctx.compactionQueuedMessages;
 		if (!request && held.length === 0) return;
@@ -2286,7 +2286,7 @@ export class InputController {
 			...(request ? [{ text: request.text }] : []),
 			...held.map(e => ({ text: e.text, images: e.images })),
 		]);
-		this.ctx.showStatus("Conversation changed: queued input returned to the editor");
+		this.ctx.showStatus(status);
 	}
 
 	/** A queued `/compact` whose conversation is gone (switch, tree move) goes back to the editor. */

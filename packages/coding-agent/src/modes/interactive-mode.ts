@@ -9244,8 +9244,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController.handleDequeue();
 	}
 
-	restoreCompactionQueueToEditor(): void {
-		this.#inputController.restoreCompactionQueueToEditor();
+	restoreCompactionQueueToEditor(status?: string): void {
+		this.#inputController.restoreCompactionQueueToEditor(status);
 	}
 
 	waitForFollowUpDispatches(): Promise<void> {

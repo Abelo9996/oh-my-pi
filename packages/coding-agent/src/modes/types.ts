@@ -417,8 +417,8 @@ export interface InteractiveModeContext {
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	/** Start the compaction queued for the next yield, if any; it runs once the session is idle. */
 	runYieldCompaction(): void;
-	/** Hand a queued `/compact` and the input in the compaction queue back to the editor. */
-	restoreCompactionQueueToEditor(): void;
+	/** Hand a queued `/compact` and the input in the compaction queue back to the editor, saying why. */
+	restoreCompactionQueueToEditor(status?: string): void;
 	/** Resolves once follow-up-key submissions past their input hooks reached the session or finished locally. */
 	waitForFollowUpDispatches(): Promise<void>;
 	flushPendingBashComponents(): void;
