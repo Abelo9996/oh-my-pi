@@ -289,8 +289,8 @@ import {
 	Composer,
 	type ComposerPreferences,
 	type ComposerStatusCache,
-	PINNED_HUD_TOGGLE_ID,
 } from "@oh-my-pi/pi-tui/prompt/composer";
+import { PINNED_HUD_TOGGLE_ID } from "../task/output-manager";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
