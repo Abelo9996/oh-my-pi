@@ -13,6 +13,7 @@
 - Fixed Cursor models losing omp's system prompt (context files, skills, rules) from the second turn on, or whenever earlier messages precede the active one ([#17059](https://github.com/can1357/oh-my-pi/issues/17059), [#17325](https://github.com/can1357/oh-my-pi/pull/17325) by [@robfeldmann](https://github.com/robfeldmann))
 - Fixed short-lived commands that refresh an OAuth login, such as `omp token --force-refresh`, staying open for about 5 seconds after printing their result
 - Fixed TypeSafe login rejecting valid keys when `TYPESAFE_BASE_URL` is set: the key is now checked against `<base>/v1/models` instead of `<base>/models`
+- Fixed the auth gateway's debug log saying it was retrying after a usage-limit error when it returned the error to the client without retrying ([#16579](https://github.com/can1357/oh-my-pi/pull/16579) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.13.3] - 2026-10-28
 
