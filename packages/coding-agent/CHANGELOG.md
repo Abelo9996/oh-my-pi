@@ -14,6 +14,7 @@
 
 ### Changed
 
+- The source-checkout launcher skips recreating its isolated Bun startup directory when it already exists.
 - OpenAI live steering (`providers.openaiLiveSteering`) is now off by default for GPT models; typed messages wait for the next tool boundary unless you enable it, avoiding `unsupported_native_inflight_message` errors
 
 - Sub-session collector now determines compression from filename extension instead of a boolean flag
