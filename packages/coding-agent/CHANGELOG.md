@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `WebMcpController` (`tools/browser/webmcp`) now takes the Puppeteer `Page` instead of a host and options; `installWebMcp` (construct `WebMcpController` instead), `installWebMcpPageHook`, `uninstallWebMcpPageHook`, `webMcpSnapshotInPage`, `webMcpInvokeInPage`, `WEBMCP_BRIDGE_KEY` and the page-hook types are removed ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Added
 
 - The agent can reply mid-task without ending its turn by writing Markdown to `out://` (`write`, or `> out://` from bash, up to 64 KiB): the reply shows like a response, streaming as it is written, so answering a question you ask during work or a requested progress report no longer cuts the task short. On by default in the interactive TUI and off in print, RPC, and ACP sessions; set `out.enabled` to force it either way
@@ -29,6 +33,7 @@
 - The warning that a saved Codex or Claude rate-limit reset is about to expire now shows once per reset across all conversations and omp windows, and only in its final 6 hours instead of from 24 hours out; the status line keeps counting it down meanwhile
 - The `.`/`c` continue shortcut no longer adds a hidden "continue" directive when your last message is still unanswered (for example after pressing Esc before the model replied); the agent simply answers that message again
 - With `bash.gitGuard` on, `git checkout`, `switch`, `restore`, `reset` and `stash` now run in a linked worktree instead of being refused, saving any uncommitted changes they discard to `refs/omp/discarded` first; stash commands still refuse another branch's entries, and a repository's main checkout keeps every refusal ([#17349](https://github.com/can1357/oh-my-pi/pull/17349) by [@will-bogusz](https://github.com/will-bogusz))
+- Browser `webmcp*` helpers read Chrome's native WebMCP when called instead of injecting a script and `modelContext` polyfill into every page omp drives, and say why when Chrome offers a page none; Tern tabs no longer support them ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -64,6 +69,7 @@
 - Fixed `lsp code_actions` passing diagnostics from an earlier version of a reopened file to quick-fix providers ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 - Fixed `lsp diagnostics` getting no report from language servers that check files only on save ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 - Fixed live job widgets on subagent and background-job cards filling with words from files, web pages and search results the subagent read (for example a grid of dots labelled `Given`, `Never`, `[x]`): wildcard rules no longer read a subagent's tool results, a widget is checked against all output before it shows and dropped as soon as it stops fitting, and grid statuses only colour a cell when they start a word
+- Fixed `webmcpInvoke` returning an empty error when a page's tool throws, and leaving a timed-out invocation running in the page ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.13.3] - 2026-10-28
 
