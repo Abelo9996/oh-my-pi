@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Auth-gateway `ModelResolver` now receives `ModelResolveOptions` (`api`: the route's native wire; `accepts`: the scoped client's grants). A scoped client's bare id no longer falls back to scanning `listModels()`; resolvers pick the best candidate `accepts` admits
+
 ### Fixed
 
 - Fixed a cancelled request whose OAuth credential was mid-refresh killing the whole session with `[Unhandled Rejection] AbortError: OAuth refresh ownership aborted by caller` ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
