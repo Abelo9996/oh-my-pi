@@ -3,8 +3,6 @@ use std::{
 	sync::atomic::{self, AtomicUsize},
 };
 
-use pi_walker::Never;
-
 use super::*;
 use crate::testing::MemFs;
 
@@ -35,24 +33,25 @@ fn temp_tree(files: &[(&str, &str)]) -> TempTree {
 }
 
 /// Candidates as the `astGrep`/`astEdit` natives discover them.
-fn candidates(
-	fs: &BlockingFs,
+async fn candidates(
+	fs: &Fs,
 	root: &Path,
 	glob: Option<&str>,
 	lang: Option<&str>,
 ) -> Vec<Candidate> {
 	let include = glob.map(|glob| Selector::scope(glob, false).expect("glob compiles"));
+	let node_modules = include
+		.as_ref()
+		.is_some_and(Selector::mentions_node_modules);
 	let opts = Discover {
-		include: include.as_ref(),
+		include,
 		hidden: true,
 		gitignore: true,
-		node_modules: include
-			.as_ref()
-			.is_some_and(Selector::mentions_node_modules),
+		node_modules,
 		any_file: lang.is_some(),
 		..Default::default()
 	};
-	discover(fs, root, &opts, &Never).expect("discovery succeeds")
+	discover(fs, root, &opts).await.expect("discovery succeeds")
 }
 
 fn displays(candidates: &[Candidate]) -> Vec<&str> {
@@ -87,10 +86,14 @@ fn rules(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 		.collect()
 }
 
-fn rewrite_tree(tree: &TempTree, spec: &Rewrite<'_>, glob: Option<&str>) -> Result<Edited, Error> {
-	let fs = BlockingFs::native();
-	let candidates = candidates(&fs, &tree.root, glob, spec.lang);
-	rewrite(&fs, candidates, spec, &Never)
+async fn rewrite_tree(
+	tree: &TempTree,
+	spec: &Rewrite<'_>,
+	glob: Option<&str>,
+) -> Result<Edited, Error> {
+	let fs = Fs::native();
+	let candidates = candidates(&fs, &tree.root, glob, spec.lang).await;
+	rewrite(&fs, candidates, spec).await
 }
 
 fn mode(dry_run: bool) -> Mode {
@@ -101,7 +104,7 @@ const BROKEN_PYTHON: &str = "def broken(:\n    print(\"BADPY_MARKER\")\n";
 const VALID_PYTHON: &str = "def working():\n    print(\"BADPY_MARKER\")\n";
 const REWRITTEN_PYTHON: &str = "def working():\n    repr(\"BADPY_MARKER\")\n";
 
-fn edit_python_tree(
+async fn edit_python_tree(
 	tree: &TempTree,
 	dry_run: bool,
 	fail_on_parse_error: bool,
@@ -109,7 +112,7 @@ fn edit_python_tree(
 	let rules = rules(&[("print($A)", "repr($A)")]);
 	let spec =
 		Rewrite { fail_on_parse_error, ..rewrite_spec(&rules, Some("python"), mode(dry_run)) };
-	rewrite_tree(tree, &spec, Some("*.py"))
+	rewrite_tree(tree, &spec, Some("*.py")).await
 }
 
 fn compile(pattern: &str, language: SupportLang) -> Pattern {
@@ -166,7 +169,8 @@ fn error_node_patterns_are_reported_valid_ones_are_not() {
 		captures:   false,
 	};
 	let page = Page { offset: 0, limit: usize::MAX };
-	let found = find_source("foo(1);\n", SupportLang::TypeScript, &query, page, &Never)
+	let cancel = CancellationToken::new();
+	let found = find_source("foo(1);\n", SupportLang::TypeScript, &query, page, &cancel)
 		.expect("both patterns compile");
 	assert_eq!(found.total_matches, 1);
 	assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
@@ -190,11 +194,13 @@ fn error_node_warning_bounds_and_escapes_untrusted_pattern() {
 	assert!(combining.starts_with(&format!("{}…: ", "\u{0301}".repeat(48))));
 }
 
-#[test]
-fn rewrite_skips_missing_python_token_in_preview_and_apply() {
+#[tokio::test(flavor = "multi_thread")]
+async fn rewrite_skips_missing_python_token_in_preview_and_apply() {
 	let tree = temp_tree(&[("broken.py", BROKEN_PYTHON)]);
 	for dry_run in [true, false] {
-		let edited = edit_python_tree(&tree, dry_run, false).expect("invalid file should be skipped");
+		let edited = edit_python_tree(&tree, dry_run, false)
+			.await
+			.expect("invalid file should be skipped");
 		assert_eq!(edited.report.files_searched, 1);
 		assert!(edited.files.is_empty());
 		assert_eq!(edited.report.warnings, [
@@ -204,11 +210,13 @@ fn rewrite_skips_missing_python_token_in_preview_and_apply() {
 	}
 }
 
-#[test]
-fn rewrite_previews_and_applies_valid_python() {
+#[tokio::test(flavor = "multi_thread")]
+async fn rewrite_previews_and_applies_valid_python() {
 	let tree = temp_tree(&[("valid.py", VALID_PYTHON)]);
 	for dry_run in [true, false] {
-		let edited = edit_python_tree(&tree, dry_run, false).expect("valid Python should rewrite");
+		let edited = edit_python_tree(&tree, dry_run, false)
+			.await
+			.expect("valid Python should rewrite");
 		assert!(edited.report.warnings.is_empty());
 		assert_eq!(edited.files.len(), 1);
 		let changes = &edited.files[0].changes;
@@ -224,10 +232,12 @@ fn rewrite_previews_and_applies_valid_python() {
 	}
 }
 
-#[test]
-fn tolerant_rewrite_only_applies_valid_python_files() {
+#[tokio::test(flavor = "multi_thread")]
+async fn tolerant_rewrite_only_applies_valid_python_files() {
 	let tree = temp_tree(&[("a_valid.py", VALID_PYTHON), ("b_broken.py", BROKEN_PYTHON)]);
-	let edited = edit_python_tree(&tree, false, false).expect("tolerant edit should succeed");
+	let edited = edit_python_tree(&tree, false, false)
+		.await
+		.expect("tolerant edit should succeed");
 	assert_eq!(edited.report.files_searched, 2);
 	assert_eq!(edited.files.len(), 1);
 	assert_eq!(edited.files[0].changes.len(), 1);
@@ -236,11 +246,11 @@ fn tolerant_rewrite_only_applies_valid_python_files() {
 	assert_eq!(fs::read_to_string(tree.root.join("b_broken.py")).unwrap(), BROKEN_PYTHON);
 }
 
-#[test]
-fn strict_parse_failure_does_not_partially_write() {
+#[tokio::test(flavor = "multi_thread")]
+async fn strict_parse_failure_does_not_partially_write() {
 	let tree = temp_tree(&[("a_valid.py", VALID_PYTHON), ("b_broken.py", BROKEN_PYTHON)]);
 	for dry_run in [true, false] {
-		let Err(Error::Invalid(reason)) = edit_python_tree(&tree, dry_run, true) else {
+		let Err(Error::Invalid(reason)) = edit_python_tree(&tree, dry_run, true).await else {
 			panic!("strict mode should reject the missing token");
 		};
 		assert!(reason.contains("b_broken.py: parse error"), "{reason}");
@@ -276,38 +286,38 @@ fn window_materializes_only_the_page() {
 	assert_eq!(starts, [2, 3]);
 }
 
-#[test]
-fn glob_star_selects_only_direct_children() {
+#[tokio::test(flavor = "multi_thread")]
+async fn glob_star_selects_only_direct_children() {
 	let tree = temp_tree(&[("a.ts", "const a = 1;\n"), ("nested/b.ts", "const b = 2;\n")]);
-	let found = candidates(&BlockingFs::native(), &tree.root, Some("*.ts"), None);
+	let found = candidates(&Fs::native(), &tree.root, Some("*.ts"), None).await;
 	assert_eq!(displays(&found), ["a.ts"]);
 }
 
-#[test]
-fn glob_double_star_selects_recursively() {
+#[tokio::test(flavor = "multi_thread")]
+async fn glob_double_star_selects_recursively() {
 	let tree = temp_tree(&[("a.ts", "const a = 1;\n"), ("nested/b.ts", "const b = 2;\n")]);
-	let found = candidates(&BlockingFs::native(), &tree.root, Some("**/*.ts"), None);
+	let found = candidates(&Fs::native(), &tree.root, Some("**/*.ts"), None).await;
 	assert_eq!(displays(&found), ["a.ts", "nested/b.ts"]);
 }
 
-#[test]
-fn discovery_keeps_only_known_languages_unless_one_is_explicit() {
+#[tokio::test(flavor = "multi_thread")]
+async fn discovery_keeps_only_known_languages_unless_one_is_explicit() {
 	let tree = temp_tree(&[("a.ts", "const a = 1;\n"), ("notes.unknownext", "x\n")]);
-	let fs = BlockingFs::native();
-	assert_eq!(displays(&candidates(&fs, &tree.root, None, None)), ["a.ts"]);
-	assert_eq!(displays(&candidates(&fs, &tree.root, None, Some("ts"))), [
-		"a.ts",
-		"notes.unknownext"
-	]);
+	let fs = Fs::native();
+	let known = candidates(&fs, &tree.root, None, None).await;
+	assert_eq!(displays(&known), ["a.ts"]);
+	let explicit = candidates(&fs, &tree.root, None, Some("ts")).await;
+	assert_eq!(displays(&explicit), ["a.ts", "notes.unknownext"]);
 }
 
-#[test]
-fn rewrite_handles_mixed_language_tree_per_file() {
+#[tokio::test(flavor = "multi_thread")]
+async fn rewrite_handles_mixed_language_tree_per_file() {
 	let tree = temp_tree(&[("a.ts", "const f = (x) => x;\n"), ("b.rs", "fn main() {}\n")]);
 	// The arrow pattern only matches TypeScript; the Rust file is searched in
 	// its own language and left untouched instead of failing the whole run.
 	let rules = rules(&[("($X) => $X", "identity")]);
 	let edited = rewrite_tree(&tree, &rewrite_spec(&rules, None, Mode::Write), None)
+		.await
 		.expect("mixed-language tree should rewrite per file");
 	assert_eq!(edited.files.len(), 1, "only the TypeScript file matches");
 	assert_eq!(edited.report.files_searched, 2);
@@ -315,11 +325,12 @@ fn rewrite_handles_mixed_language_tree_per_file() {
 	assert_eq!(fs::read_to_string(tree.root.join("b.rs")).unwrap(), "fn main() {}\n");
 }
 
-#[test]
-fn rewrite_orders_mixed_language_pattern_warnings() {
+#[tokio::test(flavor = "multi_thread")]
+async fn rewrite_orders_mixed_language_pattern_warnings() {
 	let tree = temp_tree(&[("a.js", "const x = 1;\n"), ("b.ts", "const y = 2;\n")]);
 	let rules = rules(&[("123+", "ignored")]);
 	let edited = rewrite_tree(&tree, &rewrite_spec(&rules, None, Mode::Preview), None)
+		.await
 		.expect("mixed-language tree should report parse issues");
 	let warnings = &edited.report.warnings;
 	assert_eq!(warnings.len(), 2, "expected both languages to warn: {warnings:?}");
@@ -327,25 +338,26 @@ fn rewrite_orders_mixed_language_pattern_warnings() {
 	assert!(warnings[1].contains("typescript"), "{warnings:?}");
 }
 
-#[test]
-fn rewrite_dedupes_identical_matches_across_rules() {
+#[tokio::test(flavor = "multi_thread")]
+async fn rewrite_dedupes_identical_matches_across_rules() {
 	let tree = temp_tree(&[("a.ts", "const b = foo(bar);\n")]);
 	// Both rules rewrite the same call node identically; the deterministic
 	// edit applies once instead of failing as an ambiguous overlap.
 	let rules = rules(&[("foo($X)", "qux($X)"), ("foo(bar)", "qux(bar)")]);
 	let edited = rewrite_tree(&tree, &rewrite_spec(&rules, Some("ts"), Mode::Write), None)
+		.await
 		.expect("identical duplicate matches should apply cleanly");
 	assert_eq!(edited.files[0].changes.len(), 1, "duplicate match must be counted once");
 	assert_eq!(fs::read_to_string(tree.root.join("a.ts")).unwrap(), "const b = qux(bar);\n");
 }
 
-#[test]
-fn rewrite_does_not_partially_write_when_render_fails() {
+#[tokio::test(flavor = "multi_thread")]
+async fn rewrite_does_not_partially_write_when_render_fails() {
 	// `a.ts` rewrites cleanly; `b.ts` matches both rules with nested ranges, so
 	// rendering it fails on the overlap after `a.ts` was already rendered.
 	let tree = temp_tree(&[("a.ts", "const a = bar;\n"), ("b.ts", "const b = foo(bar);\n")]);
 	let rules = rules(&[("bar", "baz"), ("foo($X)", "qux($X)")]);
-	let result = rewrite_tree(&tree, &rewrite_spec(&rules, Some("ts"), Mode::Write), None);
+	let result = rewrite_tree(&tree, &rewrite_spec(&rules, Some("ts"), Mode::Write), None).await;
 	assert!(matches!(result, Err(Error::Invalid(_))), "overlapping edits must fail");
 	assert_eq!(fs::read_to_string(tree.root.join("a.ts")).unwrap(), "const a = bar;\n");
 	assert_eq!(fs::read_to_string(tree.root.join("b.ts")).unwrap(), "const b = foo(bar);\n");
@@ -355,20 +367,21 @@ fn rewrite_does_not_partially_write_when_render_fails() {
 fn rewrite_skip_overlaps_keeps_the_outer_match() {
 	let rules = rules(&[("foo($X)", "bar($X)")]);
 	let spec = Rewrite { skip_overlaps: true, ..rewrite_spec(&rules, None, Mode::Render) };
-	let edit = rewrite_source("foo(foo(1));\n", SupportLang::TypeScript, &spec, &Never)
+	let cancel = CancellationToken::new();
+	let edit = rewrite_source("foo(foo(1));\n", SupportLang::TypeScript, &spec, &cancel)
 		.expect("overlaps are skipped");
 	assert_eq!(edit.changes.len(), 1);
 	assert_eq!(edit.content, "bar(foo(1));\n");
 }
 
-#[test]
-fn find_streams_files_with_single_and_multi_captures() {
+#[tokio::test(flavor = "multi_thread")]
+async fn find_streams_files_with_single_and_multi_captures() {
 	let tree = temp_tree(&[
 		("a.ts", "const a = foo(1, 2);\n"),
 		("b.ts", "const b = 1;\n"),
 		("c.ts", "foo(x, y, z);\n"),
 	]);
-	let fs = BlockingFs::native();
+	let fs = Fs::native();
 	let patterns = ["foo($A, $$$REST)".to_string()];
 	let query = Query {
 		patterns:   &patterns,
@@ -377,12 +390,13 @@ fn find_streams_files_with_single_and_multi_captures() {
 		strictness: MatchStrictness::Smart,
 		captures:   true,
 	};
+	let found = candidates(&fs, &tree.root, None, None).await;
+	let mut finder = find(&fs, found, &query);
 	let mut files = Vec::new();
-	let report = find(&fs, candidates(&fs, &tree.root, None, None), &query, &Never, |file| {
-		files.push(file);
-		ControlFlow::Continue(())
-	})
-	.expect("search succeeds");
+	while let Some(file) = finder.next().await {
+		files.push(file.expect("search succeeds"));
+	}
+	let report = finder.report();
 	assert_eq!(report.files_searched, 3);
 	let shown: Vec<_> = files.iter().map(|file| file.display.as_str()).collect();
 	assert_eq!(shown, ["a.ts", "c.ts"]);
@@ -410,10 +424,10 @@ fn find_streams_files_with_single_and_multi_captures() {
 	assert_eq!(rest, ["y", ",", "z"]);
 }
 
-#[test]
-fn find_page_orders_and_pages_across_files() {
+#[tokio::test(flavor = "multi_thread")]
+async fn find_page_orders_and_pages_across_files() {
 	let tree = temp_tree(&[("a.ts", "foo(1);\nfoo(2);\n"), ("b.ts", "foo(3);\n")]);
-	let fs = BlockingFs::native();
+	let fs = Fs::native();
 	let patterns = ["foo($A)".to_string()];
 	let query = Query {
 		patterns:   &patterns,
@@ -423,7 +437,9 @@ fn find_page_orders_and_pages_across_files() {
 		captures:   false,
 	};
 	let page = Page { offset: 1, limit: 1 };
-	let found = find_page(&fs, candidates(&fs, &tree.root, None, None), &query, page, &Never)
+	let candidates = candidates(&fs, &tree.root, None, None).await;
+	let found = find_page(&fs, candidates, &query, page)
+		.await
 		.expect("search succeeds");
 	assert_eq!(found.total_matches, 3);
 	assert_eq!(found.files_with_matches, 2);
@@ -435,16 +451,17 @@ fn find_page_orders_and_pages_across_files() {
 	);
 }
 
-#[test]
-fn rewrite_goes_through_the_provider_for_url_trees() {
+#[tokio::test(flavor = "multi_thread")]
+async fn rewrite_goes_through_the_provider_for_url_trees() {
 	let (mem, fs) = MemFs::with_files(&[
 		("mem://root/src/a.ts", "const f = (x) => x;\n"),
 		("mem://root/src/nested/b.ts", "const g = (y) => y;\n"),
 		("mem://root/other.ts", "const h = (z) => z;\n"),
 	]);
 	let rules = rules(&[("($X) => $X", "identity")]);
-	let found = candidates(&fs, Path::new("mem://root/src"), None, None);
-	let edited = rewrite(&fs, found, &rewrite_spec(&rules, None, Mode::Write), &Never)
+	let found = candidates(&fs, Path::new("mem://root/src"), None, None).await;
+	let edited = rewrite(&fs, found, &rewrite_spec(&rules, None, Mode::Write))
+		.await
 		.expect("URL tree should rewrite through the provider");
 	let shown: Vec<_> = edited
 		.files
@@ -461,10 +478,10 @@ fn rewrite_goes_through_the_provider_for_url_trees() {
 	);
 }
 
-#[test]
-fn single_file_url_root_displays_its_decoded_name() {
+#[tokio::test(flavor = "multi_thread")]
+async fn single_file_url_root_displays_its_decoded_name() {
 	let (_mem, fs) = MemFs::with_files(&[("mem://root/a%20b.ts", "const a = 1;\n")]);
-	let found = candidates(&fs, Path::new("mem://root/a%20b.ts"), None, None);
+	let found = candidates(&fs, Path::new("mem://root/a%20b.ts"), None, None).await;
 	assert_eq!(found, [Candidate {
 		path:    PathBuf::from("mem://root/a%20b.ts"),
 		display: "a b.ts".to_string(),

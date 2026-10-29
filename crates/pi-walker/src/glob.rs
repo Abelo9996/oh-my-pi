@@ -18,7 +18,7 @@
 //!     recursive: true,
 //!     walk: walk::Options { gitignore: true, ..Default::default() },
 //!     ..Default::default()
-//! }, &Never)?;
+//! }).await?;
 //! ```
 
 use std::{cmp::Ordering, fmt, path::Path};
@@ -26,7 +26,7 @@ use std::{cmp::Ordering, fmt, path::Path};
 use crate::{
 	fs::{Detail, FileType, Fs},
 	pattern::{Glob, PatternError},
-	walk::{self, Action, Entry, Stop, WalkError, Worker},
+	walk::{self, Action, Entry, WalkError},
 };
 
 /// A compiled path glob in pi's dialect.
@@ -208,13 +208,8 @@ impl std::error::Error for GlobError {}
 /// Finds the entries below `root` matching `opts.pattern`.
 ///
 /// # Errors
-/// A malformed pattern, an unreadable root, or `stop` firing.
-pub fn glob(
-	fs: &Fs,
-	root: &Path,
-	opts: &GlobOptions,
-	stop: &dyn Stop,
-) -> Result<Vec<GlobMatch>, GlobError> {
+/// A malformed pattern or an unreadable root.
+pub async fn glob(fs: &Fs, root: &Path, opts: &GlobOptions) -> Result<Vec<GlobMatch>, GlobError> {
 	let pattern = match opts.pattern.trim() {
 		"" => "*",
 		pattern => pattern,
@@ -239,8 +234,8 @@ pub fn glob(
 		..opts.walk.clone()
 	};
 	let file_type = opts.file_type;
-	let entries = walk::collect(fs, root, &wopts, !opts.sort_by_mtime, stop, |worker, entry| {
-		if selector.matches(entry.path) && wanted(file_type, worker, entry) {
+	let entries = walk::collect(fs, root, &wopts, !opts.sort_by_mtime, move |_, entry| {
+		if selector.matches(entry.path) && wanted(file_type, entry) {
 			return Action::Continue;
 		}
 		if entry.file_type == FileType::Dir && selector.prunes(entry.path) {
@@ -249,9 +244,13 @@ pub fn glob(
 			Action::Skip
 		}
 	})
+	.await
 	.map_err(GlobError::Walk)?;
 
 	let mut order: Vec<Entry<'_>> = entries.iter().collect();
+	if let Some(filter) = file_type.filter(|&filter| filter != FileType::Symlink) {
+		resolve_links(fs, root, filter, &mut order).await;
+	}
 	if opts.sort_by_mtime {
 		let limit = opts.max_results.unwrap_or(usize::MAX);
 		if limit < order.len() {
@@ -279,30 +278,39 @@ pub fn glob(
 		.collect())
 }
 
-/// Applies the type filter to a matching entry. A symlink kept for its
-/// target's type is rewritten to describe the target (type, size, mtime);
-/// dangling links and links to the other type are dropped.
-fn wanted(filter: Option<FileType>, worker: &mut Worker<'_>, entry: &mut Entry<'_>) -> bool {
+/// Whether a matching entry can pass the type filter: an entry of that type,
+/// or (for a file or directory filter) a symlink to check against its target
+/// in [`resolve_links`].
+fn wanted(filter: Option<FileType>, entry: &Entry<'_>) -> bool {
 	let Some(filter) = filter else {
 		return true;
 	};
-	if entry.file_type == filter {
-		return true;
+	entry.file_type == filter
+		|| (entry.file_type == FileType::Symlink && filter != FileType::Symlink)
+}
+
+/// Rewrites each symlink kept for its target's type to describe the target
+/// (type, size, mtime); dangling links and links to the other type are
+/// dropped.
+async fn resolve_links(fs: &Fs, root: &Path, filter: FileType, order: &mut Vec<Entry<'_>>) {
+	let mut session = fs.session();
+	let mut kept = Vec::with_capacity(order.len());
+	for mut entry in order.drain(..) {
+		if entry.file_type == FileType::Symlink {
+			let abs = fs.join(root, entry.path);
+			let Ok(info) = session.stat(&abs, true).await else {
+				continue;
+			};
+			if info.file_type != Some(filter) {
+				continue;
+			}
+			entry.file_type = filter;
+			entry.size = (filter == FileType::File).then_some(info.size);
+			entry.mtime = Some(info.stamp.mtime);
+		}
+		kept.push(entry);
 	}
-	if entry.file_type != FileType::Symlink || filter == FileType::Symlink {
-		return false;
-	}
-	let abs = worker.abs(entry).to_path_buf();
-	let Ok(info) = worker.session().stat(&abs, true) else {
-		return false;
-	};
-	if info.file_type != Some(filter) {
-		return false;
-	}
-	entry.file_type = filter;
-	entry.size = (filter == FileType::File).then_some(info.size);
-	entry.mtime = Some(info.stamp.mtime);
-	true
+	*order = kept;
 }
 
 /// Newest first by millisecond, ties (and equal milliseconds) by path.
@@ -323,7 +331,7 @@ mod tests {
 	use super::{GlobError, GlobMatch, GlobOptions, Selector, build_pattern, glob};
 	use crate::{
 		fs::{FileType, Fs},
-		walk::{self, Never},
+		walk,
 	};
 
 	struct TempDir(PathBuf);
@@ -377,8 +385,10 @@ mod tests {
 		}
 	}
 
-	fn run(root: &Path, opts: &GlobOptions) -> Vec<GlobMatch> {
-		glob(&Fs::native(), root, opts, &Never).expect("glob succeeds")
+	async fn run(root: &Path, opts: &GlobOptions) -> Vec<GlobMatch> {
+		glob(&Fs::native(), root, opts)
+			.await
+			.expect("glob succeeds")
 	}
 
 	fn paths(found: &[GlobMatch]) -> Vec<&str> {
@@ -459,17 +469,20 @@ mod tests {
 		assert!(Selector::exclude(&["["]).is_err());
 	}
 
-	#[test]
-	fn node_modules_is_searched_only_when_named() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn node_modules_is_searched_only_when_named() {
 		let dir = TempDir::new();
 		dir.write("node_modules/pkg/index.js");
 		dir.write("src/index.js");
-		assert_eq!(paths(&run(dir.path(), &options("*.js"))), ["src/index.js"]);
-		assert_eq!(paths(&run(dir.path(), &options("node_modules/**/*.js"))), [
+		assert_eq!(paths(&run(dir.path(), &options("*.js")).await), ["src/index.js"]);
+		assert_eq!(paths(&run(dir.path(), &options("node_modules/**/*.js")).await), [
 			"node_modules/pkg/index.js"
 		]);
 		let included = GlobOptions { include_node_modules: Some(true), ..options("*.js") };
-		assert_eq!(paths(&run(dir.path(), &included)), ["node_modules/pkg/index.js", "src/index.js"]);
+		assert_eq!(paths(&run(dir.path(), &included).await), [
+			"node_modules/pkg/index.js",
+			"src/index.js"
+		]);
 		assert!(
 			Selector::new("node_modules/*", true)
 				.expect("compile")
@@ -477,8 +490,8 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn gitignore_prunes_ignored_directory_but_keeps_matching_sibling() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn gitignore_prunes_ignored_directory_but_keeps_matching_sibling() {
 		let dir = TempDir::new();
 		fs::create_dir_all(dir.path().join(".git")).expect("repo marker");
 		fs::write(dir.path().join(".gitignore"), "ignored/\n").expect("write gitignore");
@@ -487,49 +500,52 @@ mod tests {
 		dir.write(".git/hooks.rs");
 		let mut opts = GlobOptions { file_type: Some(FileType::File), ..options("*.rs") };
 		opts.walk.gitignore = true;
-		assert_eq!(paths(&run(dir.path(), &opts)), ["kept.rs"]);
+		assert_eq!(paths(&run(dir.path(), &opts).await), ["kept.rs"]);
 		opts.walk.gitignore = false;
-		assert_eq!(paths(&run(dir.path(), &opts)), ["ignored/drop.rs", "kept.rs"]);
+		assert_eq!(paths(&run(dir.path(), &opts).await), ["ignored/drop.rs", "kept.rs"]);
 	}
 
-	#[test]
-	fn depth_bounded_patterns_still_match_at_their_exact_depth() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn depth_bounded_patterns_still_match_at_their_exact_depth() {
 		let dir = TempDir::new();
 		dir.write("top.txt");
 		dir.write("deep/child.txt");
 		dir.write("deep/nested/leaf.txt");
 		for sort_by_mtime in [false, true] {
-			let found = |pattern: &str| {
+			let found = async |pattern: &str| {
 				let opts = GlobOptions { recursive: false, sort_by_mtime, ..options(pattern) };
-				let mut found: Vec<String> =
-					run(dir.path(), &opts).into_iter().map(|m| m.path).collect();
+				let mut found: Vec<String> = run(dir.path(), &opts)
+					.await
+					.into_iter()
+					.map(|m| m.path)
+					.collect();
 				found.sort_unstable();
 				found
 			};
-			assert_eq!(found("*.txt"), ["top.txt"]);
-			assert_eq!(found("deep/*.txt"), ["deep/child.txt"]);
-			assert_eq!(found("*/nested/leaf.txt"), ["deep/nested/leaf.txt"]);
-			assert_eq!(found("**/*.txt"), ["deep/child.txt", "deep/nested/leaf.txt", "top.txt"]);
+			assert_eq!(found("*.txt").await, ["top.txt"]);
+			assert_eq!(found("deep/*.txt").await, ["deep/child.txt"]);
+			assert_eq!(found("*/nested/leaf.txt").await, ["deep/nested/leaf.txt"]);
+			assert_eq!(found("**/*.txt").await, ["deep/child.txt", "deep/nested/leaf.txt", "top.txt"]);
 		}
 	}
 
-	#[test]
-	fn path_order_then_limit() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn path_order_then_limit() {
 		let dir = TempDir::new();
 		for name in ["b.txt", "a/z.txt", "a.txt", "c/d/e.txt"] {
 			dir.write(name);
 		}
-		let all = run(dir.path(), &options("*.txt"));
+		let all = run(dir.path(), &options("*.txt")).await;
 		assert_eq!(paths(&all), ["a.txt", "a/z.txt", "b.txt", "c/d/e.txt"]);
 		assert!(all.iter().all(|m| m.size.is_none() && m.mtime.is_none()));
 		let limited = GlobOptions { max_results: Some(2), ..options("*.txt") };
-		assert_eq!(paths(&run(dir.path(), &limited)), ["a.txt", "a/z.txt"]);
+		assert_eq!(paths(&run(dir.path(), &limited).await), ["a.txt", "a/z.txt"]);
 		let dirs = GlobOptions { file_type: Some(FileType::Dir), ..options("*") };
-		assert_eq!(paths(&run(dir.path(), &dirs)), ["a", "c", "c/d"]);
+		assert_eq!(paths(&run(dir.path(), &dirs).await), ["a", "c", "c/d"]);
 	}
 
-	#[test]
-	fn newest_first_by_millisecond_then_path() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn newest_first_by_millisecond_then_path() {
 		let dir = TempDir::new();
 		for (name, secs, millis) in [
 			("old.txt", 1_000, 0),
@@ -541,58 +557,60 @@ mod tests {
 			set_mtime(&dir.write(name), secs, millis);
 		}
 		let sorted = GlobOptions { sort_by_mtime: true, ..options("*.txt") };
-		let all = run(dir.path(), &sorted);
+		let all = run(dir.path(), &sorted).await;
 		assert_eq!(paths(&all), ["sub/newest.txt", "new-a.txt", "new-b.txt", "mid.txt", "old.txt"]);
 		assert_eq!(all[0].mtime, Some(3_000_000_000_000));
 		assert_eq!(all[0].size, Some("sub/newest.txt".len() as u64));
 		for limit in 1..=5 {
-			let top = run(dir.path(), &GlobOptions { max_results: Some(limit), ..sorted.clone() });
+			let top =
+				run(dir.path(), &GlobOptions { max_results: Some(limit), ..sorted.clone() }).await;
 			assert_eq!(paths(&top), paths(&all)[..limit], "limit {limit}");
 		}
 	}
 
-	#[test]
-	fn zero_max_results_does_not_walk() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn zero_max_results_does_not_walk() {
 		let opts = GlobOptions { max_results: Some(0), ..options("*") };
 		let missing = Path::new("/definitely/not/here/pi-walker");
 		assert!(
-			glob(&Fs::native(), missing, &opts, &Never)
+			glob(&Fs::native(), missing, &opts)
+				.await
 				.expect("no walk")
 				.is_empty()
 		);
 		let bad = GlobOptions { max_results: Some(0), ..options("[") };
-		assert!(matches!(glob(&Fs::native(), missing, &bad, &Never), Err(GlobError::Pattern(_))));
-		assert!(matches!(
-			glob(&Fs::native(), missing, &options("*"), &Never),
-			Err(GlobError::Walk(_))
-		));
+		assert!(matches!(glob(&Fs::native(), missing, &bad).await, Err(GlobError::Pattern(_))));
+		assert!(matches!(glob(&Fs::native(), missing, &options("*")).await, Err(GlobError::Walk(_))));
 	}
 
-	#[test]
-	fn provider_url_trees_list_raw_relative_paths() {
-		let (_mem, blocking) = crate::testing::MemFs::with_files(&[
+	#[tokio::test(flavor = "multi_thread")]
+	async fn provider_url_trees_list_raw_relative_paths() {
+		let (_mem, vfs) = crate::testing::MemFs::with_files(&[
 			("mem://root/dir/a.rs", "fn a() {}\n"),
 			("mem://root/dir/a%20b.rs", "fn ab() {}\n"),
 			("mem://root/dir/sub/b.rs", "fn b() {}\n"),
 			("mem://root/dir/sub/c.txt", "c\n"),
 			("mem://root/outside.rs", "fn outside() {}\n"),
 		]);
-		let fs = Fs::Provider(blocking);
+		let fs = Fs::Provider(vfs);
 		let root = Path::new("mem://root/dir");
-		let found = |opts: &GlobOptions| -> Vec<String> {
-			glob(&fs, root, opts, &Never)
+		let found = async |opts: &GlobOptions| -> Vec<String> {
+			glob(&fs, root, opts)
+				.await
 				.expect("glob")
 				.into_iter()
 				.map(|m| m.path)
 				.collect()
 		};
-		assert_eq!(found(&options("*.rs")), ["a b.rs", "a.rs", "sub/b.rs"]);
-		assert_eq!(found(&GlobOptions { file_type: Some(FileType::Dir), ..options("*") }), ["sub"]);
+		assert_eq!(found(&options("*.rs")).await, ["a b.rs", "a.rs", "sub/b.rs"]);
+		assert_eq!(found(&GlobOptions { file_type: Some(FileType::Dir), ..options("*") }).await, [
+			"sub"
+		]);
 	}
 
 	#[cfg(unix)]
-	#[test]
-	fn file_filtered_symlinks_keep_target_metadata_and_exclude_dangling_links() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn file_filtered_symlinks_keep_target_metadata_and_exclude_dangling_links() {
 		let dir = TempDir::new();
 		fs::create_dir(dir.path().join("scope")).expect("create scope");
 		let target = dir.path().join("target.ts");
@@ -609,7 +627,7 @@ mod tests {
 				sort_by_mtime,
 				..options("*")
 			};
-			let found = run(&dir.path().join("scope"), &opts);
+			let found = run(&dir.path().join("scope"), &opts).await;
 			assert_eq!(found, [GlobMatch {
 				path:      "source.ts".to_owned(),
 				file_type: FileType::File,
@@ -617,17 +635,17 @@ mod tests {
 				mtime:     Some(1_600_000_000_000_000_000),
 			}]);
 			let dirs = GlobOptions { file_type: Some(FileType::Dir), ..opts };
-			assert_eq!(paths(&run(&dir.path().join("scope"), &dirs)), ["up"]);
+			assert_eq!(paths(&run(&dir.path().join("scope"), &dirs).await), ["up"]);
 		}
 		let untyped = GlobOptions { recursive: false, ..options("*") };
-		let found = run(&dir.path().join("scope"), &untyped);
+		let found = run(&dir.path().join("scope"), &untyped).await;
 		assert!(found.iter().all(|m| m.file_type == FileType::Symlink), "{found:?}");
 		assert_eq!(found.len(), 3);
 	}
 
 	#[cfg(unix)]
-	#[test]
-	fn follows_descendant_links_only_when_requested_and_stops_cycles() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn follows_descendant_links_only_when_requested_and_stops_cycles() {
 		let dir = TempDir::new();
 		fs::create_dir_all(dir.path().join("scope")).expect("create scope");
 		dir.write("shared/nested/sequence.py");
@@ -642,7 +660,7 @@ mod tests {
 				..options("**/*.py")
 			};
 			opts.walk.follow_links = follow_links;
-			let found = run(&dir.path().join("scope"), &opts);
+			let found = run(&dir.path().join("scope"), &opts).await;
 			let want: &[&str] = if follow_links {
 				&["link/nested/sequence.py"]
 			} else {

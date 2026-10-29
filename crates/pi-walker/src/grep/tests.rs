@@ -2,20 +2,20 @@ use std::{
 	fmt::Write as _,
 	fs,
 	path::{Path, PathBuf},
-	sync::atomic::{AtomicU64, AtomicUsize, Ordering},
-	time::{SystemTime, UNIX_EPOCH},
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
+	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
 use super::{
-	ContextLine, Engine, GrepError, GrepOptions, GrepResult, MAX_FILE_BYTES, Match, MatchSink, Mode,
+	ContextLine, Engine, GrepError, GrepOptions, GrepResult, MAX_FILE_BYTES, Match, Mode,
 	SearchOptions, grep, scan, search,
 };
-use crate::{
-	fs::Fs,
-	walk::{self, Never, WalkError},
-};
+use crate::{fs::Fs, walk};
 
 struct TempDir(PathBuf);
 
@@ -50,8 +50,8 @@ impl Drop for TempDir {
 	}
 }
 
-fn needle() -> Engine {
-	compile("needle")
+fn needle() -> Arc<Engine> {
+	Arc::new(compile("needle"))
 }
 
 fn compile(pattern: &str) -> Engine {
@@ -59,15 +59,35 @@ fn compile(pattern: &str) -> Engine {
 }
 
 /// pi's natives defaults with ignore files off.
-fn options(engine: &Engine) -> GrepOptions<'_> {
+fn options(engine: &Arc<Engine>) -> GrepOptions {
 	GrepOptions {
 		walk: walk::Options { hidden: true, gitignore: false, ..walk::Options::default() },
-		..GrepOptions::new(engine)
+		..GrepOptions::new(engine.clone())
 	}
 }
 
-fn run(root: &Path, opts: &GrepOptions<'_>) -> GrepResult {
-	grep(&Fs::native(), root, opts, &Never).expect("grep succeeds")
+async fn run(root: &Path, opts: &GrepOptions) -> GrepResult {
+	grep(&Fs::native(), root, opts.clone())
+		.await
+		.expect("grep succeeds")
+}
+
+/// Runs a streamed search, draining the sink concurrently.
+async fn run_sunk(
+	root: &Path,
+	mut opts: GrepOptions,
+) -> (Result<GrepResult, GrepError>, Vec<Vec<Match>>) {
+	let (tx, mut rx) = mpsc::channel(4);
+	opts.sink = Some(tx);
+	let drain = async {
+		let mut batches = Vec::new();
+		while let Some(batch) = rx.recv().await {
+			batches.push(batch);
+		}
+		batches
+	};
+	let fs = Fs::native();
+	tokio::join!(grep(&fs, root, opts), drain)
 }
 
 fn paths(result: &GrepResult) -> Vec<&str> {
@@ -97,26 +117,6 @@ fn make_fifo(path: &Path) {
 	// SAFETY: `c_path` is a valid NUL-terminated string alive for the call.
 	let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
 	assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
-}
-
-#[derive(Default)]
-struct RecordingSink {
-	batches: Mutex<Vec<Vec<Match>>>,
-}
-
-impl MatchSink for RecordingSink {
-	fn deliver(&self, batch: Vec<Match>) -> Result<(), String> {
-		self.batches.lock().push(batch);
-		Ok(())
-	}
-}
-
-struct FailingSink;
-
-impl MatchSink for FailingSink {
-	fn deliver(&self, _: Vec<Match>) -> Result<(), String> {
-		Err("consumer gone".to_owned())
-	}
 }
 
 // ----- in-memory search: rendering, context, limits ------------------------
@@ -370,7 +370,7 @@ fn long_line_window_shows_an_empty_match_at_the_end_of_input() {
 	}
 }
 
-/// Line-mode outcome and matches of the scanner and of grep-searcher.
+/// Line-mode outcome and matches of the scanner and of the chunked stream.
 fn scan_both<M: grep_matcher::Matcher>(
 	matcher: &M,
 	doc: &[u8],
@@ -427,19 +427,20 @@ fn scanner_matches_grep_searcher_in_line_mode() {
 
 // ----- file roots -----------------------------------------------------------
 
-#[test]
-fn single_file_count_mode_reports_every_match() {
+#[tokio::test(flavor = "multi_thread")]
+async fn single_file_count_mode_reports_every_match() {
 	let dir = TempDir::new();
 	let file = dir.write("only.txt", "needle 1\nneedle 2\nneedle 3\nneedle 4\nneedle 5\n");
 	let engine = needle();
-	let res = run(&file, &GrepOptions { mode: Mode::Count, max_count: Some(2), ..options(&engine) });
+	let res =
+		run(&file, &GrepOptions { mode: Mode::Count, max_count: Some(2), ..options(&engine) }).await;
 	assert_eq!(res.matches.len(), 1);
 	assert_eq!(res.matches[0].count, Some(5));
 	assert_eq!(res.matches[0].path, file.to_string_lossy());
 }
 
-#[test]
-fn single_file_honours_max_count_per_file_and_keeps_offset() {
+#[tokio::test(flavor = "multi_thread")]
+async fn single_file_honours_max_count_per_file_and_keeps_offset() {
 	let dir = TempDir::new();
 	let hot = dir.write("hot.txt", "needle 1\nneedle 2\nneedle 3\nneedle 4\nneedle 5\n");
 	let engine = needle();
@@ -447,7 +448,8 @@ fn single_file_honours_max_count_per_file_and_keeps_offset() {
 		max_count: Some(4),
 		max_count_per_file: Some(2),
 		..options(&engine)
-	});
+	})
+	.await;
 	assert_eq!(res.matches.len(), 2);
 	assert_eq!(res.files_with_matches, 1);
 	assert!(res.limit_reached);
@@ -458,25 +460,26 @@ fn single_file_honours_max_count_per_file_and_keeps_offset() {
 		max_count_per_file: Some(2),
 		offset: 2,
 		..options(&engine)
-	});
+	})
+	.await;
 	assert_eq!(res.matches.iter().map(|m| m.line).collect::<Vec<_>>(), [3, 4]);
 }
 
-#[test]
-fn single_file_root_ignores_glob_but_honours_type() {
+#[tokio::test(flavor = "multi_thread")]
+async fn single_file_root_ignores_glob_but_honours_type() {
 	let dir = TempDir::new();
 	let file = dir.write("a.rs", "needle\n");
 	let engine = needle();
 	let glob = GrepOptions { glob: Some("*.md".to_owned()), ..options(&engine) };
-	assert_eq!(run(&file, &glob).matches.len(), 1);
+	assert_eq!(run(&file, &glob).await.matches.len(), 1);
 	let typed = GrepOptions { file_type: Some("ts".to_owned()), ..options(&engine) };
-	assert_eq!(run(&file, &typed), GrepResult::default());
+	assert_eq!(run(&file, &typed).await, GrepResult::default());
 	let bad_glob = GrepOptions { glob: Some("[".to_owned()), ..options(&engine) };
-	assert!(matches!(grep(&Fs::native(), &file, &bad_glob, &Never), Err(GrepError::Glob(_))));
+	assert!(matches!(grep(&Fs::native(), &file, bad_glob).await, Err(GrepError::Glob(_))));
 }
 
-#[test]
-fn oversized_file_roots_are_streamed_in_full_or_cut_in_multiline_mode() {
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_file_roots_are_streamed_in_full_or_cut_in_multiline_mode() {
 	let dir = TempDir::new();
 	let mut content = String::from("needle head\n");
 	while content.len() as u64 <= MAX_FILE_BYTES + 1024 {
@@ -485,69 +488,70 @@ fn oversized_file_roots_are_streamed_in_full_or_cut_in_multiline_mode() {
 	content.push_str("needle tail\n");
 	let big = dir.write("big.txt", &content);
 	let engine = needle();
-	let res = run(&big, &options(&engine));
+	let res = run(&big, &options(&engine)).await;
 	assert_eq!(res.total_matches, 2, "a named file is searched in full");
 	assert_eq!(res.files_searched, 1);
 	assert_eq!(res.skipped_oversized, 0);
 
-	let files = run(&big, &GrepOptions { mode: Mode::FilesWithMatches, ..options(&engine) });
+	let files = run(&big, &GrepOptions { mode: Mode::FilesWithMatches, ..options(&engine) }).await;
 	assert_eq!((files.matches.len(), files.total_matches, files.limit_reached), (1, 1, false));
 
-	let multi = Engine::compile("needle", false, true).expect("compile");
-	let res = run(&big, &GrepOptions { multiline: true, ..options(&multi) });
+	let multi = Arc::new(Engine::compile("needle", false, true).expect("compile"));
+	let res = run(&big, &GrepOptions { multiline: true, ..options(&multi) }).await;
 	assert_eq!(res.total_matches, 1, "multiline mode searches the leading window");
 }
 
-#[test]
-fn streamed_file_root_fails_on_a_line_over_the_limit() {
+#[tokio::test(flavor = "multi_thread")]
+async fn streamed_file_root_fails_on_a_line_over_the_limit() {
 	let dir = TempDir::new();
 	let mut content = vec![b'a'; scan::STREAM_LINE_LIMIT + 1024];
 	content.extend_from_slice(b"\nneedle\n");
 	let big = dir.write("long.txt", &content);
 	let engine = needle();
-	let Err(GrepError::Search(reason)) = grep(&Fs::native(), &big, &options(&engine), &Never) else {
+	let Err(GrepError::Search(reason)) = grep(&Fs::native(), &big, options(&engine)).await else {
 		panic!("a line over the limit must fail the search");
 	};
 	assert!(reason.contains("a line longer than 64 MiB cannot be searched"), "{reason}");
 }
 
-#[test]
-fn missing_and_special_roots() {
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_and_special_roots() {
 	let dir = TempDir::new();
 	let engine = needle();
-	let missing = grep(&Fs::native(), &dir.path().join("missing"), &options(&engine), &Never);
+	let missing = grep(&Fs::native(), &dir.path().join("missing"), options(&engine)).await;
 	assert!(matches!(missing, Err(GrepError::NotFound(_))));
 	#[cfg(unix)]
 	{
 		let fifo = dir.path().join("direct.fifo");
 		make_fifo(&fifo);
-		assert_eq!(run(&fifo, &options(&engine)), GrepResult::default());
+		assert_eq!(run(&fifo, &options(&engine)).await, GrepResult::default());
 	}
 }
 
 // ----- directory roots ------------------------------------------------------
 
-#[test]
-fn directory_counts_searched_files_and_skips_fifos() {
+#[tokio::test(flavor = "multi_thread")]
+async fn directory_counts_searched_files_and_skips_fifos() {
 	let dir = TempDir::new();
 	dir.write("a.txt", "needle\n");
 	dir.write("b.txt", "haystack\n");
 	#[cfg(unix)]
 	make_fifo(&dir.path().join("skip-me.fifo"));
 	let engine = needle();
-	let res = run(dir.path(), &options(&engine));
+	let res = run(dir.path(), &options(&engine)).await;
 	assert_eq!((res.total_matches, res.files_with_matches, res.files_searched), (1, 1, 2));
 	assert_eq!(paths(&res), ["a.txt"]);
 
 	let files = run(dir.path(), &GrepOptions {
 		mode: Mode::FilesWithMatches,
-		..options(&compile("nothing"))
-	});
+		..options(&Arc::new(compile("nothing")))
+	})
+	.await;
 	assert_eq!((files.total_matches, files.files_with_matches, files.files_searched), (0, 0, 2));
 }
 
-#[test]
-fn pcre2_lookaround_and_backreferences_search_directories() {
+#[tokio::test(flavor = "multi_thread")]
+async fn pcre2_lookaround_and_backreferences_search_directories() {
 	let dir = TempDir::new();
 	dir.write("lookahead.txt", "foobar\nfoobaz\n");
 	dir.write("backreference.txt", "same same\nsame other\n");
@@ -561,8 +565,8 @@ fn pcre2_lookaround_and_backreferences_search_directories() {
 			"dim_customers_status_accepted_values",
 		),
 	] {
-		let engine = compile(pattern);
-		let res = run(dir.path(), &options(&engine));
+		let engine = Arc::new(compile(pattern));
+		let res = run(dir.path(), &options(&engine)).await;
 		assert_eq!(res.total_matches, 1, "{pattern}");
 		assert_eq!((res.matches[0].path.as_str(), res.matches[0].line), (path, 1), "{pattern}");
 		assert_eq!(res.matches[0].text, line);
@@ -570,25 +574,25 @@ fn pcre2_lookaround_and_backreferences_search_directories() {
 
 	dir.write("schema.yml", "  - not_null:\n      severity: warn\n");
 	let pattern = r"^(\s+)- (not_null|unique|accepted_values|relationships|expression_is_true|[a-z_]+):\s*$\n(?!\1    (arguments|config|description|name):)";
-	let engine = Engine::compile(pattern, false, true).expect("compile");
-	let res = run(dir.path(), &GrepOptions { multiline: true, ..options(&engine) });
+	let engine = Arc::new(Engine::compile(pattern, false, true).expect("compile"));
+	let res = run(dir.path(), &GrepOptions { multiline: true, ..options(&engine) }).await;
 	assert_eq!(paths(&res), ["schema.yml"]);
 	assert_eq!(res.matches[0].line, 1);
 }
 
-#[test]
-fn multiline_directory_search_matches_across_lines() {
+#[tokio::test(flavor = "multi_thread")]
+async fn multiline_directory_search_matches_across_lines() {
 	let dir = TempDir::new();
 	dir.write("code.txt", "fn foo() {\n  return 1;\n}\n");
-	let engine = Engine::compile(r"foo\(\) \{\n  return", false, true).expect("compile");
-	let res = run(dir.path(), &GrepOptions { multiline: true, ..options(&engine) });
+	let engine = Arc::new(Engine::compile(r"foo\(\) \{\n  return", false, true).expect("compile"));
+	let res = run(dir.path(), &GrepOptions { multiline: true, ..options(&engine) }).await;
 	assert_eq!(res.total_matches, 1);
 	assert_eq!((res.matches[0].path.as_str(), res.matches[0].line), ("code.txt", 1));
 	assert_eq!(res.matches[0].text, "fn foo() {\n  return 1;");
 }
 
-#[test]
-fn gitignore_skips_ignored_files_and_directories() {
+#[tokio::test(flavor = "multi_thread")]
+async fn gitignore_skips_ignored_files_and_directories() {
 	let dir = TempDir::new();
 	fs::create_dir_all(dir.path().join(".git")).expect("repo marker");
 	dir.write(".gitignore", "ignored.rs\nignored-dir/\n");
@@ -599,25 +603,25 @@ fn gitignore_skips_ignored_files_and_directories() {
 	let engine = needle();
 	let mut opts = GrepOptions { glob: Some("*.rs".to_owned()), ..options(&engine) };
 	opts.walk.gitignore = true;
-	let res = run(dir.path(), &opts);
+	let res = run(dir.path(), &opts).await;
 	assert_eq!(paths(&res), ["kept.rs"]);
 	assert_eq!(res.files_searched, 1);
 }
 
-#[test]
-fn non_recursive_glob_matches_only_direct_children() {
+#[tokio::test(flavor = "multi_thread")]
+async fn non_recursive_glob_matches_only_direct_children() {
 	let dir = TempDir::new();
 	dir.write("x.go", "needle root\n");
 	dir.write("svc/y.go", "needle nested\n");
 	let engine = needle();
 	let flat = GrepOptions { glob: Some("*.go".to_owned()), recursive: false, ..options(&engine) };
-	assert_eq!(paths(&run(dir.path(), &flat)), ["x.go"]);
+	assert_eq!(paths(&run(dir.path(), &flat).await), ["x.go"]);
 	let deep = GrepOptions { glob: Some("*.go".to_owned()), ..options(&engine) };
-	assert_eq!(paths(&run(dir.path(), &deep)), ["svc/y.go", "x.go"]);
+	assert_eq!(paths(&run(dir.path(), &deep).await), ["svc/y.go", "x.go"]);
 }
 
-#[test]
-fn glob_naming_directories_searches_their_files() {
+#[tokio::test(flavor = "multi_thread")]
+async fn glob_naming_directories_searches_their_files() {
 	let dir = TempDir::new();
 	dir.write("backend/auth/a.ts", "needle auth\n");
 	dir.write("frontend/src/main.tsx", "needle main\n");
@@ -634,12 +638,12 @@ fn glob_naming_directories_searches_their_files() {
 		("frontend/src/{main.tsx,App.tsx}", &["frontend/src/main.tsx"][..]),
 	] {
 		let opts = GrepOptions { glob: Some(glob.to_owned()), recursive: false, ..options(&engine) };
-		assert_eq!(paths(&run(dir.path(), &opts)), expected, "glob {glob}");
+		assert_eq!(paths(&run(dir.path(), &opts).await), expected, "glob {glob}");
 	}
 }
 
-#[test]
-fn exclude_drops_matching_files_and_directories() {
+#[tokio::test(flavor = "multi_thread")]
+async fn exclude_drops_matching_files_and_directories() {
 	let dir = TempDir::new();
 	dir.write("src/app.ts", "needle app\n");
 	dir.write("src/app.test.ts", "needle test\n");
@@ -674,16 +678,22 @@ fn exclude_drops_matching_files_and_directories() {
 				max_count,
 				..options(&engine)
 			};
-			assert_eq!(sorted_paths(&run(dir.path(), &opts)), expected, "{exclude:?} {max_count:?}");
+			assert_eq!(
+				sorted_paths(&run(dir.path(), &opts).await),
+				expected,
+				"{exclude:?} {max_count:?}"
+			);
 		}
 	}
 	let bad = GrepOptions { exclude: vec!["[".to_owned()], ..options(&engine) };
-	let err = grep(&Fs::native(), dir.path(), &bad, &Never).expect_err("bad exclude");
+	let err = grep(&Fs::native(), dir.path(), bad)
+		.await
+		.expect_err("bad exclude");
 	assert!(err.to_string().contains("Invalid exclude pattern"), "{err}");
 }
 
-#[test]
-fn type_filter_limits_search_to_matching_extensions() {
+#[tokio::test(flavor = "multi_thread")]
+async fn type_filter_limits_search_to_matching_extensions() {
 	let dir = TempDir::new();
 	let mut expected = Vec::new();
 	for index in 0..150 {
@@ -695,19 +705,21 @@ fn type_filter_limits_search_to_matching_extensions() {
 	expected.sort_unstable();
 	let engine = needle();
 	let res =
-		run(dir.path(), &GrepOptions { file_type: Some("rust".to_owned()), ..options(&engine) });
+		run(dir.path(), &GrepOptions { file_type: Some("rust".to_owned()), ..options(&engine) })
+			.await;
 	assert_eq!(paths(&res), expected);
 	assert_eq!((res.files_searched, res.files_with_matches), (150, 150));
 }
 
-#[test]
-fn offset_and_limit_apply_in_path_order() {
+#[tokio::test(flavor = "multi_thread")]
+async fn offset_and_limit_apply_in_path_order() {
 	let dir = TempDir::new();
 	dir.write("a.txt", "needle a1\nneedle a2\n");
 	dir.write("b.txt", "needle b1\n");
 	dir.write("c.txt", "haystack\n");
 	let engine = needle();
-	let res = run(dir.path(), &GrepOptions { max_count: Some(2), offset: 1, ..options(&engine) });
+	let res =
+		run(dir.path(), &GrepOptions { max_count: Some(2), offset: 1, ..options(&engine) }).await;
 	assert_eq!((res.total_matches, res.files_with_matches, res.limit_reached), (3, 2, true));
 	let found: Vec<_> = res
 		.matches
@@ -717,8 +729,8 @@ fn offset_and_limit_apply_in_path_order() {
 	assert_eq!(found, [("a.txt", "needle a2"), ("b.txt", "needle b1")]);
 }
 
-#[test]
-fn content_pages_preserve_context_and_totals_across_files() {
+#[tokio::test(flavor = "multi_thread")]
+async fn content_pages_preserve_context_and_totals_across_files() {
 	let dir = TempDir::new();
 	dir.write("a.txt", "before a\nneedle a\nafter a\n");
 	dir.write("b.txt", "before b\nneedle b\nafter b\n");
@@ -736,7 +748,8 @@ fn content_pages_preserve_context_and_totals_across_files() {
 			before: 1,
 			after: 1,
 			..options(&engine)
-		});
+		})
+		.await;
 		assert_eq!((res.total_matches, res.files_with_matches, res.files_searched), (2, 2, 2));
 		assert_eq!(res.limit_reached, limited, "{offset} {max_count:?}");
 		assert_eq!(res.matches.len(), usize::from(expected.is_some()));
@@ -749,14 +762,15 @@ fn content_pages_preserve_context_and_totals_across_files() {
 	}
 }
 
-#[test]
-fn count_mode_limit_applies_to_matches_not_files() {
+#[tokio::test(flavor = "multi_thread")]
+async fn count_mode_limit_applies_to_matches_not_files() {
 	let dir = TempDir::new();
 	dir.write("a.txt", "needle a1\nneedle a2\n");
 	dir.write("b.txt", "needle b1\n");
 	let engine = needle();
 	let res =
-		run(dir.path(), &GrepOptions { mode: Mode::Count, max_count: Some(2), ..options(&engine) });
+		run(dir.path(), &GrepOptions { mode: Mode::Count, max_count: Some(2), ..options(&engine) })
+			.await;
 	assert!(res.limit_reached);
 	assert_eq!(paths(&res), ["a.txt"]);
 	assert_eq!(res.matches[0].count, Some(2));
@@ -764,13 +778,14 @@ fn count_mode_limit_applies_to_matches_not_files() {
 	assert_eq!((res.total_matches, res.files_searched), (2, 1));
 
 	let res =
-		run(dir.path(), &GrepOptions { mode: Mode::Count, max_count: Some(3), ..options(&engine) });
+		run(dir.path(), &GrepOptions { mode: Mode::Count, max_count: Some(3), ..options(&engine) })
+			.await;
 	assert_eq!(res.matches.iter().map(|m| m.count).collect::<Vec<_>>(), [Some(2), Some(1)]);
 	assert!(res.limit_reached);
 }
 
-#[test]
-fn per_file_cap_preserves_file_diversity() {
+#[tokio::test(flavor = "multi_thread")]
+async fn per_file_cap_preserves_file_diversity() {
 	let dir = TempDir::new();
 	dir.write("a.txt", "needle 1\nneedle 2\nneedle 3\nneedle 4\nneedle 5\n");
 	dir.write("z.txt", "needle z\n");
@@ -780,20 +795,21 @@ fn per_file_cap_preserves_file_diversity() {
 			max_count,
 			max_count_per_file: Some(2),
 			..options(&engine)
-		});
+		})
+		.await;
 		assert_eq!(paths(&res), ["a.txt", "a.txt", "z.txt"], "{max_count:?}");
 		assert_eq!(res.files_with_matches, 2);
 		assert!(res.limit_reached);
 	}
 }
 
-#[test]
-fn budget_stops_after_the_first_page() {
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_stops_after_the_first_page() {
 	let dir = TempDir::new();
 	dir.write("a.txt", "needle a1\nneedle a2\n");
 	dir.write("z.txt", "needle z\n");
 	let engine = needle();
-	let res = run(dir.path(), &GrepOptions { max_count: Some(1), ..options(&engine) });
+	let res = run(dir.path(), &GrepOptions { max_count: Some(1), ..options(&engine) }).await;
 	assert_eq!(paths(&res), ["a.txt"]);
 	assert_eq!((res.files_searched, res.total_matches), (1, 2));
 	assert!(res.limit_reached);
@@ -804,28 +820,29 @@ fn budget_stops_after_the_first_page() {
 		max_count: Some(3),
 		max_count_per_file: Some(1),
 		..options(&engine)
-	});
+	})
+	.await;
 	assert_eq!(paths(&res), ["a.txt", "b.txt", "c.txt"]);
 	assert_eq!(res.files_searched, 3);
 }
 
-#[test]
-fn large_budget_stops_before_scanning_the_tree() {
+#[tokio::test(flavor = "multi_thread")]
+async fn large_budget_stops_before_scanning_the_tree() {
 	let dir = TempDir::new();
 	let file_count = 3_000;
 	for index in 0..file_count {
 		dir.write(&format!("{index:04}.txt"), "needle\n");
 	}
 	let engine = needle();
-	let res = run(dir.path(), &GrepOptions { max_count: Some(100), ..options(&engine) });
+	let res = run(dir.path(), &GrepOptions { max_count: Some(100), ..options(&engine) }).await;
 	assert!(res.limit_reached);
 	let expected: Vec<String> = (0..100).map(|i| format!("{i:04}.txt")).collect();
 	assert_eq!(paths(&res), expected);
 	assert!(res.files_searched < file_count / 2, "searched {} files", res.files_searched);
 }
 
-#[test]
-fn oversized_files_are_searched_over_their_prefix_after_all_others() {
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_files_are_searched_over_their_prefix_after_all_others() {
 	let dir = TempDir::new();
 	write_oversized(&dir, "000_big.txt", "needle big 0\n");
 	write_oversized(&dir, "001_big.txt", "needle big 1\n");
@@ -834,7 +851,7 @@ fn oversized_files_are_searched_over_their_prefix_after_all_others() {
 	}
 	let engine = needle();
 	for max_count in [None, Some(1_000)] {
-		let res = run(dir.path(), &GrepOptions { max_count, ..options(&engine) });
+		let res = run(dir.path(), &GrepOptions { max_count, ..options(&engine) }).await;
 		let found = paths(&res);
 		assert_eq!(found.len(), 302);
 		assert!(found[..300].iter().all(|p| p.starts_with("normal/")), "{max_count:?}");
@@ -843,8 +860,8 @@ fn oversized_files_are_searched_over_their_prefix_after_all_others() {
 	}
 }
 
-#[test]
-fn oversized_pass_runs_only_while_the_budget_is_open() {
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_pass_runs_only_while_the_budget_is_open() {
 	let dir = TempDir::new();
 	write_oversized(&dir, "00_big.txt", "needle\n");
 	let normals: Vec<String> = (0..70).map(|i| format!("01_normal_{i:02}.txt")).collect();
@@ -852,24 +869,24 @@ fn oversized_pass_runs_only_while_the_budget_is_open() {
 		dir.write(path, "needle\n");
 	}
 	let engine = needle();
-	let res = run(dir.path(), &GrepOptions { max_count: Some(65), ..options(&engine) });
+	let res = run(dir.path(), &GrepOptions { max_count: Some(65), ..options(&engine) }).await;
 	assert_eq!(paths(&res), normals[..65].iter().map(String::as_str).collect::<Vec<_>>());
 	assert_eq!(res.files_searched, 65, "the oversized file stays unsearched");
 
-	let res = run(dir.path(), &GrepOptions { max_count: Some(100), ..options(&engine) });
+	let res = run(dir.path(), &GrepOptions { max_count: Some(100), ..options(&engine) }).await;
 	let found = paths(&res);
 	assert_eq!(found[..70], normals.iter().map(String::as_str).collect::<Vec<_>>());
 	assert_eq!(found.last().copied(), Some("00_big.txt"));
 	assert_eq!(res.files_searched, 71);
 }
 
-#[test]
-fn oversized_file_matches_follow_normal_ones_regardless_of_path_order() {
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_file_matches_follow_normal_ones_regardless_of_path_order() {
 	let dir = TempDir::new();
 	write_oversized(&dir, "a_big.txt", "needle\n");
 	dir.write("z_small.txt", "needle\n");
 	let engine = needle();
-	let res = run(dir.path(), &options(&engine));
+	let res = run(dir.path(), &options(&engine)).await;
 	assert_eq!(paths(&res), ["z_small.txt", "a_big.txt"]);
 	assert_eq!((res.files_searched, res.skipped_oversized), (2, 0));
 }
@@ -887,56 +904,76 @@ fn populate_parity_tree(dir: &TempDir) {
 	}
 }
 
-#[test]
-fn budgeted_and_unbounded_searches_agree() {
+#[tokio::test(flavor = "multi_thread")]
+async fn budgeted_and_unbounded_searches_agree() {
 	let dir = TempDir::new();
 	populate_parity_tree(&dir);
 	let engine = needle();
 	for mode in [Mode::Content, Mode::Count, Mode::FilesWithMatches] {
 		let mut opts = GrepOptions { mode, before: 1, after: 1, ..options(&engine) };
 		opts.walk.gitignore = true;
-		let unbounded = run(dir.path(), &opts);
-		let budgeted = run(dir.path(), &GrepOptions { max_count: Some(10_000), ..opts.clone() });
+		let unbounded = run(dir.path(), &opts).await;
+		let budgeted =
+			run(dir.path(), &GrepOptions { max_count: Some(10_000), ..opts.clone() }).await;
 		assert_eq!(unbounded, budgeted, "{mode:?}");
 		assert_eq!(unbounded.files_with_matches, 100);
 		assert!(!paths(&unbounded).contains(&"dir_00/ignored_match.txt"));
 	}
 }
 
-#[test]
-fn results_do_not_depend_on_worker_count() {
+#[tokio::test(flavor = "multi_thread")]
+async fn results_do_not_depend_on_worker_count() {
 	let dir = TempDir::new();
 	populate_parity_tree(&dir);
 	write_oversized(&dir, "dir_03/big.txt", "needle big\n");
 	let engine = needle();
 	for max_count in [None, Some(40)] {
-		let with = |workers| {
+		let with = async |workers| {
 			let mut opts = GrepOptions { max_count, before: 1, after: 1, ..options(&engine) };
 			opts.walk.workers = Some(workers);
-			run(dir.path(), &opts)
+			run(dir.path(), &opts).await
 		};
-		assert_eq!(with(1), with(4), "{max_count:?}");
+		assert_eq!(with(1).await, with(4).await, "{max_count:?}");
 	}
 }
 
-#[test]
-fn stop_ends_the_search_with_an_error() {
+/// Files of listings served from the listing cache open by path, not
+/// relative to a directory handle; the results do not change.
+#[tokio::test(flavor = "multi_thread")]
+async fn cached_listings_search_the_same_files_as_fresh_ones() {
+	let dir = TempDir::new();
+	populate_parity_tree(&dir);
+	let engine = needle();
+	let mut opts = GrepOptions { before: 1, after: 1, ..options(&engine) };
+	let plain = run(dir.path(), &opts).await;
+	opts.walk.cache = true;
+	let filling = run(dir.path(), &opts).await;
+	let cached = run(dir.path(), &opts).await;
+	assert_eq!(plain, filling);
+	assert_eq!(plain, cached);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_a_blocked_search_stops_the_walk() {
 	let dir = TempDir::new();
 	for index in 0..1_000 {
 		dir.write(&format!("{index:04}.txt"), "needle\n");
 	}
 	let engine = needle();
-	for max_count in [None, Some(500)] {
-		let calls = AtomicUsize::new(0);
-		let stop = || calls.fetch_add(1, Ordering::Relaxed) > 20;
-		let res =
-			grep(&Fs::native(), dir.path(), &GrepOptions { max_count, ..options(&engine) }, &stop);
-		assert!(matches!(res, Err(GrepError::Walk(WalkError::Stopped))), "{max_count:?}");
+	let (tx, mut rx) = mpsc::channel(1);
+	let opts = GrepOptions { sink: Some(tx), ..options(&engine) };
+	let blocked =
+		tokio::time::timeout(Duration::from_millis(200), grep(&Fs::native(), dir.path(), opts)).await;
+	assert!(blocked.is_err(), "nothing drains the sink");
+	let mut received = 0;
+	while let Some(batch) = rx.recv().await {
+		received += batch.len();
 	}
+	assert!(received < 1_000, "{received}");
 }
 
-#[test]
-fn sink_receives_bounded_batches_and_the_result_only_counts() {
+#[tokio::test(flavor = "multi_thread")]
+async fn sink_receives_bounded_batches_and_the_result_only_counts() {
 	let dense = 1024 * 2 + 5;
 	let dir = TempDir::new();
 	let body = (0..dense).fold(String::new(), |mut body, i| {
@@ -950,12 +987,11 @@ fn sink_receives_bounded_batches_and_the_result_only_counts() {
 	for (target, files, searched) in
 		[(dir.path().to_path_buf(), 2, 3), (dir.path().join("dense.txt"), 1, 1)]
 	{
-		let sink = RecordingSink::default();
-		let res = run(&target, &GrepOptions { after: 1, sink: Some(&sink), ..options(&engine) });
+		let (res, batches) = run_sunk(&target, GrepOptions { after: 1, ..options(&engine) }).await;
+		let res = res.expect("grep succeeds");
 		assert!(res.matches.is_empty());
 		assert_eq!((res.files_with_matches, res.files_searched), (files, searched));
 		assert_eq!(res.total_matches, dense as u64 + files - 1);
-		let batches = sink.batches.lock();
 		assert!(
 			batches
 				.iter()
@@ -979,20 +1015,18 @@ fn sink_receives_bounded_batches_and_the_result_only_counts() {
 	}
 }
 
-#[test]
-fn sink_count_mode_streams_one_entry_per_matching_file() {
+#[tokio::test(flavor = "multi_thread")]
+async fn sink_count_mode_streams_one_entry_per_matching_file() {
 	let dir = TempDir::new();
 	dir.write("a.txt", "needle\nneedle\n");
 	dir.write("b.txt", "needle\n");
 	let engine = needle();
-	let sink = RecordingSink::default();
-	let res =
-		run(dir.path(), &GrepOptions { mode: Mode::Count, sink: Some(&sink), ..options(&engine) });
+	let (res, batches) =
+		run_sunk(dir.path(), GrepOptions { mode: Mode::Count, ..options(&engine) }).await;
+	let res = res.expect("grep succeeds");
 	assert!(res.matches.is_empty());
 	assert_eq!(res.total_matches, 3);
-	let mut counts: Vec<(String, Option<u64>)> = sink
-		.batches
-		.lock()
+	let mut counts: Vec<(String, Option<u64>)> = batches
 		.iter()
 		.flatten()
 		.map(|m| (m.path.clone(), m.count))
@@ -1001,48 +1035,44 @@ fn sink_count_mode_streams_one_entry_per_matching_file() {
 	assert_eq!(counts, [("a.txt".to_owned(), Some(2)), ("b.txt".to_owned(), Some(1))]);
 }
 
-#[test]
-fn sink_errors_and_global_limits_fail_the_search() {
+#[tokio::test(flavor = "multi_thread")]
+async fn sink_errors_and_global_limits_fail_the_search() {
 	let dir = TempDir::new();
 	dir.write("a.txt", "needle\n");
 	let engine = needle();
-	let failing = FailingSink;
-	let err = grep(
-		&Fs::native(),
-		dir.path(),
-		&GrepOptions { sink: Some(&failing), ..options(&engine) },
-		&Never,
-	)
-	.expect_err("a failed delivery fails the search");
-	assert!(matches!(&err, GrepError::Sink(reason) if reason == "consumer gone"), "{err}");
+	let (tx, rx) = mpsc::channel(1);
+	drop(rx);
+	let err = grep(&Fs::native(), dir.path(), GrepOptions { sink: Some(tx), ..options(&engine) })
+		.await
+		.expect_err("a closed receiver fails the search");
+	assert!(matches!(&err, GrepError::Sink(reason) if reason == "grep sink closed"), "{err}");
 
-	let sink = RecordingSink::default();
+	let (tx, _rx) = mpsc::channel(1);
 	for (max_count, offset) in [(Some(1), 0), (None, 1)] {
-		let opts = GrepOptions { max_count, offset, sink: Some(&sink), ..options(&engine) };
-		let err = grep(&Fs::native(), dir.path(), &opts, &Never).expect_err("limits with a sink");
+		let opts = GrepOptions { max_count, offset, sink: Some(tx.clone()), ..options(&engine) };
+		let err = grep(&Fs::native(), dir.path(), opts)
+			.await
+			.expect_err("limits with a sink");
 		assert!(matches!(err, GrepError::StreamLimits));
 		assert!(err.to_string().contains("maxCount"));
 	}
 }
 
-#[test]
-fn provider_url_trees_report_raw_relative_paths() {
-	let (_mem, blocking) = crate::testing::MemFs::with_files(&[
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_url_trees_report_raw_relative_paths() {
+	let (_mem, vfs) = crate::testing::MemFs::with_files(&[
 		("mem://root/dir/a.txt", "before\nneedle one\n"),
 		("mem://root/dir/sub/b%20c.txt", "needle two\n"),
 		("mem://root/dir/skip.txt", "haystack\n"),
 		("mem://root/outside.txt", "needle outside\n"),
 	]);
-	let fs = Fs::Provider(blocking);
+	let fs = Fs::Provider(vfs);
 	let engine = needle();
 	for max_count in [None, Some(10)] {
-		let res = grep(
-			&fs,
-			Path::new("mem://root/dir"),
-			&GrepOptions { max_count, ..options(&engine) },
-			&Never,
-		)
-		.expect("grep over a URL directory");
+		let res =
+			grep(&fs, Path::new("mem://root/dir"), GrepOptions { max_count, ..options(&engine) })
+				.await
+				.expect("grep over a URL directory");
 		let hits: Vec<_> = res
 			.matches
 			.iter()
@@ -1052,14 +1082,52 @@ fn provider_url_trees_report_raw_relative_paths() {
 		assert_eq!(res.files_searched, 3);
 	}
 	let file = Path::new("mem://root/dir/sub/b%20c.txt");
-	let res = grep(
-		&fs,
-		file,
-		&GrepOptions { file_type: Some("txt".to_owned()), ..options(&engine) },
-		&Never,
-	)
-	.expect("grep over a URL file");
+	let res = grep(&fs, file, GrepOptions { file_type: Some("txt".to_owned()), ..options(&engine) })
+		.await
+		.expect("grep over a URL file");
 	assert_eq!(res.files_searched, 1);
 	assert_eq!(paths(&res), ["mem://root/dir/sub/b%20c.txt"]);
 	assert_eq!(res.matches[0].text, "needle two");
+}
+
+/// A provider whose directories cannot be listed.
+#[derive(Debug)]
+struct Unlistable(Arc<crate::testing::MemFs>);
+
+#[async_trait::async_trait]
+impl pi_vfs::FileSystem for Unlistable {
+	async fn open(
+		&self,
+		path: &Path,
+		options: &pi_vfs::OpenOptions,
+	) -> std::io::Result<pi_vfs::File> {
+		self.0.open(path, options).await
+	}
+
+	async fn metadata(&self, path: &Path) -> std::io::Result<pi_vfs::Metadata> {
+		self.0.metadata(path).await
+	}
+
+	async fn read_dir(&self, _path: &Path) -> std::io::Result<pi_vfs::ReadDir> {
+		Err(std::io::ErrorKind::Unsupported.into())
+	}
+}
+
+/// A root that cannot be listed fails the search with or without a match
+/// budget, instead of reporting an empty tree.
+#[tokio::test(flavor = "multi_thread")]
+async fn unlistable_root_fails_the_search() {
+	let (mem, _) = crate::testing::MemFs::with_files(&[("mem://h/dir/a.txt", "needle\n")]);
+	let vfs = pi_vfs::Fs::new(Arc::new(Unlistable(mem)));
+	let root = Path::new("mem://h/dir");
+	let fs = Fs::new(&vfs, root);
+	let engine = needle();
+	for max_count in [None, Some(10)] {
+		let result = grep(&fs, root, GrepOptions { max_count, ..options(&engine) }).await;
+		assert!(
+			matches!(result, Err(GrepError::Walk(walk::WalkError::Root { ref path, .. })) if path == root),
+			"max_count {max_count:?}: {:?}",
+			result.map(|r| r.files_searched)
+		);
+	}
 }

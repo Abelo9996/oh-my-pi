@@ -6547,6 +6547,50 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn async_utilities_wait_for_a_slow_producer_without_blocking_the_worker() {
+		let (result, output) =
+			capture_on_runtime("{ sleep 0.3; echo hit; } | grep hit | rg hit", None, 512)
+				.expect("async utilities must not block the runtime's only worker");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "hit\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn async_utilities_pipe_more_than_a_pipe_buffer() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		for i in 0..3000 {
+			std::fs::write(dir.path().join(format!("{}{i:05}", "f".repeat(40))), b"")
+				.expect("create file");
+		}
+
+		let find =
+			capture_on_runtime("find . -type f | grep -c f", Some(dir.path().to_path_buf()), 512);
+		let fd = capture_on_runtime("fd -t f . | rg -c f", Some(dir.path().to_path_buf()), 512);
+
+		let (result, output) = find.expect("find | grep must not deadlock on a full pipe");
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "3000\n");
+		let (result, output) = fd.expect("fd | rg must not deadlock on a full pipe");
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "3000\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn async_utility_waiting_on_stdin_is_cancelled_by_timeout() {
+		// The pipeline ends with its producer (1 s); `grep` must be cancelled at
+		// 0.3 s while the producer still needs the worker.
+		let (result, output) =
+			capture_on_runtime("{ sleep 1; echo x; } | timeout 0.3 grep x", None, 512)
+				.expect("timeout must cancel a utility waiting on stdin");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(124), ""));
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn read_process_substitution_assigns_line() {
 		let (result, output) =
 			capture_on_single_worker("read -r line < <(printf 'ok\\n'); printf '%s\\n' \"$line\"");

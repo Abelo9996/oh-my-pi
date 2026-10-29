@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use futures::future::BoxFuture;
+
 use super::*;
 use crate::{fs::Detail, testing::MemFs};
 
@@ -168,12 +170,18 @@ fn matched_path_or_parents_checks_ancestors_as_dirs() {
 	assert_eq!(rules.matched_path_or_parents(b"src/x.rs", false), Match::None);
 }
 
-#[test]
-fn read_through_provider() {
+#[tokio::test(flavor = "multi_thread")]
+async fn read_through_provider() {
 	let (_mem, fs) = MemFs::with_files(&[("mem://r/.gitignore", "*.log\n")]);
-	let rules = Rules::read(&fs, Path::new("mem://r/.gitignore")).unwrap();
+	let rules = Rules::read(&fs, Path::new("mem://r/.gitignore"))
+		.await
+		.unwrap();
 	assert_eq!(rules.matched(b"a.log", false), Match::Ignore);
-	assert!(Rules::read(&fs, Path::new("mem://r/missing")).is_err());
+	assert!(
+		Rules::read(&fs, Path::new("mem://r/missing"))
+			.await
+			.is_err()
+	);
 }
 
 #[test]
@@ -196,49 +204,53 @@ fn parse_excludes_file_matches_ignore_crate_regex() {
 
 /// Walks `root` on `fs` the way the walker drives the chain and returns the
 /// non-ignored files, sorted; `.git` directories are not descended.
-fn walk(fs: &Fs, root: &str) -> Vec<String> {
-	fn visit(
-		s: &mut Session,
-		ig: &Ignorer,
-		dir: &Dir,
-		rel: &[u8],
-		parent: Option<&Arc<Frame>>,
-		out: &mut Vec<String>,
-	) {
-		let listing = s.list(dir, Detail::Minimal, 0).unwrap().clone();
-		let mut names = Names::default();
-		for r in listing.records() {
-			names.record(listing.name(r), r.file_type);
-		}
-		let frame = DirIgnores::load(s, dir, names, false).frame(parent, names, rel);
-		let mut scratch = Vec::new();
-		for r in listing.records() {
-			let name = listing.name(r);
-			if name == b".git" {
-				continue;
+async fn walk(fs: &Fs, root: &str) -> Vec<String> {
+	fn visit<'a>(
+		s: &'a mut Session,
+		ig: &'a Ignorer,
+		dir: &'a Dir,
+		rel: &'a [u8],
+		parent: Option<&'a Arc<Frame>>,
+		out: &'a mut Vec<String>,
+	) -> BoxFuture<'a, ()> {
+		Box::pin(async move {
+			let listing = s.list(dir, Detail::Minimal, 0).await.unwrap().clone();
+			let mut names = Names::default();
+			for r in listing.records() {
+				names.record(listing.name(r), r.file_type);
 			}
-			let mut child = rel.to_vec();
-			if !child.is_empty() {
-				child.push(b'/');
+			let frame = DirIgnores::load(s, dir, names, false)
+				.await
+				.frame(parent, names, rel);
+			let mut scratch = Vec::new();
+			for r in listing.records() {
+				let name = listing.name(r);
+				if name == b".git" {
+					continue;
+				}
+				let mut child = rel.to_vec();
+				if !child.is_empty() {
+					child.push(b'/');
+				}
+				child.extend_from_slice(name);
+				let is_dir = r.file_type == FileType::Dir;
+				if ig.ignored(frame.as_deref(), &child, is_dir, &mut scratch) {
+					continue;
+				}
+				if is_dir {
+					let sub = s.open_child(dir, name).await.unwrap();
+					visit(s, ig, &sub, &child, frame.as_ref(), out).await;
+				} else {
+					out.push(String::from_utf8(child).unwrap());
+				}
 			}
-			child.extend_from_slice(name);
-			let is_dir = r.file_type == FileType::Dir;
-			if ig.ignored(frame.as_deref(), &child, is_dir, &mut scratch) {
-				continue;
-			}
-			if is_dir {
-				let sub = s.open_child(dir, name).unwrap();
-				visit(s, ig, &sub, &child, frame.as_ref(), out);
-			} else {
-				out.push(String::from_utf8(child).unwrap());
-			}
-		}
+		})
 	}
 	let mut s = fs.session();
-	let (ig, frame) = Ignorer::new(&mut s, fs, Path::new(root));
-	let dir = s.open_dir(Path::new(root)).unwrap();
+	let (ig, frame) = Ignorer::new(&mut s, fs, Path::new(root)).await;
+	let dir = s.open_dir(Path::new(root)).await.unwrap();
 	let mut out = Vec::new();
-	visit(&mut s, &ig, &dir, b"", frame.as_ref(), &mut out);
+	visit(&mut s, &ig, &dir, b"", frame.as_ref(), &mut out).await;
 	out.sort();
 	out
 }
@@ -251,8 +263,8 @@ fn tree(files: &[(&str, &str)], dirs: &[&str]) -> Fs {
 	Fs::Provider(fs)
 }
 
-#[test]
-fn parent_ignore_outside_repo_does_not_filter_root() {
+#[tokio::test(flavor = "multi_thread")]
+async fn parent_ignore_outside_repo_does_not_filter_root() {
 	let fs = tree(
 		&[
 			("mem://t/.gitignore", "*.nix\n"),
@@ -261,11 +273,11 @@ fn parent_ignore_outside_repo_does_not_filter_root() {
 		],
 		&[],
 	);
-	assert_eq!(walk(&fs, "mem://t/projects/hm"), ["flake.nix", "modules/common/zsh.nix"]);
+	assert_eq!(walk(&fs, "mem://t/projects/hm").await, ["flake.nix", "modules/common/zsh.nix"]);
 }
 
-#[test]
-fn repo_parent_ignore_filters_subdirectory_root() {
+#[tokio::test(flavor = "multi_thread")]
+async fn repo_parent_ignore_filters_subdirectory_root() {
 	let fs = tree(
 		&[
 			("mem://t/.gitignore", "*.nix\n"),
@@ -275,11 +287,11 @@ fn repo_parent_ignore_filters_subdirectory_root() {
 		],
 		&["mem://t/.git"],
 	);
-	assert_eq!(walk(&fs, "mem://t/projects/hm"), ["kept.txt"]);
+	assert_eq!(walk(&fs, "mem://t/projects/hm").await, ["kept.txt"]);
 }
 
-#[test]
-fn ancestor_rules_covering_root_are_dropped_but_others_kept() {
+#[tokio::test(flavor = "multi_thread")]
+async fn ancestor_rules_covering_root_are_dropped_but_others_kept() {
 	let fs = tree(
 		&[
 			("mem://t/.gitignore", "*.log\nignored/**\n"),
@@ -291,15 +303,15 @@ fn ancestor_rules_covering_root_are_dropped_but_others_kept() {
 		],
 		&["mem://t/.git"],
 	);
-	assert_eq!(walk(&fs, "mem://t/ignored/package"), [
+	assert_eq!(walk(&fs, "mem://t/ignored/package").await, [
 		"keep.ts",
 		"nested/.gitignore",
 		"nested/keep.ts"
 	]);
 }
 
-#[test]
-fn gitignore_applies_without_repo_but_exclude_needs_one() {
+#[tokio::test(flavor = "multi_thread")]
+async fn gitignore_applies_without_repo_but_exclude_needs_one() {
 	let fs = tree(
 		&[
 			("mem://t/.gitignore", "ignored.txt\n"),
@@ -308,11 +320,11 @@ fn gitignore_applies_without_repo_but_exclude_needs_one() {
 		],
 		&[],
 	);
-	assert_eq!(walk(&fs, "mem://t"), [".gitignore", "kept.txt"]);
+	assert_eq!(walk(&fs, "mem://t").await, [".gitignore", "kept.txt"]);
 }
 
-#[test]
-fn precedence_dot_over_git_over_exclude() {
+#[tokio::test(flavor = "multi_thread")]
+async fn precedence_dot_over_git_over_exclude() {
 	let fs = tree(
 		&[
 			("mem://t/.git/info/exclude", "*.a\n*.b\n*.c\n"),
@@ -325,11 +337,11 @@ fn precedence_dot_over_git_over_exclude() {
 		],
 		&[],
 	);
-	assert_eq!(walk(&fs, "mem://t"), [".gitignore", ".ignore", "x.a", "x.b", "x.d"]);
+	assert_eq!(walk(&fs, "mem://t").await, [".gitignore", ".ignore", "x.a", "x.b", "x.d"]);
 }
 
-#[test]
-fn nearest_file_of_each_kind_decides() {
+#[tokio::test(flavor = "multi_thread")]
+async fn nearest_file_of_each_kind_decides() {
 	let fs = tree(
 		&[
 			("mem://t/.gitignore", "*.log\n/top.txt\n"),
@@ -342,7 +354,7 @@ fn nearest_file_of_each_kind_decides() {
 		],
 		&[],
 	);
-	assert_eq!(walk(&fs, "mem://t"), [
+	assert_eq!(walk(&fs, "mem://t").await, [
 		".gitignore",
 		"sub/.gitignore",
 		"sub/keep.log",
@@ -350,8 +362,8 @@ fn nearest_file_of_each_kind_decides() {
 	]);
 }
 
-#[test]
-fn exclude_above_nested_repo_is_not_consulted() {
+#[tokio::test(flavor = "multi_thread")]
+async fn exclude_above_nested_repo_is_not_consulted() {
 	let fs = tree(
 		&[
 			("mem://t/.git/info/exclude", "*.tmp\n"),
@@ -360,11 +372,11 @@ fn exclude_above_nested_repo_is_not_consulted() {
 		],
 		&["mem://t/inner/.git"],
 	);
-	assert_eq!(walk(&fs, "mem://t"), ["inner/b.tmp"]);
+	assert_eq!(walk(&fs, "mem://t").await, ["inner/b.tmp"]);
 }
 
-#[test]
-fn ancestor_anchored_rules_use_root_offset() {
+#[tokio::test(flavor = "multi_thread")]
+async fn ancestor_anchored_rules_use_root_offset() {
 	let fs = tree(
 		&[
 			("mem://t/.gitignore", "/src/gen/\nsrc/*.tmp\n"),
@@ -375,7 +387,7 @@ fn ancestor_anchored_rules_use_root_offset() {
 		],
 		&["mem://t/.git"],
 	);
-	assert_eq!(walk(&fs, "mem://t/src"), ["a b.rs", "sub/a.tmp"]);
+	assert_eq!(walk(&fs, "mem://t/src").await, ["a b.rs", "sub/a.tmp"]);
 }
 
 #[test]

@@ -168,6 +168,7 @@ rust_library(
         "//crates/pi-vfs",
         "//crates/vendor/brush-core",
         "//crates/vendor/brush-parser",
+        "//crates/vendor/grep-searcher",
     ],
 )
 
@@ -176,5 +177,5 @@ rust_test(
     crate = ":pi-builtins",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
-    deps = all_crate_deps(normal_dev = True),
+    deps = all_crate_deps(normal_dev = True) + ["//crates/vendor/grep-searcher"],
 )

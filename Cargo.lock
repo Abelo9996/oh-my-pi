@@ -4141,16 +4141,16 @@ dependencies = [
 [[package]]
 name = "grep-searcher"
 version = "0.1.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72348823a0eafc4bc2e9051064f28b5b42cc100b571b3a35d67918d711efcbc6"
 dependencies = [
  "bstr",
  "encoding_rs",
  "encoding_rs_io",
  "grep-matcher",
+ "grep-regex",
  "log",
  "memchr",
  "memmap2",
+ "regex",
 ]
 
 [[package]]
@@ -6847,11 +6847,14 @@ dependencies = [
  "anyhow",
  "ast-grep-core",
  "async-trait",
+ "futures",
  "parking_lot",
  "phf 0.14.0",
  "pi-vfs",
  "pi-walker",
  "serde",
+ "tokio",
+ "tokio-util",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",
@@ -6885,6 +6888,7 @@ dependencies = [
  "ansi-width",
  "anyhow",
  "argmax",
+ "async-trait",
  "base64 0.23.1",
  "bigdecimal",
  "binary-heap-plus",
@@ -7192,6 +7196,8 @@ name = "pi-walker"
 version = "18.13.3"
 dependencies = [
  "async-trait",
+ "flume",
+ "futures",
  "globset",
  "grep-matcher",
  "grep-pcre2",

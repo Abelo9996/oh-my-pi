@@ -1133,16 +1133,11 @@ mod tests {
 	/// Repository `.ts` / `.py` / `.rs` sources, sorted for determinism. With a
 	/// budget, files are taken on a stride so the sample spans the whole tree
 	/// instead of one directory, skipping anything over 64 KiB.
-	fn repo_files(byte_budget: Option<usize>) -> Vec<PathBuf> {
+	async fn repo_files(byte_budget: Option<usize>) -> Vec<PathBuf> {
 		let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 		let opts = pi_walker::walk::Options { gitignore: true, skip_git: true, ..Default::default() };
-		let walked = pi_walker::walk::collect(
-			&pi_walker::Fs::native(),
-			&root,
-			&opts,
-			false,
-			&pi_walker::Never,
-			|_, entry| {
+		let walked =
+			pi_walker::walk::collect(&pi_walker::Fs::native(), &root, &opts, false, |_, entry| {
 				let wanted = entry.file_type == pi_walker::FileType::File
 					&& matches!(
 						entry
@@ -1156,9 +1151,9 @@ mod tests {
 				} else {
 					pi_walker::walk::Action::Skip
 				}
-			},
-		)
-		.expect("repository should walk");
+			})
+			.await
+			.expect("repository should walk");
 		let mut files: Vec<PathBuf> = walked
 			.iter()
 			.map(|entry| root.join(entry.rel_path()))
@@ -1201,8 +1196,8 @@ mod tests {
 		(comparisons, none_verdicts)
 	}
 
-	#[test]
-	fn pruned_walk_matches_unpruned_on_repo_corpus_sample() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pruned_walk_matches_unpruned_on_repo_corpus_sample() {
 		// Sandboxed runners (bazel test) stage only this crate's declared inputs,
 		// so the repository corpus this sweep samples is absent (or a symlink
 		// farm the walker cannot see through). Both surface as an empty scan —
@@ -1213,7 +1208,7 @@ mod tests {
 			eprintln!("skipping: repository corpus unavailable at {}", root.display());
 			return;
 		}
-		let files = repo_files(Some(768 * 1024));
+		let files = repo_files(Some(768 * 1024)).await;
 		if files.is_empty() {
 			eprintln!("skipping: repository corpus scan found no sources at {}", root.display());
 			return;
@@ -1223,11 +1218,11 @@ mod tests {
 		assert!(comparisons > 300, "expected a broad sweep, got {comparisons} comparisons");
 	}
 
-	#[test]
+	#[tokio::test(flavor = "multi_thread")]
 	#[ignore = "full repository sweep; run with `cargo nextest run --release -p pi-ast \
 	            --run-ignored ignored-only`"]
-	fn pruned_walk_matches_unpruned_on_full_repo_corpus() {
-		let files = repo_files(None);
+	async fn pruned_walk_matches_unpruned_on_full_repo_corpus() {
+		let files = repo_files(None).await;
 		assert!(files.len() > 3000, "expected the whole corpus, got {}", files.len());
 		let (comparisons, _) = sweep_corpus(&files);
 		println!("full corpus: {} files, {comparisons} comparisons", files.len());

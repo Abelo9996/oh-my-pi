@@ -3,32 +3,36 @@
 //!
 //! It keeps pi's traversal contract (hidden-file, `.git`, and `node_modules`
 //! pruning; [`crate::ignore`] semantics; path-ordered collection) while
-//! minimising syscalls per directory and spreading directories over worker
-//! threads:
+//! minimising syscalls per directory and spreading directories over async
+//! tasks:
 //!
-//! - [`walk`] visits entries in no particular order on up to
-//!   [`Options::workers`] threads; per-worker state comes from `init` and is
-//!   handed back afterwards, so visitors need no locking.
+//! - [`walk`] visits entries in no particular order on tasks of the current
+//!   tokio runtime, a fixed pool of [`Options::workers`] spawned once per walk;
+//!   each directory's output arrives as one batch of a stream, so a slow
+//!   consumer pauses the walk and dropping the stream cancels it.
 //! - [`collect`] gathers the entries a filter keeps, optionally in byte order
-//!   of their paths (each worker sorts its directories' share of the order;
-//!   collection only concatenates).
-//! - [`tree`] is the serial, ordered, streaming traversal for tools whose
-//!   output order and pruning decisions are sequential (`find`, `fd`, workspace
-//!   listing).
+//!   of their paths (each worker sorts its directory's share of the order;
+//!   collection only concatenates). Dropping its future cancels the walk.
+//! - [`Tree`] is the serial, ordered traversal, driven one event at a time by
+//!   the caller, for tools whose output order and pruning decisions are
+//!   sequential (`find`, `fd`, workspace listing).
 //!
 //! Directories open relative to their parent's handle, ignore files are read
 //! only when a listing contains them, unchanged directories are served from
-//! the process-wide listing cache ([`cache`]), and visitors open files through
-//! [`Worker::open_file`], relative to the directory being visited. Entry paths
-//! are carved from per-worker arenas, so steady-state walking allocates a few
+//! the process-wide listing cache ([`cache`]), and consumers open files
+//! relative to the directory handle streamed with each [`Batch`]. Entry paths
+//! are carved from pooled arenas, so steady-state walking allocates a few
 //! objects per directory, not per entry.
 //!
 //! ```ignore
-//! let walked = walk::walk(&fs, root, &opts, &Never, || 0usize, |count, _, entry| {
-//!     if entry.file_type == FileType::File { *count += 1 }
+//! let mut walk = walk::walk(&fs, root, &opts, |_, entry, out: &mut Vec<usize>| {
+//!     if entry.file_type == FileType::File { out.push(1) }
 //!     walk::Action::Continue
-//! })?;
-//! let files: usize = walked.states.iter().sum();
+//! }).await?;
+//! let mut files = 0;
+//! while let Some(batch) = walk.next().await {
+//!     files += batch.items.len();
+//! }
 //! ```
 
 pub(crate) mod arena;
@@ -41,37 +45,19 @@ use std::{
 	ffi::OsString,
 	fmt, io,
 	path::{Path, PathBuf},
-	sync::LazyLock,
+	pin::Pin,
+	sync::{Arc, LazyLock},
+	task::{Context, Poll},
 };
 
+use futures::Stream;
 use parking_lot::Mutex;
-pub use tree::{Completion, Event, Follow, Order, TreeEntry, TreeOptions, tree};
+use tokio::sync::mpsc;
+pub use tree::{Event, Follow, Order, Tree, TreeEntry, TreeOptions};
 
+pub(crate) use self::parallel::Sink;
 use self::{arena::Arena, parallel::Stored};
-use crate::fs::{Detail, Dir, File, FileInfo, FileType, Fs, Session};
-
-/// Cooperative cancellation: walks and searches poll it between directories
-/// and files and end with [`WalkError::Stopped`] once it reports true.
-pub trait Stop: Sync {
-	/// Whether the operation should end now.
-	fn stop(&self) -> bool;
-}
-
-impl<F: Fn() -> bool + Sync> Stop for F {
-	fn stop(&self) -> bool {
-		self()
-	}
-}
-
-/// A [`Stop`] that never fires.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Never;
-
-impl Stop for Never {
-	fn stop(&self) -> bool {
-		false
-	}
-}
+use crate::fs::{Detail, Dir, FileType, Fs, Session};
 
 /// Traversal options shared by [`walk`] and [`collect`]. The default walks
 /// everything except hidden entries, honouring no ignore files.
@@ -99,8 +85,8 @@ pub struct Options {
 	/// Do not descend into directories on another filesystem than the root
 	/// (they are still reported).
 	pub same_file_system:  bool,
-	/// Walking threads; `None` (or 0) picks `PI_WALK_WORKERS` when set, else
-	/// [`Fs::workers`].
+	/// Directories listed at once; `None` (or 0) picks `PI_WALK_WORKERS` when
+	/// set, else [`Fs::workers`].
 	pub workers:           Option<usize>,
 	/// Reuse unchanged directories' listings from earlier walks ([`cache`]).
 	/// Only [`Detail::Minimal`] native walks consult it.
@@ -108,9 +94,9 @@ pub struct Options {
 }
 
 impl Options {
-	/// Threads a walk of `fs` with these options runs on: [`Self::workers`],
-	/// else `PI_WALK_WORKERS` (0 = auto, 1 = serial), else [`Fs::workers`],
-	/// capped by the machine's parallelism.
+	/// Directories a walk of `fs` with these options lists at once:
+	/// [`Self::workers`], else `PI_WALK_WORKERS` (0 = auto, 1 = serial), else
+	/// [`Fs::workers`], capped by the machine's parallelism.
 	pub fn parallelism(&self, fs: &Fs) -> usize {
 		static ENV: LazyLock<Option<usize>> = LazyLock::new(|| {
 			std::env::var("PI_WALK_WORKERS")
@@ -198,15 +184,12 @@ pub enum WalkError {
 		/// What failed.
 		error: io::Error,
 	},
-	/// [`Stop`] fired.
-	Stopped,
 }
 
 impl fmt::Display for WalkError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::Root { path, error } => write!(f, "{}: {error}", path.display()),
-			Self::Stopped => f.write_str("walk stopped"),
 		}
 	}
 }
@@ -215,92 +198,119 @@ impl std::error::Error for WalkError {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		match self {
 			Self::Root { error, .. } => Some(error),
-			Self::Stopped => None,
 		}
 	}
 }
 
-/// One walking thread, as seen by visitors and filters.
+/// The walking task, as seen by visitors and filters: path math only.
 pub struct Worker<'w> {
-	id:      usize,
-	fs:      &'w Fs,
-	root:    &'w Path,
-	session: &'w mut Session,
-	abs:     &'w mut PathBuf,
-	/// The directory being emitted, when the walk holds it open.
-	dir:     Option<&'w Dir>,
+	fs:   &'w Fs,
+	root: &'w Path,
+	abs:  &'w mut PathBuf,
 }
 
 impl Worker<'_> {
-	/// The worker's index, `0 <= id < workers`.
-	pub const fn id(&self) -> usize {
-		self.id
-	}
-
-	/// The worker's filesystem session, for anything else a visitor reads.
-	pub const fn session(&mut self) -> &mut Session {
-		&mut *self.session
-	}
-
 	/// Absolute path of `entry` (the entry being visited) in the walked
 	/// filesystem's spelling; valid until the next call.
 	pub fn abs(&mut self, entry: &Entry<'_>) -> &Path {
-		join_into(self.fs, self.root, entry.path, self.abs);
+		self.abs_rel(entry.path)
+	}
+
+	/// Absolute path of the walk-relative `rel` in the walked filesystem's
+	/// spelling; valid until the next call. Reuses the worker's buffer, so
+	/// opening many files by path allocates nothing per file.
+	pub(crate) fn abs_rel(&mut self, rel: &[u8]) -> &Path {
+		join_into(self.fs, self.root, rel, self.abs);
 		self.abs.as_path()
 	}
-
-	/// Opens the regular file `entry` (the entry being visited) for reading.
-	/// While the walk holds the entry's directory open the file is opened
-	/// relative to it (a one-component lookup); entries served from the
-	/// listing cache are opened by absolute path.
-	pub fn open_file(&mut self, entry: &Entry<'_>) -> io::Result<(File, FileInfo)> {
-		if let Some(dir) = self.dir {
-			return self.session.open_file_at(dir, entry.name());
-		}
-		join_into(self.fs, self.root, entry.path, self.abs);
-		self.session.open_file(self.abs.as_path())
-	}
 }
 
-/// Per-worker states and the directory errors of a finished [`walk`].
+/// One directory's outputs and the open directory they were listed from.
 #[derive(Debug)]
-pub struct Walked<S> {
-	/// One state per worker that ran, in worker-id order (helpers start only
-	/// once there is work to share).
-	pub states: Vec<S>,
-	/// Directories below the root that could not be read, in no particular
-	/// order.
-	pub errors: Vec<DirError>,
+pub struct Batch<T> {
+	/// The listed directory, so consumers can open files relative to it
+	/// (`session.open_file_at(dir, name)`); `None` when the listing came
+	/// from the cache or the walk holds too many handles open already, in
+	/// which case files open by path.
+	pub dir:   Option<Arc<Dir>>,
+	/// What the visitor pushed for the directory; never empty.
+	pub items: Vec<T>,
 }
 
-/// Visits every entry below `root` that `opts` admits.
+/// Output batches fitting the channel of a [`walk`] per worker.
+const BATCHES_PER_WORKER: usize = 4;
+
+/// Starts a walk of `root`, visiting every entry below it that `opts` admits.
 ///
-/// In no particular
-/// order, calling `visit` concurrently from the workers with that worker's
-/// state (made by `init`). A directory's [`Action::SkipDir`] prunes it,
-/// [`Action::Stop`] ends the walk; `Skip` and `Continue` are the same here.
-/// Unreadable directories below the root are skipped and reported in
-/// [`Walked::errors`].
+/// `visit` runs concurrently on walker tasks, in no particular order, and may
+/// push outputs into the vector it is given. A directory's outputs are sent
+/// as one non-empty [`Batch`] through a bounded channel: a consumer that stops
+/// polling pauses the walk, and dropping the [`Walk`] cancels it. A
+/// directory's [`Action::SkipDir`] prunes it, [`Action::Stop`] ends the walk;
+/// `Skip` and `Continue` are the same here. Unreadable directories below the
+/// root are skipped and reported by [`Walk::into_errors`].
 ///
 /// # Errors
-/// [`WalkError::Root`] when `root` cannot be opened as a directory;
-/// [`WalkError::Stopped`] when `stop` fires.
-pub fn walk<S, I, V>(
+/// [`WalkError::Root`] when `root` cannot be opened as a directory.
+pub async fn walk<T, V>(
 	fs: &Fs,
 	root: &Path,
 	opts: &Options,
-	stop: &dyn Stop,
-	init: I,
 	visit: V,
-) -> Result<Walked<S>, WalkError>
+) -> Result<Walk<T>, WalkError>
 where
-	S: Send,
-	I: Fn() -> S + Sync,
-	V: Fn(&mut S, &mut Worker<'_>, &Entry<'_>) -> Action + Sync,
+	T: Send + 'static,
+	V: Fn(&mut Worker<'_>, &Entry<'_>, &mut Vec<T>) -> Action + Send + Sync + 'static,
 {
-	let sink = parallel::WalkSink::<S, I, V>::new(init, visit);
-	let out = parallel::run(fs, root, opts, stop, &sink, false, default_cache(fs, opts))?;
-	Ok(Walked { states: out.states, errors: out.errors })
+	walk_sink(fs, root, opts, parallel::WalkSink::new(visit)).await
+}
+
+/// [`walk`] with a [`Sink`]: after a directory's entries are visited into the
+/// sink's items, the same worker settles them ([`Sink::settle`], with its
+/// session and per-worker state) and sends the output as the directory's
+/// batch, so a search scans files on the walker's own workers. The root is
+/// listed before this returns and settled by a worker. Everything else is as
+/// for [`walk`].
+///
+/// # Errors
+/// [`WalkError::Root`] when `root` cannot be opened as a directory.
+pub(crate) async fn walk_sink<K: Sink>(
+	fs: &Fs,
+	root: &Path,
+	opts: &Options,
+	sink: K,
+) -> Result<Walk<K::Out>, WalkError> {
+	let (tx, rx) = mpsc::channel(opts.parallelism(fs) * BATCHES_PER_WORKER);
+	let started =
+		parallel::start(fs, root, opts, sink, false, default_cache(fs, opts), Some(tx)).await?;
+	Ok(Walk { rx, halt: started.halt })
+}
+
+/// A running [`walk`]: per-directory output batches in no particular order.
+/// Dropping it cancels the walk.
+pub struct Walk<T> {
+	rx:   mpsc::Receiver<Batch<T>>,
+	halt: parallel::Halt,
+}
+
+impl<T> Stream for Walk<T> {
+	type Item = Batch<T>;
+
+	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Batch<T>>> {
+		let polled = self.rx.poll_recv(cx);
+		if matches!(polled, Poll::Ready(None)) {
+			self.halt.0.check_panic();
+		}
+		polled
+	}
+}
+
+impl<T> Walk<T> {
+	/// Directories below the root that could not be read; complete once the
+	/// stream has ended.
+	pub fn into_errors(self) -> Vec<DirError> {
+		self.halt.0.take_errors()
+	}
 }
 
 /// Entries kept by a [`collect`], owning their paths in shared arenas.
@@ -353,42 +363,43 @@ impl Collection {
 /// The filter returns [`Action::Continue`] to keep an entry; `Skip` drops an
 /// entry, `SkipDir` drops a directory
 /// with its subtree, `Stop` ends the walk keeping what was collected. The
-/// filter runs concurrently on the workers and may rewrite a kept entry's
+/// filter runs concurrently on walker tasks and may rewrite a kept entry's
 /// `file_type`, `size`, and `mtime` (say, to describe a symlink's target);
 /// descent still follows the listed type. With `sorted`, entries come back in
-/// byte order of their paths; otherwise in no particular order.
+/// byte order of their paths; otherwise in no particular order. Dropping the
+/// future cancels the walk.
 ///
 /// # Errors
 /// As for [`walk`].
-pub fn collect<F>(
+pub async fn collect<F>(
 	fs: &Fs,
 	root: &Path,
 	opts: &Options,
 	sorted: bool,
-	stop: &dyn Stop,
 	filter: F,
 ) -> Result<Collection, WalkError>
 where
-	F: Fn(&mut Worker<'_>, &mut Entry<'_>) -> Action + Sync,
+	F: Fn(&mut Worker<'_>, &mut Entry<'_>) -> Action + Send + Sync + 'static,
 {
-	collect_in(fs, root, opts, sorted, stop, filter, default_cache(fs, opts))
+	collect_in(fs, root, opts, sorted, filter, default_cache(fs, opts)).await
 }
 
 /// [`collect`] against an explicit listing cache.
-fn collect_in<F>(
+async fn collect_in<F>(
 	fs: &Fs,
 	root: &Path,
 	opts: &Options,
 	sorted: bool,
-	stop: &dyn Stop,
 	filter: F,
-	cache: Option<&cache::Cache>,
+	cache: Option<&'static cache::Cache>,
 ) -> Result<Collection, WalkError>
 where
-	F: Fn(&mut Worker<'_>, &mut Entry<'_>) -> Action + Sync,
+	F: Fn(&mut Worker<'_>, &mut Entry<'_>) -> Action + Send + Sync + 'static,
 {
 	let sink = parallel::CollectSink::new(filter);
-	let out = parallel::run(fs, root, opts, stop, &sink, sorted, cache)?;
+	let started = parallel::start(fs, root, opts, sink, sorted, cache, None).await?;
+	started.finished().await;
+	let out = started.into_outcome();
 	Ok(Collection { entries: out.entries, _arenas: out.arenas, errors: out.errors })
 }
 

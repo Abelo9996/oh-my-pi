@@ -225,6 +225,7 @@ mod tests {
 	use std::collections::HashMap;
 
 	use ast_grep_core::{MatchStrictness, source::Edit, tree_sitter::LanguageExt};
+	use tokio_util::sync::CancellationToken;
 
 	use super::{SupportLang, apply_edits, compile_pattern, resolve_supported_lang};
 	use crate::search::{self, Mode, Rewrite};
@@ -259,7 +260,7 @@ mod tests {
 			"(defun greet (name)\n  (message \"Hello %s\" name))\n",
 			SupportLang::EmacsLisp,
 			&rewrite,
-			&pi_walker::Never,
+			&CancellationToken::new(),
 		)
 		.expect("rewrite succeeds");
 		assert_eq!(edit.changes.len(), 1);

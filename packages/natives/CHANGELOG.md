@@ -17,9 +17,13 @@
 - Native `grep` with `maxCount` (the agent's grep tool) searches files while the walk finds them and stops both once the limit is met: 1.3–2.3× faster, and a first page of results about 10× faster
 - The bash tool's built-in `rg` and recursive `grep` search files in parallel (about 2× faster) and print them in path order
 - `cache: true` reuses unchanged directory listings validated against their timestamps, so it never serves stale results
+- Reduced overhead for full-tree native `grep` searches while preserving result ordering and streaming backpressure
+- Aborting or timing out native `grep`, `glob`, `fuzzyFind`, `listWorkspace`, and `astGrep`/`astEdit` stops their filesystem work at once, including searches over JavaScript-provided filesystems; `grep`'s `onMatches` streaming paces the search to the callback
+- Cancelling the bash tool's built-in `rg`, `grep`, `fd`, `find`, and `ast-grep` (abort, `timeout`) stops them immediately, even mid-way through a large file; `find -prune` and `fd` ignore rules no longer list pruned directories
 
 ### Fixed
 
+- Fixed cancelled directory searches leaving filesystem-provider requests running during walk startup
 - Fixed the bash tool's built-in commands (`cat`, `grep`, `head`, `wc`, `read`, `mapfile`, …) hanging on macOS at the end of a FIFO's input until the command was aborted; `read -t` now returns at EOF instead of waiting out its timeout
 - Fixed `wrapTextWithAnsi` continuing a wrapped styled underline (`4:3`, `4:4`) as a background colour, `4:0` setting background `40`, and colon-form colours (`38:2::r:g:b`) being dropped ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 

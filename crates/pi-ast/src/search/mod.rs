@@ -16,8 +16,16 @@
 use std::{
 	collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
 	fmt, io,
+	num::NonZero,
 	ops::ControlFlow,
 	path::{Path, PathBuf},
+	pin::{Pin, pin},
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+	task::{Context, Poll},
+	thread,
 };
 
 pub use ast_grep_core::MatchStrictness;
@@ -27,12 +35,14 @@ use ast_grep_core::{
 	source::Edit,
 	tree_sitter::{LanguageExt, StrDoc},
 };
-use pi_vfs::BlockingFs;
+use futures::{Stream, StreamExt, stream};
+use pi_vfs::Fs;
 use pi_walker::{
-	FileType, Stop,
+	FileType, exec,
 	glob::Selector,
 	walk::{self, Action, WalkError},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
 	language::{SupportLang, grammar::LanguageGrammar},
@@ -48,7 +58,7 @@ type Ast = AstGrep<StrDoc<SupportLang>>;
 /// Why a search or rewrite ended without a result.
 #[derive(Debug)]
 pub enum Error {
-	/// The [`Stop`] fired.
+	/// The cancellation token of an in-memory search fired.
 	Stopped,
 	/// A directory root could not be walked.
 	Root {
@@ -82,30 +92,71 @@ impl std::error::Error for Error {
 
 impl From<WalkError> for Error {
 	fn from(err: WalkError) -> Self {
-		match err {
-			WalkError::Root { path, error } => Self::Root { path, error },
-			WalkError::Stopped => Self::Stopped,
-		}
+		let WalkError::Root { path, error } = err;
+		Self::Root { path, error }
 	}
 }
 
-/// [`Error::Stopped`] once `stop` fires.
-fn check(stop: &dyn Stop) -> Result<(), Error> {
-	if stop.stop() {
+/// A signal that running work should stop.
+trait Cancelled {
+	fn cancelled(&self) -> bool;
+}
+
+impl Cancelled for CancellationToken {
+	fn cancelled(&self) -> bool {
+		self.is_cancelled()
+	}
+}
+
+/// The flag one async call shares with its tasks; its [`HaltGuard`] raises it
+/// when the call ends or its future is dropped.
+#[derive(Clone, Default)]
+struct HaltFlag(Arc<AtomicBool>);
+
+impl HaltFlag {
+	fn guard(&self) -> HaltGuard {
+		HaltGuard(self.clone())
+	}
+}
+
+impl Cancelled for HaltFlag {
+	fn cancelled(&self) -> bool {
+		self.0.load(Ordering::Relaxed)
+	}
+}
+
+/// Raises its [`HaltFlag`] on drop.
+struct HaltGuard(HaltFlag);
+
+impl Drop for HaltGuard {
+	fn drop(&mut self) {
+		self.0.0.store(true, Ordering::Relaxed);
+	}
+}
+
+/// [`Error::Stopped`] once `halt` fires.
+fn check(halt: &impl Cancelled) -> Result<(), Error> {
+	if halt.cancelled() {
 		Err(Error::Stopped)
 	} else {
 		Ok(())
 	}
 }
 
+/// Worker count of a per-file pool and the files it keeps in flight.
+fn pool() -> (usize, usize) {
+	let workers = thread::available_parallelism().map_or(1, NonZero::get);
+	(workers, workers * 4)
+}
+
 /// Which files below a directory root [`discover`] keeps.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Discover<'a> {
+#[derive(Clone, Debug, Default)]
+pub struct Discover {
 	/// Keep only files this selects; directories it cannot select below are
 	/// not entered.
-	pub include:      Option<&'a Selector>,
+	pub include:      Option<Selector>,
 	/// Leave out files and directories (with their subtrees) this selects.
-	pub exclude:      Option<&'a Selector>,
+	pub exclude:      Option<Selector>,
 	/// Include dot-prefixed entries.
 	pub hidden:       bool,
 	/// Honour `.ignore`, `.gitignore`, `.git/info/exclude`, and git's global
@@ -133,26 +184,24 @@ pub struct Candidate {
 }
 
 /// The files below `root` (an absolute host path or `scheme://` URL) that
-/// `opts` keeps, in path order. A file root is its own only candidate (when
-/// its name maps to a language or [`Discover::any_file`] is set); the globs do
-/// not apply to it.
+/// `opts` keeps, in path order.
+///
+/// A file root is its own only candidate (when its name maps to a language
+/// or [`Discover::any_file`] is set); the globs do not apply to it.
 ///
 /// # Errors
 /// [`Error::Invalid`] when `root` does not exist or is neither file nor
-/// directory, [`Error::Root`] when it cannot be walked, [`Error::Stopped`].
-pub fn discover(
-	fs: &BlockingFs,
-	root: &Path,
-	opts: &Discover<'_>,
-	stop: &dyn Stop,
-) -> Result<Vec<Candidate>, Error> {
-	let root = pi_walker::fs::canonical(fs, root.to_path_buf());
+/// directory, [`Error::Root`] when it cannot be walked. Dropping the future
+/// cancels the walk.
+pub async fn discover(fs: &Fs, root: &Path, opts: &Discover) -> Result<Vec<Candidate>, Error> {
+	let root = pi_walker::fs::canonical(fs, root.to_path_buf()).await;
 	let metadata = fs
 		.metadata(&root)
+		.await
 		.map_err(|err| Error::Invalid(format!("Path not found: {err}")))?;
-	let has_language = |path: &Path| opts.any_file || SupportLang::from_path(path).is_some();
+	let any_file = opts.any_file;
 	if metadata.is_file() {
-		if !has_language(root.as_path()) {
+		if !any_file && SupportLang::from_path(&root).is_none() {
 			return Ok(Vec::new());
 		}
 		let display = pi_vfs::file_name(&root)
@@ -178,28 +227,36 @@ pub fn discover(
 		cache: true,
 		..Default::default()
 	};
-	let excluded = |path: &[u8]| opts.exclude.is_some_and(|exclude| exclude.matches(path));
-	let collection =
-		walk::collect(&walk_fs, &root, &walk_opts, true, stop, |_, entry| match entry.file_type {
+	let include = opts.include.clone();
+	let exclude = opts.exclude.clone();
+	let collection = walk::collect(&walk_fs, &root, &walk_opts, true, move |_, entry| {
+		let excluded = |path: &[u8]| {
+			exclude
+				.as_ref()
+				.is_some_and(|exclude| exclude.matches(path))
+		};
+		match entry.file_type {
 			FileType::Dir
 				if excluded(entry.path)
-					|| opts
-						.include
+					|| include
+						.as_ref()
 						.is_some_and(|include| include.prunes(entry.path)) =>
 			{
 				Action::SkipDir
 			},
 			FileType::File
-				if opts
-					.include
+				if include
+					.as_ref()
 					.is_none_or(|include| include.matches(entry.path))
 					&& !excluded(entry.path)
-					&& has_language(entry.rel_path()) =>
+					&& (any_file || SupportLang::from_path(entry.rel_path()).is_some()) =>
 			{
 				Action::Continue
 			},
 			_ => Action::Skip,
-		})?;
+		}
+	})
+	.await?;
 	Ok(collection
 		.iter()
 		.map(|entry| Candidate {
@@ -357,39 +414,107 @@ pub struct FileMatches {
 	pub matches:  Vec<Match>,
 }
 
-/// Searches `candidates` in order, handing every file with a match to
-/// `on_file` until it breaks.
+/// The per-file results behind a [`Finder`], in candidate order.
+type Scans = Pin<Box<dyn Stream<Item = Result<Scanned<Vec<Match>>, Error>> + Send>>;
+
+/// A running file search: yields every file with a match in candidate order.
 ///
-/// # Errors
-/// [`Error::Stopped`].
-pub fn find(
-	fs: &BlockingFs,
-	candidates: Vec<Candidate>,
-	query: &Query<'_>,
-	stop: &dyn Stop,
-	mut on_file: impl FnMut(FileMatches) -> ControlFlow<()>,
-) -> Result<Report, Error> {
-	scan(fs, candidates, query, stop, |candidate, language, source, ast, patterns| {
-		let mut matches = Vec::new();
-		for pattern in patterns {
-			check(stop)?;
-			for matched in ast.root().find_all((*pattern).clone()) {
-				check(stop)?;
-				matches.push(Match::of(&matched, query.captures));
+/// Files are read and matched concurrently on tasks of the current runtime;
+/// dropping the finder cancels the search.
+pub struct Finder {
+	tasks:            Scans,
+	files_searched:   usize,
+	warnings:         Vec<String>,
+	missing_grammars: Vec<&'static str>,
+	_guard:           HaltGuard,
+}
+
+impl Finder {
+	/// Diagnostics of the search; complete once the stream has ended.
+	#[must_use]
+	pub fn report(self) -> Report {
+		Report {
+			files_searched:   self.files_searched,
+			warnings:         self.warnings,
+			missing_grammars: self.missing_grammars,
+		}
+	}
+}
+
+impl Stream for Finder {
+	type Item = Result<FileMatches, Error>;
+
+	fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+		let this = self.get_mut();
+		loop {
+			let scanned = match this.tasks.as_mut().poll_next(cx) {
+				Poll::Pending => return Poll::Pending,
+				Poll::Ready(None) => return Poll::Ready(None),
+				Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+				Poll::Ready(Some(Ok(scanned))) => scanned,
+			};
+			let Scanned { candidate, warnings, parsed } = scanned;
+			this.warnings.extend(warnings);
+			if let Some((language, source, matches)) = parsed
+				&& !matches.is_empty()
+			{
+				return Poll::Ready(Some(Ok(FileMatches {
+					path: candidate.path,
+					display: candidate.display,
+					language,
+					source,
+					matches,
+				})));
 			}
 		}
-		if matches.is_empty() {
-			return Ok(ControlFlow::Continue(()));
+	}
+}
+
+/// Searches `candidates`; the returned [`Finder`] yields every file with a
+/// match in candidate order, and dropping it cancels the search. Must be
+/// called within a tokio runtime.
+#[must_use]
+pub fn find(fs: &Fs, candidates: Vec<Candidate>, query: &Query<'_>) -> Finder {
+	let captures = query.captures;
+	let job = move |ast: &Ast, patterns: &[&Pattern], halt: &HaltFlag| -> Result<_, Error> {
+		let mut matches = Vec::new();
+		for pattern in patterns {
+			check(halt)?;
+			for matched in ast.root().find_all((*pattern).clone()) {
+				check(halt)?;
+				matches.push(Match::of(&matched, captures));
+			}
 		}
 		matches.sort_by_key(|matched| matched.span);
-		Ok(on_file(FileMatches {
-			path: candidate.path,
-			display: candidate.display,
-			language,
-			source,
-			matches,
-		}))
-	})
+		Ok(matches)
+	};
+	let halt = HaltFlag::default();
+	let guard = halt.guard();
+	let prepared = resolve(candidates, query.lang);
+	let (compiled, warnings) = compile_query(query, &prepared.languages);
+	let files_searched = prepared.files.len();
+	let compiled: Arc<[CompiledPattern]> = compiled.into();
+	let job = Arc::new(job);
+	let fs = fs.clone();
+	let (workers, window) = pool();
+	let tasks = exec::ordered(
+		stream::iter(prepared.files),
+		workers,
+		window,
+		|| (),
+		move |(), resolved| {
+			let task =
+				scan_file(fs.clone(), resolved, Arc::clone(&compiled), Arc::clone(&job), halt.clone());
+			async move { ((), task.await) }
+		},
+	);
+	Finder {
+		tasks: Box::pin(tasks),
+		files_searched,
+		warnings,
+		missing_grammars: prepared.missing_grammars.into_iter().collect(),
+		_guard: guard,
+	}
 }
 
 /// A window of ordered matches.
@@ -428,33 +553,42 @@ pub struct FindPage {
 /// Searches `candidates`, keeping only the `page` of matches ordered by file
 /// (candidate order), then position.
 ///
+/// Files are read and matched concurrently on tasks of the current runtime;
+/// dropping the future cancels the search.
+///
 /// # Errors
-/// [`Error::Stopped`].
-pub fn find_page(
-	fs: &BlockingFs,
+/// [`Error::Invalid`] when a search task is aborted.
+pub async fn find_page(
+	fs: &Fs,
 	candidates: Vec<Candidate>,
 	query: &Query<'_>,
 	page: Page,
-	stop: &dyn Stop,
 ) -> Result<FindPage, Error> {
 	let mut window = Window::new(page);
 	let mut displays = Vec::new();
 	let mut files_with_matches = 0;
-	let report = scan(fs, candidates, query, stop, |candidate, _, _, ast, patterns| {
-		let before = window.total;
+	let captures = query.captures;
+	let job = move |ast: &Ast, patterns: &[&Pattern], halt: &HaltFlag| -> Result<_, Error> {
+		let mut local = Window::new(page);
 		for pattern in patterns {
-			check(stop)?;
+			check(halt)?;
 			for matched in ast.root().find_all((*pattern).clone()) {
-				check(stop)?;
-				window.offer(displays.len(), &matched, query.captures);
+				check(halt)?;
+				local.offer(0, &matched, captures);
 			}
 		}
+		Ok(local)
+	};
+	let report = scan(fs, candidates, query, job, |candidate, _, _, local| {
+		let before = window.total;
+		window.absorb(displays.len(), local);
 		if window.total > before {
 			files_with_matches += 1;
 		}
 		displays.push(candidate.display);
 		Ok(ControlFlow::Continue(()))
-	})?;
+	})
+	.await?;
 	let total_matches = window.total;
 	let (retained, limit_reached) = window.into_page();
 	let hits = retained
@@ -491,13 +625,13 @@ pub fn find_source(
 	language: SupportLang,
 	query: &Query<'_>,
 	page: Page,
-	stop: &dyn Stop,
+	cancel: &CancellationToken,
 ) -> Result<SourceMatches, Error> {
 	load_grammar(language)?;
 	let mut warnings = Vec::new();
 	let mut patterns = Vec::with_capacity(query.patterns.len());
 	for pattern in query.patterns {
-		check(stop)?;
+		check(cancel)?;
 		match ops::compile_pattern(pattern, query.selector, &query.strictness, language) {
 			Ok(compiled) => {
 				warnings.extend(error_node_warning(pattern, &compiled, language));
@@ -514,9 +648,9 @@ pub fn find_source(
 			warnings.push("parse error (syntax tree contains error nodes)".to_string());
 		}
 		for pattern in &patterns {
-			check(stop)?;
+			check(cancel)?;
 			for matched in ast.root().find_all(pattern.clone()) {
-				check(stop)?;
+				check(cancel)?;
 				window.offer(0, &matched, query.captures);
 			}
 		}
@@ -612,21 +746,25 @@ pub struct Edited {
 	pub report:        Report,
 }
 
-/// Rewrites `candidates` in order. Files with syntax errors are skipped (or
-/// fail the run); in [`Mode::Write`] nothing is written unless every file
-/// rendered.
+/// Rewrites `candidates` in order.
+///
+/// Files with syntax errors are skipped (or fail the run); in [`Mode::Write`]
+/// nothing is written unless every file rendered. Files are read and matched
+/// concurrently on tasks of the current runtime and consumed in candidate
+/// order; dropping the future cancels the pass.
 ///
 /// # Errors
 /// [`Error::Invalid`] for a parse failure under
-/// [`Rewrite::fail_on_parse_error`], an ambiguous overlap, or a failed write;
-/// [`Error::Stopped`].
-pub fn rewrite(
-	fs: &BlockingFs,
+/// [`Rewrite::fail_on_parse_error`], an ambiguous overlap, a failed write, or
+/// an aborted rewrite task.
+pub async fn rewrite(
+	fs: &Fs,
 	candidates: Vec<Candidate>,
 	rewrite: &Rewrite<'_>,
-	stop: &dyn Stop,
 ) -> Result<Edited, Error> {
-	let prepared = resolve(candidates, rewrite.lang, stop)?;
+	let halt = HaltFlag::default();
+	let _guard = halt.guard();
+	let prepared = resolve(candidates, rewrite.lang);
 	let mut report = Report {
 		files_searched:   prepared.files.len(),
 		warnings:         Vec::new(),
@@ -636,15 +774,8 @@ pub fn rewrite(
 
 	let mut rules = Vec::with_capacity(rewrite.rules.len());
 	for (pattern, template) in rewrite.rules {
-		check(stop)?;
-		let by_lang = compile_for(
-			pattern,
-			&prepared.languages,
-			rewrite.selector,
-			&rewrite.strictness,
-			warnings,
-			stop,
-		)?;
+		let by_lang =
+			compile_for(pattern, &prepared.languages, rewrite.selector, &rewrite.strictness, warnings);
 		// A pattern that parses in no discovered language is a genuine pattern
 		// error; failing in only some languages of a mixed tree is expected
 		// and surfaces per skipped file below.
@@ -667,8 +798,9 @@ pub fn rewrite(
 			}
 			continue;
 		}
-		rules.push(CompiledRule { pattern, template: template.as_str(), by_lang });
+		rules.push(CompiledRule { pattern: pattern.clone(), template: template.clone(), by_lang });
 	}
+	let rules: Arc<[CompiledRule]> = rules.into();
 	// Compile diagnostics precede file diagnostics.
 	warnings.sort();
 
@@ -676,54 +808,43 @@ pub fn rewrite(
 	let mut total = 0;
 	let mut limit_reached = false;
 	if !rules.is_empty() {
-		for Resolved { candidate, language } in prepared.files {
-			check(stop)?;
+		let job = Arc::new(RewriteJob {
+			fs: fs.clone(),
+			rules,
+			budget: rewrite.max_replacements,
+			skip_overlaps: rewrite.skip_overlaps,
+			halt: halt.clone(),
+		});
+		let (workers, window) = pool();
+		let mut tasks = pin!(exec::ordered(
+			stream::iter(prepared.files),
+			workers,
+			window,
+			|| (),
+			move |(), resolved| {
+				let job = Arc::clone(&job);
+				async move { ((), job.run(resolved).await) }
+			},
+		));
+		while let Some(rewritten) = tasks.next().await {
+			let Rewritten { candidate, warnings: found, step } = rewritten?;
+			warnings.extend(found);
 			let fail = rewrite.fail_on_parse_error;
-			let language = match language {
-				Ok(language) => language,
-				Err(error) => {
-					skip(fail, warnings, format!("{}: {error}", candidate.display))?;
+			let (language, source, mut staged) = match step {
+				Step::Unchanged => continue,
+				Step::Skip(issue) => {
+					skip(fail, warnings, issue)?;
 					continue;
 				},
+				Step::Staged { language, source, staged } => (language, source, staged),
 			};
-			let key = language.canonical_name();
-			let mut runnable = Vec::new();
-			for rule in &rules {
-				check(stop)?;
-				match rule.by_lang.get(key) {
-					Some(Ok(pattern)) => runnable.push((rule.template, pattern)),
-					Some(Err(error)) => {
-						warnings.push(format!("{}: {}: {error}", rule.pattern, candidate.display));
-					},
-					None => {},
-				}
+			// Tasks stage against the whole budget; keep only what is left of it.
+			let remaining = rewrite.max_replacements.saturating_sub(total);
+			if staged.changes.len() > remaining {
+				staged.changes.truncate(remaining);
+				staged.edits.truncate(remaining);
+				staged.limit_reached = true;
 			}
-			if runnable.is_empty() {
-				continue;
-			}
-			let source = match fs.read_to_string(&candidate.path) {
-				Ok(source) => source,
-				Err(err) => {
-					skip(fail, warnings, format!("{}: {err}", candidate.display))?;
-					continue;
-				},
-			};
-			let ast = language.ast_grep(&source);
-			if has_parse_error(&ast) {
-				let issue =
-					format!("{}: parse error (syntax tree contains error nodes)", candidate.display);
-				skip(fail, warnings, issue)?;
-				continue;
-			}
-
-			let staged = stage(
-				&ast,
-				&runnable,
-				rewrite.max_replacements.saturating_sub(total),
-				rewrite.skip_overlaps,
-				Some(candidate.display.as_str()),
-				stop,
-			)?;
 			limit_reached |= staged.limit_reached;
 			if staged.changes.is_empty() {
 				if staged.limit_reached {
@@ -756,17 +877,100 @@ pub fn rewrite(
 
 	if rewrite.mode == Mode::Write {
 		for file in &files {
-			check(stop)?;
 			if let Some(content) = &file.content
 				&& *content != file.source
 			{
-				fs.write(&file.path, content).map_err(|err| {
+				fs.write(&file.path, content).await.map_err(|err| {
 					Error::Invalid(format!("Failed to write {}: {err}", file.path.display()))
 				})?;
 			}
 		}
 	}
 	Ok(Edited { files, limit_reached, report })
+}
+
+/// What every task of one [`rewrite`] pass shares.
+struct RewriteJob {
+	fs:            Fs,
+	rules:         Arc<[CompiledRule]>,
+	budget:        usize,
+	skip_overlaps: bool,
+	halt:          HaltFlag,
+}
+
+/// A file's rewrite task outcome, in the order [`rewrite`] replays it.
+struct Rewritten {
+	candidate: Candidate,
+	/// Rule diagnostics recorded before `step`.
+	warnings:  Vec<String>,
+	step:      Step,
+}
+
+/// How a file's rewrite task ended.
+enum Step {
+	/// No rule runs on the file.
+	Unchanged,
+	/// The file cannot be rewritten; the text is the diagnostic.
+	Skip(String),
+	/// Replacements staged against the whole replacement budget.
+	Staged { language: SupportLang, source: String, staged: Staged },
+}
+
+impl RewriteJob {
+	/// Reads, parses, and stages one file.
+	async fn run(&self, resolved: Resolved) -> Result<Rewritten, Error> {
+		check(&self.halt)?;
+		let Resolved { candidate, language } = resolved;
+		let mut warnings = Vec::new();
+		let step = self.step(&candidate, language, &mut warnings).await?;
+		Ok(Rewritten { candidate, warnings, step })
+	}
+
+	async fn step(
+		&self,
+		candidate: &Candidate,
+		language: Result<SupportLang, String>,
+		warnings: &mut Vec<String>,
+	) -> Result<Step, Error> {
+		let language = match language {
+			Ok(language) => language,
+			Err(error) => return Ok(Step::Skip(format!("{}: {error}", candidate.display))),
+		};
+		let key = language.canonical_name();
+		let mut runnable = Vec::new();
+		for rule in self.rules.iter() {
+			check(&self.halt)?;
+			match rule.by_lang.get(key) {
+				Some(Ok(pattern)) => runnable.push((rule.template.as_str(), pattern)),
+				Some(Err(error)) => {
+					warnings.push(format!("{}: {}: {error}", rule.pattern, candidate.display));
+				},
+				None => {},
+			}
+		}
+		if runnable.is_empty() {
+			return Ok(Step::Unchanged);
+		}
+		let source = match self.fs.read_to_string(&candidate.path).await {
+			Ok(source) => source,
+			Err(err) => return Ok(Step::Skip(format!("{}: {err}", candidate.display))),
+		};
+		let ast = language.ast_grep(&source);
+		if has_parse_error(&ast) {
+			let issue =
+				format!("{}: parse error (syntax tree contains error nodes)", candidate.display);
+			return Ok(Step::Skip(issue));
+		}
+		let staged = stage(
+			&ast,
+			&runnable,
+			self.budget,
+			self.skip_overlaps,
+			Some(candidate.display.as_str()),
+			&self.halt,
+		)?;
+		Ok(Step::Staged { language, source, staged })
+	}
 }
 
 /// Records `issue` as a warning, or fails with it when `fail` is set.
@@ -789,10 +993,11 @@ pub struct SourceEdit {
 	pub warnings: Vec<String>,
 }
 
-/// Rewrites `source` as `language`; [`Rewrite::lang`], [`Rewrite::max_files`],
-/// and [`Rewrite::mode`] are ignored. A source with syntax errors is left
-/// unchanged with a warning (or fails under
-/// [`Rewrite::fail_on_parse_error`]).
+/// Rewrites `source` as `language`.
+///
+/// [`Rewrite::lang`], [`Rewrite::max_files`], and [`Rewrite::mode`] are
+/// ignored. A source with syntax errors is left unchanged with a warning (or
+/// fails under [`Rewrite::fail_on_parse_error`]).
 ///
 /// # Errors
 /// [`Error::Invalid`] when the grammar cannot load, for a parse failure under
@@ -802,13 +1007,13 @@ pub fn rewrite_source(
 	source: &str,
 	language: SupportLang,
 	rewrite: &Rewrite<'_>,
-	stop: &dyn Stop,
+	cancel: &CancellationToken,
 ) -> Result<SourceEdit, Error> {
 	load_grammar(language)?;
 	let mut warnings = Vec::new();
 	let mut rules = Vec::with_capacity(rewrite.rules.len());
 	for (pattern, template) in rewrite.rules {
-		check(stop)?;
+		check(cancel)?;
 		match ops::compile_pattern(pattern, rewrite.selector, &rewrite.strictness, language) {
 			Ok(compiled) => {
 				warnings.extend(error_node_warning(pattern, &compiled, language));
@@ -842,7 +1047,7 @@ pub fn rewrite_source(
 		.map(|(template, pattern)| (*template, pattern))
 		.collect();
 	let staged =
-		stage(&ast, &runnable, rewrite.max_replacements, rewrite.skip_overlaps, None, stop)?;
+		stage(&ast, &runnable, rewrite.max_replacements, rewrite.skip_overlaps, None, cancel)?;
 	let content = render(source, &staged.edits)?;
 	Ok(SourceEdit { changes: staged.changes, content, warnings })
 }
@@ -862,17 +1067,12 @@ struct Prepared {
 	missing_grammars: BTreeSet<&'static str>,
 }
 
-fn resolve(
-	candidates: Vec<Candidate>,
-	lang: Option<&str>,
-	stop: &dyn Stop,
-) -> Result<Prepared, Error> {
+fn resolve(candidates: Vec<Candidate>, lang: Option<&str>) -> Prepared {
 	let mut files = Vec::with_capacity(candidates.len());
 	let mut languages = BTreeMap::new();
 	let mut missing_grammars = BTreeSet::new();
 	let mut installed = HashMap::new();
 	for candidate in candidates {
-		check(stop)?;
 		match ops::resolve_language(lang, &candidate.path) {
 			Ok(language) => {
 				let available = *installed.entry(language).or_insert_with(|| {
@@ -892,7 +1092,7 @@ fn resolve(
 			Err(err) => files.push(Resolved { candidate, language: Err(err.to_string()) }),
 		}
 	}
-	Ok(Prepared { files, languages, missing_grammars })
+	Prepared { files, languages, missing_grammars }
 }
 
 /// `pattern` compiled for every language (by canonical name), or why it does
@@ -903,109 +1103,165 @@ fn compile_for(
 	selector: Option<&str>,
 	strictness: &MatchStrictness,
 	warnings: &mut Vec<String>,
-	stop: &dyn Stop,
-) -> Result<BTreeMap<&'static str, Result<Pattern, String>>, Error> {
+) -> BTreeMap<&'static str, Result<Pattern, String>> {
 	let mut compiled = BTreeMap::new();
 	for (&key, &language) in languages {
-		check(stop)?;
 		let result = ops::compile_pattern(pattern, selector, strictness, language)
 			.inspect(|compiled| warnings.extend(error_node_warning(pattern, compiled, language)))
 			.map_err(|err| err.to_string());
 		compiled.insert(key, result);
 	}
-	Ok(compiled)
+	compiled
 }
 
 /// A search pattern compiled for every discovered language.
-struct CompiledPattern<'a> {
-	pattern: &'a str,
+struct CompiledPattern {
+	pattern: String,
 	by_lang: BTreeMap<&'static str, Result<Pattern, String>>,
 }
 
 /// A rewrite rule compiled for every discovered language. A rule that fails
 /// to parse in one language of a mixed tree skips that language's files
 /// instead of failing the run.
-struct CompiledRule<'a> {
-	pattern:  &'a str,
-	template: &'a str,
+struct CompiledRule {
+	pattern:  String,
+	template: String,
 	by_lang:  BTreeMap<&'static str, Result<Pattern, String>>,
 }
 
-/// Resolves and compiles, then parses every file that has a runnable pattern
-/// and hands it to `visit` with those patterns until it breaks. Per-file
-/// problems become warnings.
-fn scan(
-	fs: &BlockingFs,
-	candidates: Vec<Candidate>,
+/// Compiles every pattern of `query` for `languages`; the sorted compile
+/// warnings come second.
+fn compile_query(
 	query: &Query<'_>,
-	stop: &dyn Stop,
-	mut visit: impl FnMut(
-		Candidate,
-		SupportLang,
-		String,
-		&Ast,
-		&[&Pattern],
-	) -> Result<ControlFlow<()>, Error>,
-) -> Result<Report, Error> {
-	let prepared = resolve(candidates, query.lang, stop)?;
+	languages: &BTreeMap<&'static str, SupportLang>,
+) -> (Vec<CompiledPattern>, Vec<String>) {
 	let mut warnings = Vec::new();
 	let mut compiled = Vec::with_capacity(query.patterns.len());
 	for pattern in query.patterns {
-		check(stop)?;
-		let by_lang = compile_for(
-			pattern,
-			&prepared.languages,
-			query.selector,
-			&query.strictness,
-			&mut warnings,
-			stop,
-		)?;
-		compiled.push(CompiledPattern { pattern, by_lang });
+		let by_lang =
+			compile_for(pattern, languages, query.selector, &query.strictness, &mut warnings);
+		compiled.push(CompiledPattern { pattern: pattern.clone(), by_lang });
 	}
 	warnings.sort();
+	(compiled, warnings)
+}
+
+/// What a [`scan`] task found in one file.
+struct Scanned<T> {
+	candidate: Candidate,
+	/// Problems met before the file was parsed or matched.
+	warnings:  Vec<String>,
+	/// Language, contents, and `job` output; `None` when no pattern runs on the
+	/// file.
+	parsed:    Option<(SupportLang, String, T)>,
+}
+
+/// Reads and parses `resolved`, then runs `job` over the patterns that apply
+/// to its language. Per-file problems become warnings.
+async fn scan_file<T, J>(
+	fs: Fs,
+	resolved: Resolved,
+	compiled: Arc<[CompiledPattern]>,
+	job: Arc<J>,
+	halt: HaltFlag,
+) -> Result<Scanned<T>, Error>
+where
+	T: Send + 'static,
+	J: Fn(&Ast, &[&Pattern], &HaltFlag) -> Result<T, Error> + Send + Sync + 'static,
+{
+	check(&halt)?;
+	let Resolved { candidate, language } = resolved;
+	let mut warnings = Vec::new();
+	let language = match language {
+		Ok(language) => language,
+		Err(error) => {
+			for pattern in compiled.iter() {
+				warnings.push(format!("{}: {}: {error}", pattern.pattern, candidate.display));
+			}
+			return Ok(Scanned { candidate, warnings, parsed: None });
+		},
+	};
+	let source = match fs.read_to_string(&candidate.path).await {
+		Ok(source) => source,
+		Err(err) => {
+			for pattern in compiled.iter() {
+				warnings.push(format!("{}: {}: {err}", pattern.pattern, candidate.display));
+			}
+			return Ok(Scanned { candidate, warnings, parsed: None });
+		},
+	};
+	let key = language.canonical_name();
+	let mut runnable = Vec::new();
+	for pattern in compiled.iter() {
+		match pattern.by_lang.get(key) {
+			Some(Ok(compiled)) => runnable.push(compiled),
+			Some(Err(error)) => {
+				warnings.push(format!("{}: {}: {error}", pattern.pattern, candidate.display));
+			},
+			None => {},
+		}
+	}
+	if runnable.is_empty() {
+		return Ok(Scanned { candidate, warnings, parsed: None });
+	}
+	let ast = language.ast_grep(&source);
+	if has_parse_error(&ast) {
+		warnings
+			.push(format!("{}: parse error (syntax tree contains error nodes)", candidate.display));
+	}
+	let found = job(&ast, &runnable, &halt)?;
+	Ok(Scanned { candidate, warnings, parsed: Some((language, source, found)) })
+}
+
+/// Resolves and compiles, then reads and parses every file that has a
+/// runnable pattern on the current runtime, runs `job` over its patterns, and
+/// hands the outputs to `visit` in candidate order until it breaks. Per-file
+/// problems become warnings.
+async fn scan<T, J>(
+	fs: &Fs,
+	candidates: Vec<Candidate>,
+	query: &Query<'_>,
+	job: J,
+	mut visit: impl FnMut(Candidate, SupportLang, String, T) -> Result<ControlFlow<()>, Error>,
+) -> Result<Report, Error>
+where
+	T: Send + 'static,
+	J: Fn(&Ast, &[&Pattern], &HaltFlag) -> Result<T, Error> + Send + Sync + 'static,
+{
+	let halt = HaltFlag::default();
+	let _guard = halt.guard();
+	let prepared = resolve(candidates, query.lang);
+	let (compiled, mut warnings) = compile_query(query, &prepared.languages);
 
 	let files_searched = prepared.files.len();
-	for Resolved { candidate, language } in prepared.files {
-		check(stop)?;
-		let language = match language {
-			Ok(language) => language,
-			Err(error) => {
-				for pattern in &compiled {
-					warnings.push(format!("{}: {}: {error}", pattern.pattern, candidate.display));
-				}
-				continue;
-			},
-		};
-		let source = match fs.read_to_string(&candidate.path) {
-			Ok(source) => source,
-			Err(err) => {
-				for pattern in &compiled {
-					warnings.push(format!("{}: {}: {err}", pattern.pattern, candidate.display));
-				}
-				continue;
-			},
-		};
-		let key = language.canonical_name();
-		let mut runnable = Vec::new();
-		for pattern in &compiled {
-			check(stop)?;
-			match pattern.by_lang.get(key) {
-				Some(Ok(pattern)) => runnable.push(pattern),
-				Some(Err(error)) => {
-					warnings.push(format!("{}: {}: {error}", pattern.pattern, candidate.display));
-				},
-				None => {},
-			}
-		}
-		if runnable.is_empty() {
+	let compiled: Arc<[CompiledPattern]> = compiled.into();
+	let job = Arc::new(job);
+	let (workers, window) = pool();
+	let scan_fs = fs.clone();
+	let scan_halt = halt.clone();
+	let mut tasks = pin!(exec::ordered(
+		stream::iter(prepared.files),
+		workers,
+		window,
+		|| (),
+		move |(), resolved| {
+			let task = scan_file(
+				scan_fs.clone(),
+				resolved,
+				Arc::clone(&compiled),
+				Arc::clone(&job),
+				scan_halt.clone(),
+			);
+			async move { ((), task.await) }
+		},
+	));
+	while let Some(scanned) = tasks.next().await {
+		let Scanned { candidate, warnings: found, parsed } = scanned?;
+		warnings.extend(found);
+		let Some((language, source, output)) = parsed else {
 			continue;
-		}
-		let ast = language.ast_grep(&source);
-		if has_parse_error(&ast) {
-			warnings
-				.push(format!("{}: parse error (syntax tree contains error nodes)", candidate.display));
-		}
-		if visit(candidate, language, source, &ast, &runnable)?.is_break() {
+		};
+		if visit(candidate, language, source, output)?.is_break() {
 			break;
 		}
 	}
@@ -1033,7 +1289,7 @@ fn stage(
 	budget: usize,
 	skip_overlaps: bool,
 	display: Option<&str>,
-	stop: &dyn Stop,
+	halt: &impl Cancelled,
 ) -> Result<Staged, Error> {
 	let mut staged =
 		Staged { changes: Vec::new(), edits: Vec::new(), limit_reached: false };
@@ -1043,7 +1299,7 @@ fn stage(
 	let mut kept = BTreeMap::new();
 	'rules: for &(template, pattern) in rules {
 		for matched in ast.root().find_all(pattern.clone()) {
-			check(stop)?;
+			check(halt)?;
 			let edit = matched.replace_by(template);
 			if !seen.insert((edit.position, edit.deleted_length, edit.inserted_text.clone())) {
 				continue;
@@ -1177,7 +1433,7 @@ struct Window {
 }
 
 impl Window {
-	fn new(page: Page) -> Self {
+	const fn new(page: Page) -> Self {
 		Self {
 			page,
 			capacity: page.offset.saturating_add(page.limit).saturating_add(1),
@@ -1196,6 +1452,20 @@ impl Window {
 		if self.admits(&key) {
 			self.retain(Retained { key, matched: Match::of(matched, captures) });
 		}
+	}
+
+	/// Merges the window `other` of one file, ordered as file `file`: every
+	/// match `other` retained that ranks here enters, and its count is added.
+	fn absorb(&mut self, file: usize, other: Self) {
+		self.total += other.total;
+		for mut retained in other.heap {
+			retained.key.file = file;
+			retained.key.sequence += self.sequence;
+			if self.admits(&retained.key) {
+				self.retain(retained);
+			}
+		}
+		self.sequence += other.sequence;
 	}
 
 	/// Whether a match ordered by `key` would enter the window.

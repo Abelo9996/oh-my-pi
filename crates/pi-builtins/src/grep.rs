@@ -9,11 +9,16 @@
 use std::{
 	ffi::{OsStr, OsString},
 	fmt,
-	io::{self, Read, Write},
+	io::{self, Write},
 	path::{Path, PathBuf},
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
+use futures::{StreamExt, stream};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum, parser::ValueSource};
 use globset::{Glob, GlobMatcher};
 use grep_matcher::{LineTerminator, Matcher};
@@ -24,13 +29,13 @@ use grep_searcher::{
 };
 use pi_walker::{
 	FileType,
-	exec::{self, Flow},
+	exec,
 	grep::{Engine, pcre2_jit_enabled},
 	walk,
 };
-use pi_vfs::BlockingFs;
 use crate::bre;
-use crate::host::{Host, Utility, util};
+use crate::host::{AsyncUtility, Host, async_util};
+use crate::stdio;
 
 /// Exit status of a `grep` or `rg` run: 0 when a line was selected, 1 when
 /// none was, 2 on any error, except that under `-q` a match outranks errors.
@@ -459,6 +464,7 @@ enum MatchMode {
 }
 
 /// Resolved, flag-free options shared with the search [`Sink`].
+#[derive(Clone)]
 struct Options {
 	line_number:         bool,
 	byte_offset:         bool,
@@ -478,6 +484,7 @@ struct Options {
 	binary_files:        BinaryFiles,
 }
 
+#[derive(Clone)]
 struct PathRule {
 	include: bool,
 	matcher: GlobMatcher,
@@ -489,7 +496,7 @@ struct RuleSpec {
 	pattern: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PathRules {
 	files: Vec<PathRule>,
 	dirs:  Vec<PathRule>,
@@ -998,21 +1005,38 @@ impl<M: Matcher, W: Write> Sink for GrepSink<'_, M, W> {
 	}
 }
 
-/// Search one input and return whether it contained a selected record.
-fn process_reader<M: Matcher, R: Read, W: Write>(
-	matcher: &M,
-	searcher: &mut Searcher,
-	reader: R,
-	display: &[u8],
-	opts: &Options,
-	out: &mut W,
-) -> io::Result<bool> {
-	let mut sink =
-		GrepSink { out, matcher, display, opts, match_count: 0, any_match: false, binary: false };
-	let reader = BoundedSearchReader::new(reader, searcher, matcher);
-	searcher.search_reader(matcher, reader, &mut sink)?;
-	Ok(sink.any_match)
+/// Cancellation seen by the search workers: raised when either the whole
+/// utility body or the directory search they serve is dropped.
+#[derive(Clone)]
+struct Halt {
+	scope: Arc<AtomicBool>,
+	outer: Arc<AtomicBool>,
 }
+
+impl Halt {
+	fn raised(&self) -> bool {
+		self.scope.load(Ordering::Relaxed) || self.outer.load(Ordering::Relaxed)
+	}
+}
+
+/// Raises its flag on drop, halting every task that observes it.
+struct HaltGuard(Arc<AtomicBool>);
+
+impl HaltGuard {
+	fn new() -> (Self, Arc<AtomicBool>) {
+		let flag = Arc::new(AtomicBool::new(false));
+		(Self(Arc::clone(&flag)), flag)
+	}
+}
+
+impl Drop for HaltGuard {
+	fn drop(&mut self) {
+		self.0.store(true, Ordering::Relaxed);
+	}
+}
+
+/// Bytes requested per asynchronous input read.
+const READ_CHUNK: usize = 64 * 1024;
 
 fn display_path_for_operand(operand: &OsStr, resolved: &Path, path: &Path) -> PathBuf {
 	let rel = path.strip_prefix(resolved).unwrap_or(path);
@@ -1020,51 +1044,6 @@ fn display_path_for_operand(operand: &OsStr, resolved: &Path, path: &Path) -> Pa
 		PathBuf::from(operand)
 	} else {
 		Path::new(operand).join(rel)
-	}
-}
-
-#[allow(clippy::too_many_arguments)]
-fn search_file_path<M: Matcher, W: Write, E: Write>(
-	fs: &BlockingFs,
-	operand: &OsStr,
-	resolved: &Path,
-	path: &Path,
-	matcher: &M,
-	searcher: &mut Searcher,
-	opts: &Options,
-	out: &mut W,
-	err: &mut E,
-	had_error: &mut bool,
-) -> io::Result<bool> {
-	let display_path = display_path_for_operand(operand, resolved, path);
-	match fs.open(path) {
-		Ok(file) => {
-			let display = display_path.as_os_str().as_encoded_bytes();
-			match process_reader(matcher, searcher, file, display, opts, out) {
-				Ok(matched) => Ok(matched),
-				// Propagate BrokenPipe to stop the search; the host maps its status.
-				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
-				Err(error) => {
-					*had_error = true;
-					if !opts.no_messages {
-						let _ = writeln!(
-							err,
-							"grep: {}: {}",
-							display_path.display(),
-							describe_search_error(&error)
-						);
-					}
-					Ok(false)
-				},
-			}
-		},
-		Err(error) => {
-			*had_error = true;
-			if !opts.no_messages {
-				let _ = writeln!(err, "grep: {}: {error}", display_path.display());
-			}
-			Ok(false)
-		},
 	}
 }
 
@@ -1076,10 +1055,126 @@ struct FileSearch {
 	matched:   io::Result<bool>,
 }
 
+/// What one search worker reuses across files: its searcher, read buffer and output buffer.
+struct Worker {
+	searcher: Searcher,
+	buf:      Vec<u8>,
+	out:      Vec<u8>,
+}
+
+impl Worker {
+	/// Hands the file's output to the consumer, leaving an empty buffer in place when nothing was written.
+	fn take_out(&mut self) -> Vec<u8> {
+		if self.out.is_empty() {
+			Vec::new()
+		} else {
+			std::mem::take(&mut self.out)
+		}
+	}
+}
+
+/// Everything the concurrent per-file searches of one directory operand share.
+struct DirSearch<M> {
+	fs:       pi_vfs::Fs,
+	halt:     Halt,
+	operand:  OsString,
+	resolved: PathBuf,
+	matcher:  M,
+	searcher: SearcherBuilder,
+	opts:     Options,
+}
+
+impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
+	/// A worker whose searcher is built once from the shared builder.
+	fn worker(&self) -> Worker {
+		Worker { searcher: self.searcher.build(), buf: vec![0u8; READ_CHUNK], out: Vec::new() }
+	}
+
+	/// Classifies one file's search result; a broken pipe stops the search, any other error is reported per file.
+	fn finish(&self, display_path: &Path, searched: io::Result<bool>, out: Vec<u8>) -> FileSearch {
+		let mut err = Vec::new();
+		let mut had_error = false;
+		let matched = match searched {
+			Ok(matched) => Ok(matched),
+			// Propagate BrokenPipe to stop the search; the host maps its status.
+			Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
+			Err(error) => {
+				had_error = true;
+				if !self.opts.no_messages {
+					let _ = writeln!(
+						err,
+						"grep: {}: {}",
+						display_path.display(),
+						describe_search_error(&error)
+					);
+				}
+				Ok(false)
+			},
+		};
+		FileSearch { out, err, had_error, matched }
+	}
+
+	/// Pushes `source` through the worker's searcher into its output buffer, failing with the cancellation error once the halt is raised.
+	async fn push_source(
+		&self,
+		source: &mut stdio::Source,
+		display: &[u8],
+		worker: &mut Worker,
+	) -> io::Result<bool> {
+		let Worker { searcher, buf, out } = worker;
+		let terminator = bound_terminator(searcher, &self.matcher);
+		let mut sink = GrepSink {
+			out,
+			matcher: &self.matcher,
+			display,
+			opts: &self.opts,
+			match_count: 0,
+			any_match: false,
+			binary: false,
+		};
+		let mut search = searcher.search_push(&self.matcher, &mut sink);
+		let mut run = 0;
+		loop {
+			if self.halt.raised() {
+				return Err(pi_vfs::cancelled());
+			}
+			let read = source.read(buf).await?;
+			if read == 0 {
+				break;
+			}
+			check_run(terminator, &mut run, &buf[..read])?;
+			if !search.push(&buf[..read])? {
+				break;
+			}
+		}
+		search.finish()?;
+		Ok(sink.any_match)
+	}
+
+	async fn search(&self, worker: &mut Worker, path: &Path) -> FileSearch {
+		let display_path = display_path_for_operand(&self.operand, &self.resolved, path);
+		match stdio::Source::open(&self.fs, path).await {
+			Ok(mut source) => {
+				let searched = self
+					.push_source(&mut source, display_path.as_os_str().as_encoded_bytes(), worker)
+					.await;
+				self.finish(&display_path, searched, worker.take_out())
+			},
+			Err(error) => {
+				let mut err = Vec::new();
+				if !self.opts.no_messages {
+					let _ = writeln!(err, "grep: {}: {error}", display_path.display());
+				}
+				FileSearch { out: Vec::new(), err, had_error: true, matched: Ok(false) }
+			},
+		}
+	}
+}
+
 /// Recursively searches a directory operand on parallel workers, pruning
 /// excluded directories and writing each file's output in path order.
 #[allow(clippy::too_many_arguments)]
-fn search_dir<M: Matcher + Sync, W: Write>(
+async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>(
 	host: &mut Host,
 	operand: &OsStr,
 	resolved: &Path,
@@ -1088,27 +1183,26 @@ fn search_dir<M: Matcher + Sync, W: Write>(
 	opts: &Options,
 	rules: &PathRules,
 	follow_links: bool,
+	outer: &Arc<AtomicBool>,
 	out: &mut W,
 	had_error: &mut bool,
 ) -> io::Result<bool> {
-	let layer = pi_walker::Fs::new(host.fs(), resolved);
+	let vfs = host.vfs();
+	let (_guard, scope) = HaltGuard::new();
+	let layer = pi_walker::Fs::new(&vfs, resolved);
 	let walk_opts = walk::Options { hidden: true, follow_links, ..walk::Options::default() };
-	let stop = host.cancel_stop();
-	let collected = walk::collect(&layer, resolved, &walk_opts, true, &stop, |_, entry| {
+	let filter_rules = Arc::new(rules.clone());
+	let collected = walk::collect(&layer, resolved, &walk_opts, true, move |_, entry| {
 		let rel = entry.rel_path();
 		match entry.file_type {
-			FileType::Dir if !rules.allows_dir(rel) => walk::Action::SkipDir,
-			FileType::File if rules.allows_file(rel) => walk::Action::Continue,
+			FileType::Dir if !filter_rules.allows_dir(rel) => walk::Action::SkipDir,
+			FileType::File if filter_rules.allows_file(rel) => walk::Action::Continue,
 			_ => walk::Action::Skip,
 		}
-	});
+	})
+	.await;
 	let files = match collected {
 		Ok(files) => files,
-		// The shell wrapper owns the user-visible cancellation status.
-		Err(walk::WalkError::Stopped) => {
-			*had_error = true;
-			return Ok(false);
-		},
 		Err(walk::WalkError::Root { path, error }) => {
 			*had_error = true;
 			if !opts.no_messages {
@@ -1127,70 +1221,75 @@ fn search_dir<M: Matcher + Sync, W: Write>(
 			let _ = writeln!(host.stderr, "grep: {}: {}", display_path.display(), error.error);
 		}
 	}
-	let fs = host.fs().clone();
+	let paths: Vec<PathBuf> =
+		(0..files.len()).map(|index| layer.join(resolved, files.get(index).path)).collect();
 	let workers = if opts.line_buffered { 1 } else { walk_opts.parallelism(&layer) };
+	let shared = Arc::new(DirSearch {
+		fs:       vfs.clone(),
+		halt:     Halt { scope, outer: Arc::clone(outer) },
+		operand:  operand.to_owned(),
+		resolved: resolved.to_owned(),
+		matcher:  matcher.clone(),
+		searcher: searcher.clone(),
+		opts:     opts.clone(),
+	});
 	let mut any = false;
 	let mut failed = None;
-	exec::ordered(
-		files.len(),
-		workers,
-		&stop,
-		|| searcher.build(),
-		|searcher: &mut Searcher, index| {
-			let path = layer.join(resolved, files.get(index).path);
-			let (mut file_out, mut file_err, mut file_error) = (Vec::<u8>::new(), Vec::<u8>::new(), false);
-			let matched = search_file_path(
-				&fs,
-				operand,
-				resolved,
-				&path,
-				matcher,
-				searcher,
-				opts,
-				&mut file_out,
-				&mut file_err,
-				&mut file_error,
-			);
-			FileSearch { out: file_out, err: file_err, had_error: file_error, matched }
-		},
-		|_, found: FileSearch| {
-			let written = out
-				.write_all(&found.out)
-				.and_then(|()| if opts.line_buffered { out.flush() } else { Ok(()) });
-			if let Err(error) = written {
+	let mut results = exec::ordered(stream::iter(paths), workers, workers, || shared.worker(), {
+		let shared = Arc::clone(&shared);
+		move |mut worker: Worker, path: PathBuf| {
+			let shared = Arc::clone(&shared);
+			async move {
+				let found = shared.search(&mut worker, &path).await;
+				(worker, found)
+			}
+		}
+	});
+	while let Some(found) = results.next().await {
+		let written = out
+			.write_all(&found.out)
+			.and_then(|()| if opts.line_buffered { out.flush() } else { Ok(()) });
+		if let Err(error) = written {
+			failed = Some(error);
+			break;
+		}
+		let _ = host.stderr.write_all(&found.err);
+		if let Err(error) = host.flush_output().await {
+			failed = Some(error);
+			break;
+		}
+		*had_error |= found.had_error;
+		match found.matched {
+			Ok(matched) => any |= matched,
+			Err(error) => {
 				failed = Some(error);
-				return Flow::Stop;
-			}
-			let _ = host.stderr.write_all(&found.err);
-			*had_error |= found.had_error;
-			match found.matched {
-				Ok(matched) => any |= matched,
-				Err(error) => {
-					failed = Some(error);
-					return Flow::Stop;
-				},
-			}
-			if opts.quiet && any {
-				Flow::Stop
-			} else {
-				Flow::Continue
-			}
-		},
-	);
+				break;
+			},
+		}
+		if opts.quiet && any {
+			break;
+		}
+	}
+	drop(results);
 	if let Some(error) = failed {
 		return Err(error);
-	}
-	if host.is_cancelled() {
-		*had_error = true;
 	}
 	Ok(any)
 }
 
-fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String> {
+async fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String> {
 	let result = if path == OsStr::new("-") {
-		read_pattern_source(&mut host.stdin)
+		let mut bytes = Vec::new();
+		match host.read_stdin_to_end(&mut bytes, MAX_LINE_BYTES).await {
+			Ok(_) => Ok(bytes),
+			Err(error) if error.kind() == io::ErrorKind::OutOfMemory => Err(io::Error::other(format!(
+				"pattern file larger than {} MiB",
+				MAX_LINE_BYTES >> 20
+			))),
+			Err(error) => Err(error),
+		}
 	} else {
-		host.fs().open(host.resolve(path)).and_then(read_pattern_source)
+		read_pattern_file(&host.vfs(), &host.resolve(path)).await
 	};
 	result.map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -1205,7 +1304,7 @@ fn pattern_file_lines(bytes: &[u8]) -> Vec<String> {
 		.collect()
 }
 
-fn resolve_patterns(host: &mut Host, cli: &GrepArgs) -> Result<(Vec<String>, Vec<OsString>), String> {
+async fn resolve_patterns(host: &mut Host, cli: &GrepArgs) -> Result<(Vec<String>, Vec<OsString>), String> {
 	let has_explicit_patterns = !cli.patterns.is_empty() || !cli.pattern_files.is_empty();
 	let mut patterns = Vec::new();
 	let mut files = Vec::new();
@@ -1215,7 +1314,7 @@ fn resolve_patterns(host: &mut Host, cli: &GrepArgs) -> Result<(Vec<String>, Vec
 			patterns.extend(pattern.split('\n').map(str::to_owned));
 		}
 		for path in &cli.pattern_files {
-			patterns.extend(pattern_file_lines(&read_auxiliary_file(host, path)?));
+			patterns.extend(pattern_file_lines(&read_auxiliary_file(host, path).await?));
 		}
 		files.clone_from(&cli.args);
 		return Ok((patterns, files));
@@ -1230,7 +1329,7 @@ fn resolve_patterns(host: &mut Host, cli: &GrepArgs) -> Result<(Vec<String>, Vec
 	Ok((patterns, files))
 }
 
-fn collect_rule_specs(
+async fn collect_rule_specs(
 	host: &mut Host,
 	cli: &GrepArgs,
 	matches: &ArgMatches,
@@ -1248,7 +1347,7 @@ fn collect_rule_specs(
 	}
 	if let Some(indices) = matches.indices_of("exclude_from") {
 		for (index, path) in indices.zip(&cli.exclude_from) {
-			for pattern in pattern_file_lines(&read_auxiliary_file(host, path)?) {
+			for pattern in pattern_file_lines(&read_auxiliary_file(host, path).await?) {
 				files.push(RuleSpec { index, include: false, pattern });
 			}
 		}
@@ -1280,8 +1379,8 @@ fn compile_rules(mut specs: Vec<RuleSpec>) -> Result<Vec<PathRule>, String> {
 		.collect()
 }
 
-fn build_path_rules(host: &mut Host, cli: &GrepArgs, matches: &ArgMatches) -> Result<PathRules, String> {
-	let (files, dirs) = collect_rule_specs(host, cli, matches)?;
+async fn build_path_rules(host: &mut Host, cli: &GrepArgs, matches: &ArgMatches) -> Result<PathRules, String> {
+	let (files, dirs) = collect_rule_specs(host, cli, matches).await?;
 	Ok(PathRules { files: compile_rules(files)?, dirs: compile_rules(dirs)? })
 }
 
@@ -1293,9 +1392,9 @@ fn build_path_rules(host: &mut Host, cli: &GrepArgs, matches: &ArgMatches) -> Re
 /// Pattern files (`-f`) are held to the same size.
 pub(crate) const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 
-/// The searcher's own allocation cap, a backstop behind [`BoundedSearchReader`].
+/// The searcher's own allocation cap, a backstop behind [`check_run`].
 ///
-/// The reader stops a run one read past [`MAX_LINE_BYTES`], so the buffer needs
+/// The bound stops a run one read past [`MAX_LINE_BYTES`], so the buffer needs
 /// that much room plus one read's worth of growth before the typed error fires;
 /// retained context lines can still push it over, and that rarer failure is
 /// reported with the searcher's own message.
@@ -1317,48 +1416,33 @@ impl fmt::Display for LineLimitExceeded {
 
 impl std::error::Error for LineLimitExceeded {}
 
-/// Enforces [`MAX_LINE_BYTES`] on what a searcher reads, failing with a typed
-/// [`LineLimitExceeded`] instead of letting the searcher's buffer grow.
-///
-/// In line mode it tracks the unterminated run since the last terminator; in
-/// whole-file mode (no terminator) every byte counts. It wraps the raw input,
-/// beneath grep-searcher's decoder, so the error reaches the caller unchanged.
-pub(crate) struct BoundedSearchReader<R> {
-	inner:      R,
-	/// `None` bounds the whole input rather than one line.
-	terminator: Option<u8>,
-	run:        usize,
+/// The record terminator `searcher` buffers up to, or `None` when it buffers
+/// the whole input (multi-line search).
+pub(crate) fn bound_terminator<M: Matcher>(searcher: &Searcher, matcher: M) -> Option<u8> {
+	(!searcher.multi_line_with_matcher(matcher)).then(|| searcher.line_terminator().as_byte())
 }
 
-impl<R: Read> BoundedSearchReader<R> {
-	/// Bounds `inner` the way `searcher` will buffer it for `matcher`.
-	pub(crate) fn new<M: Matcher>(inner: R, searcher: &Searcher, matcher: M) -> Self {
-		let terminator =
-			(!searcher.multi_line_with_matcher(matcher)).then(|| searcher.line_terminator().as_byte());
-		Self { inner, terminator, run: 0 }
+/// Accounts one more `chunk` of input against [`MAX_LINE_BYTES`], failing with
+/// a typed [`LineLimitExceeded`] instead of letting the searcher's buffer grow.
+/// In line mode `run` is the unterminated run carried over from the previous
+/// chunks; in whole-file mode (no terminator) every byte counts.
+pub(crate) fn check_run(terminator: Option<u8>, run: &mut usize, chunk: &[u8]) -> io::Result<()> {
+	let n = chunk.len();
+	// Lines strictly inside one read are shorter than the read, which the
+	// searcher's heap limit already bounds; only the run crossing into
+	// this read and the one left open at its end can grow without bound.
+	let (crossing, open) = match terminator {
+		Some(byte) => match memchr::memchr(byte, chunk) {
+			Some(first) => (*run + first, n - memchr::memrchr(byte, chunk).map_or(0, |last| last + 1)),
+			None => (*run + n, *run + n),
+		},
+		None => (*run + n, *run + n),
+	};
+	if crossing.max(open) > MAX_LINE_BYTES {
+		return Err(io::Error::other(LineLimitExceeded { whole_file: terminator.is_none() }));
 	}
-}
-
-impl<R: Read> Read for BoundedSearchReader<R> {
-	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-		let n = self.inner.read(buf)?;
-		let chunk = &buf[..n];
-		// Lines strictly inside one read are shorter than the read, which the
-		// searcher's heap limit already bounds; only the run crossing into
-		// this read and the one left open at its end can grow without bound.
-		let (crossing, open) = match self.terminator {
-			Some(byte) => match memchr::memchr(byte, chunk) {
-				Some(first) => (self.run + first, n - memchr::memrchr(byte, chunk).map_or(0, |last| last + 1)),
-				None => (self.run + n, self.run + n),
-			},
-			None => (self.run + n, self.run + n),
-		};
-		if crossing.max(open) > MAX_LINE_BYTES {
-			return Err(io::Error::other(LineLimitExceeded { whole_file: self.terminator.is_none() }));
-		}
-		self.run = open;
-		Ok(n)
-	}
+	*run = open;
+	Ok(())
 }
 
 /// The message for a failed search: [`LineLimitExceeded`] says which bound it
@@ -1370,30 +1454,18 @@ pub(crate) fn describe_search_error(error: &io::Error) -> String {
 	}
 }
 
-/// Reads a pattern file (`-f`), refusing one larger than [`MAX_LINE_BYTES`] so
-/// a huge file or an endless stdin cannot exhaust the host's memory.
-pub(crate) fn read_pattern_source(mut reader: impl Read) -> io::Result<Vec<u8>> {
+/// Reads a pattern file (`-f`, FIFOs and `<(…)` included) without blocking,
+/// refusing one larger than [`MAX_LINE_BYTES`].
+pub(crate) async fn read_pattern_file(fs: &pi_vfs::Fs, path: &Path) -> io::Result<Vec<u8>> {
 	let mut bytes = Vec::new();
-	// Read the limit exactly, then probe for one more byte: a `take(limit + 1)`
-	// would make the buffer double to twice the limit.
-	(&mut reader).take(MAX_LINE_BYTES as u64).read_to_end(&mut bytes)?;
-	if bytes.len() == MAX_LINE_BYTES {
-		let mut probe = [0u8; 1];
-		loop {
-			match reader.read(&mut probe) {
-				Ok(0) => break,
-				Ok(_) => {
-					return Err(io::Error::other(format!(
-						"pattern file larger than {} MiB",
-						MAX_LINE_BYTES >> 20
-					)));
-				},
-				Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
-				Err(error) => return Err(error),
-			}
-		}
+	let mut source = stdio::Source::open(fs, path).await?;
+	match source.read_to_end(&mut bytes, MAX_LINE_BYTES).await {
+		Ok(_) => Ok(bytes),
+		Err(error) if error.kind() == io::ErrorKind::OutOfMemory => {
+			Err(io::Error::other(format!("pattern file larger than {} MiB", MAX_LINE_BYTES >> 20)))
+		},
+		Err(error) => Err(error),
 	}
-	Ok(bytes)
 }
 
 fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> SearcherBuilder {
@@ -1419,8 +1491,49 @@ fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> Sea
 	builder
 }
 
+/// Searches stdin chunk by chunk, flushing output after each chunk so matches
+/// are visible before end of input.
+async fn search_stdin<M: Matcher + Clone + Send + Sync + 'static>(
+	host: &mut Host,
+	matcher: &M,
+	builder: &SearcherBuilder,
+	display: Vec<u8>,
+	opts: &Options,
+	out: &mut impl Write,
+) -> io::Result<bool> {
+	let mut searcher = builder.build();
+	let terminator = bound_terminator(&searcher, matcher);
+	let mut sink = GrepSink {
+		out,
+		matcher,
+		display: &display,
+		opts,
+		match_count: 0,
+		any_match: false,
+		binary: false,
+	};
+	let mut search = searcher.search_push(matcher, &mut sink);
+	let mut buf = vec![0u8; READ_CHUNK];
+	let mut run = 0;
+	loop {
+		let read = host.read_stdin(&mut buf).await?;
+		if read == 0 {
+			break;
+		}
+		check_run(terminator, &mut run, &buf[..read])?;
+		let more = search.push(&buf[..read])?;
+		host.flush_output().await?;
+		if !more {
+			break;
+		}
+	}
+	search.finish()?;
+	host.flush_output().await?;
+	Ok(sink.any_match)
+}
+
 #[allow(clippy::too_many_arguments)]
-fn execute_search<M: Matcher + Sync>(
+async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 	host: &mut Host,
 	cli: &GrepArgs,
 	matcher: &M,
@@ -1432,22 +1545,16 @@ fn execute_search<M: Matcher + Sync>(
 	max_count: Option<u64>,
 ) -> i32 {
 	let builder = build_searcher(cli, opts, max_count);
-	let mut searcher = builder.build();
-	let fs = host.fs().clone();
+	let fs = host.vfs();
+	let (_guard, outer) = HaltGuard::new();
 	let mut out = host.stdout_writer();
 	let mut any_match = false;
 	let mut had_error = false;
-	let mut processed_operand = false;
 
 	for operand in files {
 		if opts.quiet && any_match {
 			break;
 		}
-		if processed_operand && host.is_cancelled() {
-			had_error = true;
-			break;
-		}
-		processed_operand = true;
 
 		if operand == OsStr::new("-") {
 			let display = cli
@@ -1455,14 +1562,7 @@ fn execute_search<M: Matcher + Sync>(
 				.as_deref()
 				.unwrap_or_else(|| OsStr::new("(standard input)"))
 				.as_encoded_bytes();
-			match process_reader(
-				matcher,
-				&mut searcher,
-				&mut host.stdin,
-				display,
-				opts,
-				&mut out,
-			) {
+			match search_stdin(host, matcher, &builder, display.to_vec(), opts, &mut out).await {
 				Ok(matched) => any_match |= matched,
 				// Abort remaining work; the host maps the BrokenPipe status.
 				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
@@ -1479,15 +1579,11 @@ fn execute_search<M: Matcher + Sync>(
 					}
 				},
 			}
-			if host.is_cancelled() {
-				had_error = true;
-				break;
-			}
 			continue;
 		}
 
 		let resolved = host.resolve(operand);
-		match host.fs().metadata(&resolved) {
+		match fs.metadata(&resolved).await {
 			Ok(metadata) if metadata.is_dir() => match directory_action {
 				DirectoryAction::Recurse => {
 					if rules.allows_dir(Path::new(operand)) {
@@ -1500,9 +1596,12 @@ fn execute_search<M: Matcher + Sync>(
 							opts,
 							rules,
 							follow_links,
+							&outer,
 							&mut out,
 							&mut had_error,
-						) {
+						)
+						.await
+						{
 							Ok(matched) => any_match |= matched,
 							Err(_) => return crate::host::SIGPIPE_EXIT_CODE,
 						}
@@ -1525,18 +1624,39 @@ fn execute_search<M: Matcher + Sync>(
 				if !rules.allows_file(Path::new(operand)) {
 					continue;
 				}
-				match search_file_path(
-					&fs,
-					operand.as_os_str(),
-					&resolved,
-					&resolved,
-					matcher,
-					&mut searcher,
-					opts,
-					&mut out,
-					&mut host.stderr,
-					&mut had_error,
-				) {
+				let shared = DirSearch {
+					fs:       fs.clone(),
+					halt:     Halt { scope: Arc::clone(&outer), outer: Arc::clone(&outer) },
+					operand:  operand.clone(),
+					resolved: resolved.clone(),
+					matcher:  matcher.clone(),
+					searcher: builder.clone(),
+					opts:     opts.clone(),
+				};
+				// Its own task, so dropping this body (cancellation) raises the
+				// halt flag the search checks between reads.
+				let path = resolved.clone();
+				let found = match tokio::spawn(async move {
+					let mut worker = shared.worker();
+					shared.search(&mut worker, &path).await
+				})
+				.await
+				{
+					Ok(found) => found,
+					Err(join) => std::panic::resume_unwind(join.into_panic()),
+				};
+				let written = out
+					.write_all(&found.out)
+					.and_then(|()| if opts.line_buffered { out.flush() } else { Ok(()) });
+				if written.is_err() {
+					return crate::host::SIGPIPE_EXIT_CODE;
+				}
+				let _ = host.stderr.write_all(&found.err);
+				if host.flush_output().await.is_err() {
+					return crate::host::SIGPIPE_EXIT_CODE;
+				}
+				had_error |= found.had_error;
+				match found.matched {
 					Ok(matched) => any_match |= matched,
 					Err(_) => return crate::host::SIGPIPE_EXIT_CODE,
 				}
@@ -1549,10 +1669,6 @@ fn execute_search<M: Matcher + Sync>(
 				}
 			},
 		}
-		if host.is_cancelled() {
-			had_error = true;
-			break;
-		}
 	}
 
 	if let Err(error) = out.flush() {
@@ -1560,10 +1676,13 @@ fn execute_search<M: Matcher + Sync>(
 			return crate::host::SIGPIPE_EXIT_CODE;
 		}
 	}
+	if host.flush_output().await.is_err() {
+		return crate::host::SIGPIPE_EXIT_CODE;
+	}
 	exit_status(opts.quiet, any_match, had_error)
 }
 
-impl Utility for Grep {
+impl AsyncUtility for Grep {
 	const NAME: &'static str = "grep";
 	const USAGE_ERROR: u8 = 2;
 
@@ -1571,11 +1690,11 @@ impl Utility for Grep {
 		Ok(normalize_context_args(argv))
 	}
 
-	fn run(self, host: &mut Host) -> i32 {
+	async fn run(self, host: &mut Host) -> i32 {
 		let cli = self.cli;
 		let matches = self.matches;
 
-	let (mut patterns, mut files) = match resolve_patterns(host, &cli) {
+	let (mut patterns, mut files) = match resolve_patterns(host, &cli).await {
 		Ok(resolved) => resolved,
 		Err(error) => {
 			let _ = writeln!(host.stderr, "grep: {error}");
@@ -1598,7 +1717,7 @@ impl Utility for Grep {
 			return 2;
 		},
 	};
-	let rules = match build_path_rules(host, &cli, &matches) {
+	let rules = match build_path_rules(host, &cli, &matches).await {
 		Ok(rules) => rules,
 		Err(error) => {
 			let _ = writeln!(host.stderr, "grep: {error}");
@@ -1665,7 +1784,8 @@ impl Utility for Grep {
 			&rules,
 			&opts,
 			max_count,
-		),
+		)
+		.await,
 		Engine::Pcre(matcher) => execute_search(
 			host,
 			&cli,
@@ -1676,14 +1796,15 @@ impl Utility for Grep {
 			&rules,
 			&opts,
 			max_count,
-		),
+		)
+		.await,
 	}
 }
 }
 
 /// Creates the GNU `grep` builtin registration.
 pub(crate) fn grep_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Grep, SE>()
+	async_util::<Grep, SE>()
 }
 
 #[cfg(test)]
@@ -1697,12 +1818,12 @@ mod tests {
 
 	use super::*;
 	use brush_core::openfiles;
-	use crate::host::{Host, run_caught, run_util};
+	use crate::host::{Host, run_async_util};
 	#[cfg(unix)]
 	use crate::host::tree_with_sparse_file;
 
-	#[test]
-	fn path_separator_rewrites_the_native_separator_on_windows() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn path_separator_rewrites_the_native_separator_on_windows() {
 		// Defends: --path-separator must rewrite the platform's own separator
 		// too, or Windows paths keep mixing `\` and the configured separator.
 		let mut out = Vec::new();
@@ -1779,13 +1900,13 @@ mod tests {
 		}
 	}
 
-	fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
-		let (code, capture) = run_util::<Grep>(args, stdin, "/");
+	async fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
+		let (code, capture) = run_async_util::<Grep>(args, stdin, "/").await;
 		(code, capture.out(), capture.err())
 	}
 
-	#[test]
-	fn stdin_matches_are_visible_before_eof() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn stdin_matches_are_visible_before_eof() {
 		let stdout = Arc::new(Mutex::new(None));
 		let snapshot = Arc::new(Mutex::new(Vec::new()));
 		let stdin = Box::new(SnapshottingStdin {
@@ -1798,28 +1919,28 @@ mod tests {
 		*stdout.lock() = Some(capture.stdout_buffer());
 
 		let parsed = Grep::try_parse_from(["grep", "hit", "-"]).unwrap();
-		assert_eq!(run_caught(parsed, &mut host), 0, "{}", capture.err());
+		assert_eq!(parsed.run(&mut host).await, 0, "{}", capture.err());
 
 		// A regression re-buffering grep's output makes matches invisible until EOF.
 		assert_eq!(snapshot.lock().as_slice(), b"hit\n");
 	}
 
-	#[test]
-	fn max_count_and_no_match_statuses_are_gnu_compatible() {
-		let (code, out, err) = run(&["-m1", "hit"], "hit\nmiss\nhit\n");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn max_count_and_no_match_statuses_are_gnu_compatible() {
+		let (code, out, err) = run(&["-m1", "hit"], "hit\nmiss\nhit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
-		let (code, out, _) = run(&["absent"], "hit\n");
+		let (code, out, _) = run(&["absent"], "hit\n").await;
 		assert_eq!(code, 1);
 		assert!(out.is_empty());
 	}
 
-	#[test]
-	fn pattern_file_is_resolved_against_shell_cwd() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pattern_file_is_resolved_against_shell_cwd() {
 		let tree = tempfile::tempdir().unwrap();
 		std::fs::write(tree.path().join("patterns"), "alpha\nbeta\n").unwrap();
 		std::fs::write(tree.path().join("haystack"), "alpha\ngamma\nbeta\n").unwrap();
-		let (code, capture) = run_util::<Grep>(&["-f", "patterns", "haystack"], "", tree.path());
+		let (code, capture) = run_async_util::<Grep>(&["-f", "patterns", "haystack"], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "alpha\nbeta\n");
 	}
@@ -1829,11 +1950,11 @@ mod tests {
 	/// grew until the kernel killed it. Now that file is a per-file error and
 	/// the walk still reports matches in the other files.
 	#[cfg(unix)]
-	#[test]
-	fn line_longer_than_the_limit_is_a_file_error_not_unbounded_memory() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn line_longer_than_the_limit_is_a_file_error_not_unbounded_memory() {
 		let tree = tree_with_sparse_file();
 
-		let (code, capture) = run_util::<Grep>(&["-rl", "needle", "."], "", tree.path());
+		let (code, capture) = run_async_util::<Grep>(&["-rl", "needle", "."], "", tree.path()).await;
 
 		assert_eq!(code, 2, "an unreadable file makes the status 2, as in GNU grep");
 		assert_eq!(capture.out(), "./small\n");
@@ -1845,11 +1966,11 @@ mod tests {
 	/// a sparse file (or an endless stdin) killed the host. Now an over-size
 	/// pattern file is refused before anything is searched.
 	#[cfg(unix)]
-	#[test]
-	fn pattern_file_larger_than_the_limit_is_refused() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pattern_file_larger_than_the_limit_is_refused() {
 		let tree = tree_with_sparse_file();
 
-		let (code, capture) = run_util::<Grep>(&["-f", "big", "small"], "", tree.path());
+		let (code, capture) = run_async_util::<Grep>(&["-f", "big", "small"], "", tree.path()).await;
 
 		assert_eq!(code, 2);
 		assert_eq!(capture.out(), "");
@@ -1860,12 +1981,16 @@ mod tests {
 	/// Drains `input` through the line bound, as the searcher would, and
 	/// returns the typed limit error if one stopped it.
 	fn drain_bounded(input: impl Read, terminator: Option<u8>) -> Option<String> {
-		let mut reader = BoundedSearchReader { inner: input, terminator, run: 0 };
+		let mut input = input;
+		let mut run = 0;
 		let mut buf = vec![0u8; 64 * 1024];
 		loop {
-			match reader.read(&mut buf) {
-				Ok(0) => return None,
-				Ok(_) => {},
+			let read = input.read(&mut buf).unwrap();
+			if read == 0 {
+				return None;
+			}
+			match check_run(terminator, &mut run, &buf[..read]) {
+				Ok(()) => {},
 				Err(error) => {
 					assert!(
 						error.get_ref().is_some_and(|inner| inner.is::<LineLimitExceeded>()),
@@ -1895,37 +2020,37 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn perl_mode_supports_lookbehind() {
-		let (code, out, err) = run(&["-P", "(?<=foo)bar"], "foobar\nbar\n");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn perl_mode_supports_lookbehind() {
+		let (code, out, err) = run(&["-P", "(?<=foo)bar"], "foobar\nbar\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "foobar\n");
 	}
 
-	#[test]
-	fn compact_numeric_context_is_rewritten_before_clap() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn compact_numeric_context_is_rewritten_before_clap() {
 		let input = "a\nhit\nb\ngap\nc\nhit\nd\n";
-		let (code, out, err) = run(&["-1", "--group-separator=@", "hit"], input);
+		let (code, out, err) = run(&["-1", "--group-separator=@", "hit"], input).await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "a\nhit\nb\n@\nc\nhit\nd\n");
 	}
 
-	#[test]
-	fn recursive_rules_filter_walk_and_preserve_relative_names() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recursive_rules_filter_walk_and_preserve_relative_names() {
 		let tree = tempfile::tempdir().unwrap();
 		std::fs::write(tree.path().join("keep.rs"), "hit\n").unwrap();
 		std::fs::write(tree.path().join("drop.txt"), "hit\n").unwrap();
 		std::fs::create_dir(tree.path().join("vendor")).unwrap();
 		std::fs::write(tree.path().join("vendor/hidden.rs"), "hit\n").unwrap();
-		let (code, capture) = run_util::<Grep>(&["-r", "--include=*.rs", "--exclude-dir=vendor", "hit", "."], "", tree.path());
+		let (code, capture) = run_async_util::<Grep>(&["-r", "--include=*.rs", "--exclude-dir=vendor", "hit", "."], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(capture.out().contains("keep.rs:hit"));
 		assert!(!capture.out().contains("drop.txt"));
 		assert!(!capture.out().contains("hidden.rs"));
 	}
 
-	#[test]
-	fn recursive_search_prints_files_in_path_order() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recursive_search_prints_files_in_path_order() {
 		let tree = tempfile::tempdir().unwrap();
 		let files = ["t/z.txt", "t/b/1.txt", "t/a/c/2.txt", "t/a/b/3.txt", "t/a/0.txt", "t/m.txt"];
 		for file in files {
@@ -1933,7 +2058,7 @@ mod tests {
 			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 			std::fs::write(path, "hit\n").unwrap();
 		}
-		let (code, capture) = run_util::<Grep>(&["-rl", "hit", "t"], "", tree.path());
+		let (code, capture) = run_async_util::<Grep>(&["-rl", "hit", "t"], "", tree.path()).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		let expected: String = ["t/a/0.txt", "t/a/b/3.txt", "t/a/c/2.txt", "t/b/1.txt", "t/m.txt", "t/z.txt"]
 			.iter()
@@ -1942,45 +2067,32 @@ mod tests {
 		assert_eq!(capture.out(), expected);
 	}
 
-	#[test]
-	fn quiet_match_wins_over_later_error() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn quiet_match_wins_over_later_error() {
 		let tree = tempfile::tempdir().unwrap();
 		std::fs::write(tree.path().join("hit"), "needle\n").unwrap();
-		let (code, capture) = run_util::<Grep>(&["-q", "needle", "hit", "missing"], "", tree.path());
+		let (code, capture) = run_async_util::<Grep>(&["-q", "needle", "hit", "missing"], "", tree.path()).await;
 		assert_eq!(code, 0);
 		assert!(capture.out().is_empty());
 		assert!(capture.err().is_empty());
 	}
 
-	#[test]
-	fn recursive_walk_observes_cancellation() {
-		let tree = tempfile::tempdir().unwrap();
-		std::fs::create_dir(tree.path().join("root")).unwrap();
-		std::fs::write(tree.path().join("root/file"), "hit\n").unwrap();
-		let parsed = Grep::try_parse_from(["grep", "-r", "hit", "root"]).unwrap();
-		let (mut host, capture) = Host::for_test("grep", Vec::new(), tree.path());
-		host.cancel_for_test();
-		assert_eq!(parsed.run(&mut host), 2);
-		assert!(capture.out().is_empty());
-		assert!(capture.err().is_empty());
-	}
-
-	#[test]
-	fn byte_offsets_labels_and_nul_separators_are_rendered() {
-		let (code, out, err) = run(&["-bn", "hit"], "no\nhit\n");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn byte_offsets_labels_and_nul_separators_are_rendered() {
+		let (code, out, err) = run(&["-bn", "hit"], "no\nhit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "2:3:hit\n");
-		let (code, out, err) = run(&["--label=pipe", "-HZ", "hit"], "hit\n");
+		let (code, out, err) = run(&["--label=pipe", "-HZ", "hit"], "hit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out.as_bytes(), b"pipe\0hit\n");
 	}
 
-	#[test]
-	fn basic_mode_is_posix_bre_and_extended_mode_is_strict() {
-		let (code, out, err) = run(&["-A", "1", "fail)"], "ok\n(1 fail)\nnext\n");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn basic_mode_is_posix_bre_and_extended_mode_is_strict() {
+		let (code, out, err) = run(&["-A", "1", "fail)"], "ok\n(1 fail)\nnext\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "(1 fail)\nnext\n");
-		let (code, _, err) = run(&["-E", "fail)"], "fail)\n");
+		let (code, _, err) = run(&["-E", "fail)"], "fail)\n").await;
 		assert_eq!(code, 2);
 		assert!(err.contains("grep:"));
 		// In a BRE a bare `+` is a LITERAL, so `fo+` does not match `foooo`.
@@ -1989,37 +2101,37 @@ mod tests {
 		// prints `bar)` alone on both GNU and BSD grep. Use `fo\+` for the
 		// quantifier.
 		let (code, out, err) =
-			run(&["-e", "fo+", "-e", "bar)", "-h"], "foooo\nbar)\nbaz\n");
+			run(&["-e", "fo+", "-e", "bar)", "-h"], "foooo\nbar)\nbaz\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "bar)\n");
-		let (code, out, err) = run(&["-e", r"fo\+", "-h"], "foooo\nbar)\nbaz\n");
+		let (code, out, err) = run(&["-e", r"fo\+", "-h"], "foooo\nbar)\nbaz\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "foooo\n");
 	}
 
-	#[test]
-	fn gnu_basic_alternation_and_color_aliases_are_supported() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn gnu_basic_alternation_and_color_aliases_are_supported() {
 		let input = "\"tools.xdev\": {}\n\"tools.toolbox\": {}\n\"tools.other\": {}\n";
-		let (code, out, err) = run(&["-c", r"tools.xdev\|tools.toolbox"], input);
+		let (code, out, err) = run(&["-c", r"tools.xdev\|tools.toolbox"], input).await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "2\n");
 		for color in ["--color=auto", "--color=always", "--color=never", "--color"] {
-			let (code, out, err) = run(&[color, "foo"], "foo\nbar\n");
+			let (code, out, err) = run(&[color, "foo"], "foo\nbar\n").await;
 			assert_eq!(code, 0, "{err}");
 			assert_eq!(out, "foo\n");
 		}
 	}
 
-	#[test]
-	fn version_is_reported_on_stdout() {
-		let (code, out, err) = run(&["--version"], "");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn version_is_reported_on_stdout() {
+		let (code, out, err) = run(&["--version"], "").await;
 		assert_eq!(code, 0);
 		assert!(err.is_empty());
 		assert!(out.contains("grep") && out.contains("pi-uu-grep"));
 	}
 
-	#[test]
-	fn repetition_with_no_operand_is_literal_in_bre_and_invalid_in_ere() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn repetition_with_no_operand_is_literal_in_bre_and_invalid_in_ere() {
 		// Measured against GNU/BSD grep 2.6.0 on the same fixture. Before
 		// this, every BRE row below returned 5 - the whole file - because
 		// `^+` reached the engine as an operator and compiled to `(?:^)+`,
@@ -2028,14 +2140,14 @@ mod tests {
 		for (pattern, want) in
 			[("^+", "2\n"), ("^*", "0\n"), ("^?", "0\n"), ("*x", "0\n"), ("^\\+", "2\n")]
 		{
-			let (code, out, err) = run(&["-c", pattern], input);
+			let (code, out, err) = run(&["-c", pattern], input).await;
 			assert!(code == 0 || code == 1, "{pattern}: {err}");
 			assert_eq!(out, want, "pattern {pattern}");
 		}
 
 		// The forms that already agreed must not regress.
 		for (pattern, want) in [("+added", "1\n"), ("[+]", "2\n"), ("a\\+", "3\n")] {
-			let (code, out, err) = run(&["-c", pattern], input);
+			let (code, out, err) = run(&["-c", pattern], input).await;
 			assert_eq!(code, 0, "{pattern}: {err}");
 			assert_eq!(out, want, "pattern {pattern}");
 		}
@@ -2044,32 +2156,32 @@ mod tests {
 		// silently accepting a repeated anchor. The anchor breaks adjacency
 		// to an earlier atom too: `a^+` repeats `^`, not `a`.
 		for pattern in ["^+", "a^+", "a$*"] {
-			let (code, _, err) = run(&["-Ec", pattern], input);
+			let (code, _, err) = run(&["-Ec", pattern], input).await;
 			assert_eq!(code, 2, "-E {pattern:?} must be rejected");
 			assert!(err.contains("grep:"), "{pattern}: {err}");
 		}
 	}
 
-	#[test]
-	fn no_operand_brace_interval_is_rejected_through_grep() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn no_operand_brace_interval_is_rejected_through_grep() {
 		// Covered here rather than only in the translator, because the failure
 		// mode was invisible at that level: `^\{2\}` translated to `^{2}`,
 		// which `grep-regex` ACCEPTS as `(?:^){2}` and matches at every line
 		// start, so the whole file came back with exit 0.
 		let input = "alpha\n+added\n-removed\n context\n+another\n";
 		for pattern in [r"^\{2\}", r"^\{1,4\}", r"\{1,4\}", r"\(\{2\}\)", r"a\|\{2\}"] {
-			let (code, out, err) = run(&["-c", pattern], input);
+			let (code, out, err) = run(&["-c", pattern], input).await;
 			assert_eq!(code, 2, "{pattern} must be rejected, got {out:?}");
 			assert!(err.contains("repetition-operator operand invalid"), "{pattern}: {err}");
 		}
 		// With an operand it is an ordinary quantifier and still works.
-		let (code, out, err) = run(&["-c", r"a\{1,2\}"], input);
+		let (code, out, err) = run(&["-c", r"a\{1,2\}"], input).await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "3\n");
 	}
 
-	#[test]
-	fn literal_brace_is_not_rejected_by_the_operand_check() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn literal_brace_is_not_rejected_by_the_operand_check() {
 		// `grep -E '^{"'` is a real pattern - the common JSON-line filter -
 		// and GNU grep accepts it, because a `{` that opens no interval is a
 		// literal. An earlier revision of this guard exited 2 on it.
@@ -2077,11 +2189,11 @@ mod tests {
 		for args in
 			[vec!["-c", "^{"], vec!["-Ec", "^\\{"], vec!["-Ec", "^\\{\""], vec!["-c", "{foo"]]
 		{
-			let (code, _, err) = run(&args, input);
+			let (code, _, err) = run(&args, input).await;
 			assert!(code == 0 || code == 1, "{args:?} must not error: {err}");
 			assert!(!err.contains("operand invalid"), "{args:?}: {err}");
 		}
-		let (code, out, err) = run(&["-c", "^{"], input);
+		let (code, out, err) = run(&["-c", "^{"], input).await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "2\n");
 
@@ -2091,64 +2203,64 @@ mod tests {
 		// means rewriting ERE patterns rather than validating them.
 	}
 
-	#[test]
-	fn unsupported_backreference_falls_back_to_the_users_own_text() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn unsupported_backreference_falls_back_to_the_users_own_text() {
 		// `grep-regex` cannot compile a back-reference, so the pattern is
 		// matched literally. That literal must be what the user typed: after
 		// translation the pattern reads `(a)\1`, and escaping THAT made
 		// `\(a\)\1` match the text `(a)\1` instead of `\(a\)\1`.
-		let (code, out, err) = run(&["-c", r"\(a\)\1"], "x\\(a\\)\\1y\nnope\n");
+		let (code, out, err) = run(&["-c", r"\(a\)\1"], "x\\(a\\)\\1y\nnope\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "1\n", "fallback must match the original pattern text");
-		let (code, out, _) = run(&["-c", r"\(a\)\1"], "x(a)\\1y\nnope\n");
+		let (code, out, _) = run(&["-c", r"\(a\)\1"], "x(a)\\1y\nnope\n").await;
 		assert_eq!(code, 1, "translated text must not be what is matched");
 		assert_eq!(out, "0\n");
 	}
 
-	#[test]
-	fn only_the_first_caret_of_a_branch_anchors() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn only_the_first_caret_of_a_branch_anchors() {
 		// Measured: `grep -c '^^'` counts lines beginning with a literal
 		// caret, and `sed 's/^^/X/'` rewrites only those. Treating the second
 		// caret as another anchor matched every line.
 		let input = "^a\naaa\n^^b\n";
-		let (code, out, err) = run(&["-c", "^^"], input);
+		let (code, out, err) = run(&["-c", "^^"], input).await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "2\n");
-		let (code, out, err) = run(&["-c", r"^\^"], input);
+		let (code, out, err) = run(&["-c", r"^\^"], input).await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "2\n", "the escaped form must agree with the bare one");
 	}
 
-	#[test]
-	fn a_dollar_before_a_branch_boundary_still_anchors() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_dollar_before_a_branch_boundary_still_anchors() {
 		// `$` anchors at the end of a BRE BRANCH, not only at the end of the
 		// whole pattern. Escaping it made the first branch unmatchable, so
 		// lines ending in `a` were silently dropped from the result.
 		let input = "a\nb\nca\nxb\nz\nax\n";
-		let (code, out, err) = run(&["-c", r"a$\|b"], input);
+		let (code, out, err) = run(&["-c", r"a$\|b"], input).await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "4\n", "a, b, ca and xb all match");
 
 		// The same alternation written the other way round must agree.
-		let (_, out, err) = run(&["-c", r"b\|a$"], input);
+		let (_, out, err) = run(&["-c", r"b\|a$"], input).await;
 		assert_eq!(out, "4\n", "{err}");
 
 		// And inside a group, where `\)` ends the branch instead of `\|`.
-		let (_, out, err) = run(&["-c", r"\(a$\)"], input);
+		let (_, out, err) = run(&["-c", r"\(a$\)"], input).await;
 		assert_eq!(out, "2\n", "{err}");
 
 		// A `$` that ends neither is still a literal dollar sign.
-		let (_, out, err) = run(&["-c", "a$b"], "a$b\nab\n");
+		let (_, out, err) = run(&["-c", "a$b"], "a$b\nab\n").await;
 		assert_eq!(out, "1\n", "{err}");
 	}
 
-	#[test]
-	fn bracket_expressions_are_not_translated_as_bre() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn bracket_expressions_are_not_translated_as_bre() {
 		// Inside `[...]` the BRE operators are ordinary characters. The
 		// translator used to read `\(` as a group opener, producing a pattern
 		// the engine refused, which then fell back to a literal match.
 		let input = "has ( paren\nhas \\ slash\nplain\n";
-		let (code, out, err) = run(&["-c", r"[\(]"], input);
+		let (code, out, err) = run(&["-c", r"[\(]"], input).await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "2\n", "a backslash OR a parenthesis, as measured");
 
@@ -2156,7 +2268,7 @@ mod tests {
 		for (pattern, want) in
 			[(r"[]x]", "1\n"), (r"[^abc]", "3\n"), (r"[[:digit:]]", "1\n"), (r"[*+]", "1\n")]
 		{
-			let (code, out, err) = run(&["-c", pattern], "]\nq7\n*\nabc\n");
+			let (code, out, err) = run(&["-c", pattern], "]\nq7\n*\nabc\n").await;
 			assert_eq!(code, 0, "{pattern}: {err}");
 			assert_eq!(out, want, "{pattern}");
 		}
@@ -2167,13 +2279,13 @@ mod tests {
 		// so it matches the typed text rather than erroring the way real grep
 		// does. That divergence predates this change and is unchanged by it;
 		// `sed`, which has no such fallback, reports the error.
-		let (code, out, err) = run(&["-c", "a[d"], "a[d\nplain\n");
+		let (code, out, err) = run(&["-c", "a[d"], "a[d\nplain\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "1\n", "falls back to the literal text the user typed");
 	}
 
-	#[test]
-	fn a_brace_that_opens_no_interval_is_literal_in_an_ere() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_brace_that_opens_no_interval_is_literal_in_an_ere() {
 		// Every expectation below is a measurement from /usr/bin/grep against
 		// this same input, not a reading of the spec.
 		let input = "{a}\na{\n{foo\na{1}b\nplain\n}\n[{]\n";
@@ -2188,7 +2300,7 @@ mod tests {
 			("a{1}", "4\n"),
 			("a{1,2}", "4\n"),
 		] {
-			let (code, out, err) = run(&["-Ec", pattern], input);
+			let (code, out, err) = run(&["-Ec", pattern], input).await;
 			assert_eq!(code, 0, "-E {pattern}: {err}");
 			assert_eq!(out, want, "-E {pattern}");
 		}
@@ -2199,7 +2311,7 @@ mod tests {
 		// operand invalid". Escaping those would convert a diagnosed mistake
 		// into a silent literal match.
 		for pattern in ["a{1,2", "{1}"] {
-			let (code, out, _) = run(&["-Ec", pattern], input);
+			let (code, out, _) = run(&["-Ec", pattern], input).await;
 			assert_eq!(code, 2, "-E {pattern} must stay an error, got {out:?}");
 		}
 	}

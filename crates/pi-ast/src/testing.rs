@@ -1,5 +1,5 @@
 //! Test-only in-memory `mem://` provider, so searches and rewrites run through
-//! a non-native [`BlockingFs`] with URL roots.
+//! a non-native [`Fs`] with URL roots.
 
 use std::{
 	collections::BTreeMap,
@@ -11,8 +11,8 @@ use std::{
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use pi_vfs::{
-	BlockingFs, DirEntry, File, FileHandle, FileKind, FileSystem, FileType, Fs, Metadata,
-	OpenOptions, Permissions, ReadDir,
+	DirEntry, File, FileHandle, FileKind, FileSystem, FileType, Fs, Metadata, OpenOptions,
+	Permissions, ReadDir,
 };
 
 /// One node of a [`MemFs`] tree.
@@ -31,8 +31,8 @@ pub struct MemFs {
 
 impl MemFs {
 	/// A tree holding `files` (URL path, contents) and every ancestor
-	/// directory up to `mem://`, and a blocking facade over it.
-	pub fn with_files(files: &[(&str, &str)]) -> (Arc<Self>, BlockingFs) {
+	/// directory up to `mem://`, and a filesystem facade over it.
+	pub fn with_files(files: &[(&str, &str)]) -> (Arc<Self>, Fs) {
 		let mut nodes = BTreeMap::new();
 		for &(path, contents) in files {
 			let path = Path::new(path);
@@ -48,7 +48,7 @@ impl MemFs {
 		}
 		let mem = Arc::new(Self { nodes: Mutex::new(nodes) });
 		let provider: Arc<dyn FileSystem> = mem.clone();
-		(mem, Fs::new(provider).blocking())
+		(mem, Fs::new(provider))
 	}
 
 	/// Current contents of the file at `path`, if it is one.

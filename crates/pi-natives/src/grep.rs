@@ -7,7 +7,7 @@
 //! `pi_walker::grep` owns compilation, scanning, walking, and result selection;
 //! this module decodes options and converts results.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc};
 
 use grep_matcher::Matcher;
 use napi::{
@@ -16,24 +16,18 @@ use napi::{
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
-use parking_lot::{Condvar, Mutex};
-use pi_vfs::BlockingFs;
+use pi_vfs::Fs;
 use pi_walker::grep::Engine;
+use tokio::sync::mpsc;
 
 use crate::{shell::vfs::ShellFilesystem, task, utils::clamp_u32};
 
-/// Upper bound on entries per streamed `onMatches` batch; a file with more
-/// content matches streams several batches while it is still being searched.
-const GREP_STREAM_BATCH: usize = 1024;
-/// Maximum batches awaiting JS acknowledgement; native waits enforce this
-/// bound without entering N-API's blocking queue path.
-const GREP_STREAM_QUEUE: usize = 8;
-/// Cancellation checks while producers await JS consumption.
-const GREP_STREAM_CANCEL_POLL: Duration = Duration::from_millis(10);
+/// Maximum batches queued between the search and the `onMatches` forwarder.
+const GREP_STREAM_QUEUE: usize = 4;
+/// Most matches handed to one `onMatches` call.
+const STREAM_BATCH: usize = 1024;
 
-/// `onMatches` callback, called without the error-first slot. The N-API queue
-/// stays unbounded; [`JsMatchStream`] reserves bounded capacity before
-/// enqueueing.
+/// `onMatches` callback, called without the error-first slot.
 type GrepStreamCallback =
 	ThreadsafeFunction<Vec<GrepMatch>, UnknownReturnValue, Vec<GrepMatch>, Status, false, false>;
 
@@ -339,18 +333,50 @@ struct GrepRequest {
 	gitignore:          bool,
 }
 
-fn grep_sync(
-	filesystem: &BlockingFs,
+/// Forward each streamed batch to `onMatches`, awaiting the JS call so the
+/// callback's pace back-pressures the search.
+async fn forward_matches(
+	callback: GrepStreamCallback,
+	mut batches: mpsc::Receiver<Vec<pi_walker::grep::Match>>,
+) -> Result<()> {
+	// Per-file batches already queued ride along in one call, up to
+	// `STREAM_BATCH` entries.
+	let mut carry = None;
+	while let Some(first) = match carry.take() {
+		Some(batch) => Some(batch),
+		None => batches.recv().await,
+	} {
+		let mut batch: Vec<GrepMatch> = first.into_iter().map(GrepMatch::from).collect();
+		while let Ok(next) = batches.try_recv() {
+			if batch.len() + next.len() > STREAM_BATCH {
+				carry = Some(next);
+				break;
+			}
+			batch.extend(next.into_iter().map(GrepMatch::from));
+		}
+		callback.call_async_catch(batch).await?;
+	}
+	Ok(())
+}
+
+async fn grep_async(
+	filesystem: Fs,
 	request: GrepRequest,
-	stream: Option<&JsMatchStream>,
-	on_match: Option<&ThreadsafeFunction<GrepMatch>>,
-	ct: &task::CancelToken,
+	stream: Option<GrepStreamCallback>,
+	on_match: Option<ThreadsafeFunction<GrepMatch>>,
 ) -> Result<GrepResult> {
 	let engine = Engine::compile(&request.pattern, request.ignore_case, request.multiline)
 		.map_err(Error::from_reason)?;
-	let root = pi_walker::fs::absolute(std::path::Path::new(&request.path))
+	let root = pi_walker::fs::absolute(Path::new(&request.path))
 		.map_err(|err| Error::from_reason(format!("Failed to resolve cwd: {err}")))?;
-	let fs = pi_walker::Fs::new(filesystem, &root);
+	let fs = pi_walker::Fs::new(&filesystem, &root);
+	let (sink, batches) = match stream {
+		Some(callback) => {
+			let (sender, receiver) = mpsc::channel(GREP_STREAM_QUEUE);
+			(Some(sender), Some((callback, receiver)))
+		},
+		None => (None, None),
+	};
 	let opts = pi_walker::grep::GrepOptions {
 		multiline: request.multiline,
 		glob: request.glob,
@@ -369,11 +395,22 @@ fn grep_sync(
 			gitignore: request.gitignore,
 			..Default::default()
 		},
-		sink: stream.map(|stream| stream as &dyn pi_walker::grep::MatchSink),
-		..pi_walker::grep::GrepOptions::new(&engine)
+		sink,
+		..pi_walker::grep::GrepOptions::new(Arc::new(engine))
 	};
-	let result = pi_walker::grep::grep(&fs, &root, &opts, ct).map_err(|err| match err {
-		pi_walker::grep::GrepError::Walk(err) => ct.walk_failure(err),
+	let search = pi_walker::grep::grep(&fs, &root, opts);
+	let result = match batches {
+		Some((callback, receiver)) => {
+			let (result, forwarded) = tokio::join!(search, forward_matches(callback, receiver));
+			// A callback failure stops the search with a generic sink error; the
+			// callback's own error is the one to report.
+			forwarded?;
+			result
+		},
+		None => search.await,
+	}
+	.map_err(|err| match err {
+		pi_walker::grep::GrepError::Walk(err) => task::walk_failure(err),
 		err => Error::from_reason(err.to_string()),
 	})?;
 	let matches: Vec<GrepMatch> = result.matches.into_iter().map(GrepMatch::from).collect();
@@ -391,145 +428,6 @@ fn grep_sync(
 		skipped_oversized: (result.skipped_oversized > 0)
 			.then(|| clamp_u32(result.skipped_oversized)),
 	})
-}
-
-#[derive(Default)]
-struct GrepStreamDelivery {
-	pending:   Vec<GrepMatch>,
-	in_flight: usize,
-	/// First callback error; preserved until the search rejects with it.
-	failure:   Option<Error>,
-}
-
-#[derive(Default)]
-struct GrepStreamShared {
-	delivery: Mutex<GrepStreamDelivery>,
-	ready:    Condvar,
-}
-
-/// [`pi_walker::grep::MatchSink`] over `onMatches`, with cancellation-aware
-/// native backpressure.
-///
-/// Capacity is reserved before nonblocking N-API delivery and released when
-/// the JS callback returns. Successful completion drains every accepted batch;
-/// cancellation can stop both capacity waits and the final acknowledgement
-/// wait.
-struct JsMatchStream {
-	callback: GrepStreamCallback,
-	shared:   Arc<GrepStreamShared>,
-	cancel:   task::CancelToken,
-}
-
-impl JsMatchStream {
-	fn new(callback: GrepStreamCallback, cancel: task::CancelToken) -> Self {
-		Self { callback, shared: Arc::default(), cancel }
-	}
-
-	fn send(&self, batch: Vec<GrepMatch>) -> Result<()> {
-		{
-			let mut delivery = self.shared.delivery.lock();
-			loop {
-				self.cancel.heartbeat()?;
-				if delivery.failure.is_some() {
-					return Err(Error::from_reason("grep onMatches callback threw"));
-				}
-				if delivery.in_flight < GREP_STREAM_QUEUE {
-					delivery.in_flight += 1;
-					break;
-				}
-				self
-					.shared
-					.ready
-					.wait_for(&mut delivery, GREP_STREAM_CANCEL_POLL);
-			}
-		}
-
-		let shared = Arc::clone(&self.shared);
-		let status = self.callback.call_with_return_value(
-			batch,
-			ThreadsafeFunctionCallMode::NonBlocking,
-			move |returned: Result<UnknownReturnValue>, _: Env| {
-				let mut delivery = shared.delivery.lock();
-				if let Err(err) = returned {
-					delivery.failure.get_or_insert(err);
-				}
-				delivery.in_flight -= 1;
-				shared.ready.notify_all();
-				Ok(())
-			},
-		);
-		if status != Status::Ok {
-			let mut delivery = self.shared.delivery.lock();
-			delivery.in_flight -= 1;
-			self.shared.ready.notify_all();
-			return Err(Error::new(
-				status,
-				"grep onMatches callback is no longer callable".to_owned(),
-			));
-		}
-		Ok(())
-	}
-
-	fn drain(&self) -> Result<()> {
-		let mut delivery = self.shared.delivery.lock();
-		while delivery.in_flight > 0 {
-			self.cancel.heartbeat()?;
-			self
-				.shared
-				.ready
-				.wait_for(&mut delivery, GREP_STREAM_CANCEL_POLL);
-		}
-		Ok(())
-	}
-
-	/// Coalesce `matches` into batches of at most [`GREP_STREAM_BATCH`] and send
-	/// each full batch.
-	fn enqueue(&self, mut matches: Vec<GrepMatch>) -> Result<()> {
-		self.cancel.heartbeat()?;
-		let ready = {
-			let mut delivery = self.shared.delivery.lock();
-			if delivery.failure.is_some() {
-				return Err(Error::from_reason("grep onMatches callback threw"));
-			}
-			let pending = &mut delivery.pending;
-			if pending.is_empty() {
-				*pending = matches;
-				return Ok(());
-			}
-			if pending.len() + matches.len() <= GREP_STREAM_BATCH {
-				pending.append(&mut matches);
-				return Ok(());
-			}
-			std::mem::replace(pending, matches)
-		};
-		self.send(ready)
-	}
-
-	/// Flush the coalesced tail and preserve the original callback error over
-	/// the generic failure used to stop the parallel scanner.
-	fn settle(&self, result: Result<GrepResult>) -> Result<GrepResult> {
-		let last = std::mem::take(&mut self.shared.delivery.lock().pending);
-		let result = result.and_then(|output| {
-			if !last.is_empty() {
-				self.send(last)?;
-			}
-			Ok(output)
-		});
-		let drained = self.drain();
-		let failure = self.shared.delivery.lock().failure.take();
-		match failure {
-			Some(err) => Err(err),
-			None => result.and_then(|output| drained.map(|()| output)),
-		}
-	}
-}
-
-impl pi_walker::grep::MatchSink for JsMatchStream {
-	fn deliver(&self, batch: Vec<pi_walker::grep::Match>) -> std::result::Result<(), String> {
-		self
-			.enqueue(batch.into_iter().map(GrepMatch::from).collect())
-			.map_err(|err| err.reason)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -679,13 +577,8 @@ pub fn grep<'env>(
 	};
 
 	let ct = task::CancelToken::new(timeout_ms, signal);
-	let stream = on_matches.map(|callback| JsMatchStream::new(callback, ct.clone()));
-	let filesystem = ShellFilesystem::blocking(filesystem);
-	task::filesystem(env, "grep", ct, filesystem, move |filesystem, ct| {
-		let result = grep_sync(&filesystem, request, stream.as_ref(), on_match.as_ref(), &ct);
-		match &stream {
-			Some(stream) => stream.settle(result),
-			None => result,
-		}
+	let filesystem = ShellFilesystem::resolve(filesystem);
+	task::filesystem_future(env, "grep", ct, filesystem, move |filesystem| {
+		grep_async(filesystem, request, on_matches, on_match)
 	})
 }

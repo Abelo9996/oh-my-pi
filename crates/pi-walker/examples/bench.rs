@@ -15,7 +15,8 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use pi_walker::{Detail, FileType, Fs, Never, walk};
+use futures::StreamExt;
+use pi_walker::{Detail, FileType, Fs, walk};
 
 struct Args {
 	mode:   String,
@@ -60,12 +61,12 @@ fn parse() -> Args {
 	args
 }
 
-fn collect(args: &Args, list: Option<&mut Vec<String>>) -> usize {
-	let entries =
-		walk::collect(&Fs::native(), &args.root, &args.opts, args.sorted, &Never, |_, _| {
-			walk::Action::Continue
-		})
-		.expect("collect");
+async fn collect(args: &Args, list: Option<&mut Vec<String>>) -> usize {
+	let entries = walk::collect(&Fs::native(), &args.root, &args.opts, args.sorted, |_, _| {
+		walk::Action::Continue
+	})
+	.await
+	.expect("collect");
 	let files = entries
 		.iter()
 		.filter(|entry| entry.file_type == FileType::File);
@@ -78,59 +79,59 @@ fn collect(args: &Args, list: Option<&mut Vec<String>>) -> usize {
 	}
 }
 
-fn parallel(args: &Args, mut list: Option<&mut Vec<String>>) -> usize {
+async fn parallel(args: &Args, mut list: Option<&mut Vec<String>>) -> usize {
 	let listing = list.is_some();
-	let walked = walk::walk(
+	let mut walked = walk::walk(
 		&Fs::native(),
 		&args.root,
 		&args.opts,
-		&Never,
-		|| (0usize, Vec::new()),
-		|(count, paths): &mut (usize, Vec<String>), _, entry| {
+		move |_, entry, out: &mut Vec<Option<String>>| {
 			if entry.file_type == FileType::File {
-				*count += 1;
-				if listing {
-					paths.push(entry.path_lossy().into_owned());
-				}
+				out.push(listing.then(|| entry.path_lossy().into_owned()));
 			}
 			walk::Action::Continue
 		},
 	)
+	.await
 	.expect("walk");
 	let mut files = 0;
-	for (count, paths) in walked.states {
-		files += count;
+	while let Some(batch) = walked.next().await {
+		files += batch.items.len();
 		if let Some(list) = &mut list {
-			list.extend(paths);
+			list.extend(batch.items.into_iter().flatten());
 		}
 	}
 	files
 }
 
-fn main() {
-	let args = parse();
-	let run = |list: Option<&mut Vec<String>>| match args.mode.as_str() {
-		"collect" => collect(&args, list),
-		"parallel" => parallel(&args, list),
+async fn run(args: &Args, list: Option<&mut Vec<String>>) -> usize {
+	match args.mode.as_str() {
+		"collect" => collect(args, list).await,
+		"parallel" => parallel(args, list).await,
 		other => panic!("unknown mode {other}"),
-	};
+	}
+}
+
+#[tokio::main]
+async fn main() {
+	let args = parse();
 	if args.list {
 		if args.opts.cache {
-			run(None);
+			run(&args, None).await;
 		}
 		let mut paths = Vec::new();
-		run(Some(&mut paths));
+		run(&args, Some(&mut paths)).await;
 		paths.sort_unstable();
 		for path in paths {
 			println!("{path}");
 		}
 		return;
 	}
-	let files = run(None);
+	let files = run(&args, None).await;
 	let mut timings = Vec::with_capacity(args.iters);
 	for _ in 0..args.iters {
 		let started = Instant::now();
-		black_box(run(None));
+		black_box(run(&args, None).await);
 		timings.push(started.elapsed());
 	}
 	timings.sort_unstable();

@@ -11,20 +11,20 @@
 //!
 //! Directory searches read and scan files inside one parallel walk when
 //! results are unbounded; with a match budget a path-ordered walk streams
-//! candidates into a parallel search that consumes them in that order
-//! ([`crate::exec::streamed`]), and both stop once the budget is settled.
-//! Either way results are in path
+//! candidates into a parallel search that consumes them in that order, and
+//! both stop once the budget is settled. Either way results are in path
 //! order — files over 4 MiB, searched over their first 4 MiB, after all
-//! others — and identical from run to run. With a [`MatchSink`] results are
-//! delivered per file, as they complete, instead of returned.
+//! others — and identical from run to run. With a sink, results are
+//! delivered per file, as they complete, instead of returned. Dropping the
+//! [`grep`] future cancels the search.
 //!
 //! ```ignore
-//! let engine = Engine::compile(r"impl\s+\w+ for", false, false)?;
-//! let result = grep::grep(&fs, root, &GrepOptions {
+//! let engine = Arc::new(Engine::compile(r"impl\s+\w+ for", false, false)?);
+//! let result = grep::grep(&fs, root, GrepOptions {
 //!     glob: Some("*.rs".into()),
 //!     before: 1, after: 1,
-//!     ..GrepOptions::new(&engine)
-//! }, &Never)?;
+//!     ..GrepOptions::new(engine)
+//! }).await?;
 //! ```
 
 mod engine;
@@ -35,7 +35,7 @@ mod scan;
 mod tests;
 mod types;
 
-use std::{fmt, io, path::Path};
+use std::{fmt, io, path::Path, sync::Arc};
 
 pub use engine::{Engine, EngineError, pcre2_jit_enabled};
 use scan::{ScanParams, Scanner};
@@ -43,7 +43,7 @@ use scan::{ScanParams, Scanner};
 use crate::{
 	fs::Fs,
 	pattern::PatternError,
-	walk::{self, Stop, WalkError},
+	walk::{self, WalkError},
 };
 
 /// Largest prefix of a file that is searched; longer files are searched over
@@ -160,19 +160,11 @@ pub fn search(
 	Ok(SearchResult { matches, match_count: outcome.count, limit_reached: outcome.limit_reached })
 }
 
-/// Receives streamed [`grep`] results from any worker thread.
-pub trait MatchSink: Sync {
-	/// Takes ownership of one batch (at most 1024 entries, all from one
-	/// file); an error stops the search and is returned as
-	/// [`GrepError::Sink`].
-	fn deliver(&self, batch: Vec<Match>) -> Result<(), String>;
-}
-
 /// Options of a [`grep`] search.
 #[derive(Clone)]
-pub struct GrepOptions<'a> {
+pub struct GrepOptions {
 	/// Compiled pattern.
-	pub engine:             &'a Engine,
+	pub engine:             Arc<Engine>,
 	/// The engine was compiled for multiline matching.
 	pub multiline:          bool,
 	/// Restrict directory searches to [`crate::glob::Selector::scope`] of `glob`
@@ -205,15 +197,16 @@ pub struct GrepOptions<'a> {
 	/// Traversal: `hidden`, `gitignore`, `workers`, `cache` are honoured;
 	/// `.git` is always pruned and `node_modules` unless the glob names it.
 	pub walk:               walk::Options,
-	/// Deliver results per file instead of returning them; incompatible with
-	/// `offset` and `max_count`.
-	pub sink:               Option<&'a dyn MatchSink>,
+	/// Deliver results per file (batches of at most 1024 entries, all from
+	/// one file) instead of returning them; a full channel pauses the search.
+	/// Incompatible with `offset` and `max_count`.
+	pub sink:               Option<tokio::sync::mpsc::Sender<Vec<Match>>>,
 }
 
-impl<'a> GrepOptions<'a> {
+impl GrepOptions {
 	/// Content search of every file, hidden ones and ignore rules included,
 	/// with no limits.
-	pub fn new(engine: &'a Engine) -> Self {
+	pub fn new(engine: Arc<Engine>) -> Self {
 		Self {
 			engine,
 			multiline: false,
@@ -293,14 +286,11 @@ impl std::error::Error for GrepError {}
 /// Searches the files below `root` (or `root` itself if it is a file; any
 /// other kind of root yields an empty result).
 ///
+/// Takes `opts` by value so every sink sender is dropped when it returns.
+///
 /// # Errors
 /// See [`GrepError`]; unreadable files and directories below `root` are
-/// skipped.
-pub fn grep(
-	fs: &Fs,
-	root: &Path,
-	opts: &GrepOptions<'_>,
-	stop: &dyn Stop,
-) -> Result<GrepResult, GrepError> {
-	run::grep(fs, root, opts, stop)
+/// skipped, and a closed sink receiver is [`GrepError::Sink`].
+pub async fn grep(fs: &Fs, root: &Path, opts: GrepOptions) -> Result<GrepResult, GrepError> {
+	run::grep(fs, root, opts).await
 }

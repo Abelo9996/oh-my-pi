@@ -14,10 +14,9 @@ use std::{
 	collections::HashMap,
 	ffi::OsString,
 	path::{Component, Path, PathBuf, Prefix},
-	sync::atomic::{AtomicUsize, Ordering},
-	time::{Duration, Instant},
 };
 
+use pi_walker::{FileType, pattern::Glob};
 use regex::Regex;
 
 use crate::{
@@ -165,54 +164,6 @@ impl PathPolicy {
 			return self.cwd.clone();
 		}
 		lexical_absolute(Path::new(&expanded), &self.cwd)
-	}
-
-	/// Locate a missing authored path by unique trailing-suffix match under
-	/// `cwd`.
-	pub fn recover_missing(&self, authored: &str) -> Option<Resolved> {
-		let normalized = authored.replace('\\', "/");
-		let normalized = normalized
-			.strip_prefix("./")
-			.unwrap_or(&normalized)
-			.trim_end_matches('/');
-		if normalized.is_empty() {
-			return None;
-		}
-		let escaped = escape_glob_metachars(normalized);
-		let glob = pi_walker::pattern::Glob::new(&format!("**/{escaped}")).ok()?;
-		let started = Instant::now();
-		let stop = || started.elapsed() >= Duration::from_secs(5);
-		let kept = AtomicUsize::new(0);
-		let opts = pi_walker::walk::Options {
-			hidden: true,
-			gitignore: true,
-			skip_git: true,
-			..Default::default()
-		};
-		let result = pi_walker::walk::collect(
-			&pi_walker::Fs::Native,
-			&self.cwd,
-			&opts,
-			false,
-			&stop,
-			|_, entry| {
-				if !matches!(entry.file_type, pi_walker::FileType::File | pi_walker::FileType::Dir)
-					|| !glob.is_match_base(entry.path, entry.name())
-				{
-					return pi_walker::walk::Action::Skip;
-				}
-				if kept.fetch_add(1, Ordering::Relaxed) >= 1 {
-					return pi_walker::walk::Action::Stop;
-				}
-				pi_walker::walk::Action::Continue
-			},
-		)
-		.ok()?;
-		if kept.load(Ordering::Relaxed) != 1 || result.len() != 1 {
-			return None;
-		}
-		let display = result.get(0).path_lossy().into_owned();
-		Some(Resolved { absolute: self.cwd.join(&display), display })
 	}
 
 	/// Enforce plan-mode write restrictions: renames and deletes are refused;
@@ -542,6 +493,35 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 
 fn is_within(path: &Path, root: &Path) -> bool {
 	path == root || path.starts_with(root)
+}
+
+/// Trailing-suffix matcher for a missing authored path: the host walks
+/// `cwd` and recovers the path only when exactly one file or directory
+/// matches.
+#[derive(Debug, Clone)]
+pub struct RecoveryGlob(Glob);
+
+impl RecoveryGlob {
+	/// Matcher for `**/<authored>` with metacharacters taken literally;
+	/// `None` when `authored` names nothing (empty, `./`, `/`).
+	pub fn new(authored: &str) -> Option<Self> {
+		let normalized = authored.replace('\\', "/");
+		let normalized = normalized
+			.strip_prefix("./")
+			.unwrap_or(&normalized)
+			.trim_end_matches('/');
+		if normalized.is_empty() {
+			return None;
+		}
+		let escaped = escape_glob_metachars(normalized);
+		Glob::new(&format!("**/{escaped}")).ok().map(Self)
+	}
+
+	/// Whether the walk entry at `path` (cwd-relative, `/`-separated, final
+	/// component `name`) is a candidate recovery.
+	pub fn matches(&self, path: &[u8], name: &[u8], file_type: FileType) -> bool {
+		matches!(file_type, FileType::File | FileType::Dir) && self.0.is_match_base(path, name)
+	}
 }
 
 fn escape_glob_metachars(value: &str) -> String {
@@ -908,16 +888,37 @@ mod tests {
 		);
 	}
 
+	fn recovery_matches(authored: &str, path: &str, file_type: FileType) -> bool {
+		let name = path.rsplit('/').next().unwrap();
+		RecoveryGlob::new(authored)
+			.unwrap()
+			.matches(path.as_bytes(), name.as_bytes(), file_type)
+	}
+
 	#[test]
-	fn recovers_one_suffix_but_not_ambiguous_suffixes() {
-		let tmp = tempfile::tempdir().unwrap();
-		let p = policy(tmp.path());
-		std::fs::create_dir_all(tmp.path().join("deep/src")).unwrap();
-		std::fs::write(tmp.path().join("deep/src/a.ts"), "").unwrap();
-		assert_eq!(p.recover_missing("src/a.ts").unwrap().display, "deep/src/a.ts");
-		std::fs::create_dir_all(tmp.path().join("other/src")).unwrap();
-		std::fs::write(tmp.path().join("other/src/a.ts"), "").unwrap();
-		assert!(p.recover_missing("src/a.ts").is_none());
+	fn recovery_glob_matches_whole_trailing_components() {
+		assert!(recovery_matches("src/a.ts", "deep/src/a.ts", FileType::File));
+		assert!(recovery_matches("./src/a.ts", "src/a.ts", FileType::File));
+		assert!(recovery_matches("src\\a.ts", "deep/src/a.ts", FileType::File));
+		assert!(recovery_matches("deep/src/", "x/deep/src", FileType::Dir));
+		assert!(!recovery_matches("src/a.ts", "deep/mysrc/a.ts", FileType::File));
+		assert!(!recovery_matches("src/a.ts", "deep/src/a.ts.bak", FileType::File));
+		assert!(!recovery_matches("src/a.ts", "deep/src/a.ts", FileType::Symlink));
+	}
+
+	#[test]
+	fn recovery_glob_takes_metacharacters_literally() {
+		assert!(recovery_matches("src/[id].ts", "app/src/[id].ts", FileType::File));
+		assert!(!recovery_matches("src/[id].ts", "app/src/i.ts", FileType::File));
+		assert!(recovery_matches("a*b?.ts", "x/a*b?.ts", FileType::File));
+		assert!(!recovery_matches("a*b.ts", "x/aXXb.ts", FileType::File));
+	}
+
+	#[test]
+	fn recovery_glob_refuses_empty_targets() {
+		for authored in ["", "./", "/", "\\"] {
+			assert!(RecoveryGlob::new(authored).is_none(), "{authored:?}");
+		}
 	}
 
 	#[test]

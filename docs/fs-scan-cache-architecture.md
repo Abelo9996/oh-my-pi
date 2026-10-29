@@ -32,7 +32,7 @@ Because every reuse is checked against the live stamp, the cache is correct with
 
 A directory listing is read from or written to the cache only when all of these hold:
 
-- the walk runs on the native filesystem (`Fs::Native`); providers (`pi_vfs::BlockingFs`, including `scheme://` roots and any host-injected `ShellFilesystem`) are never cached, even when they redirect to a host path;
+- the walk runs on the native filesystem (`Fs::Native`); providers (`Fs::Provider(pi_vfs::Fs)`, including `scheme://` roots and any host-injected `ShellFilesystem`) are never cached, even when they redirect to a host path;
 - the filesystem reports stable stamps: APFS on macOS; ext4, XFS, Btrfs, tmpfs, F2FS, ZFS, and bcachefs on Linux; NTFS and ReFS on Windows. Network, FUSE, overlay, and other mounts are always listed;
 - the walk uses `Detail::Minimal` (file sizes and mtimes change without touching their directory's stamp, so `Detail::Full` walks are never cached);
 - the walk's `walk::Options::cache` is `true`.
@@ -43,7 +43,7 @@ The cache is split into 64 shards behind read/write locks. It retains at most ab
 
 ## Walk parallelism
 
-`walk::walk` and `walk::collect` spread directories over worker threads; worker 0 is the calling thread (there is no Rayon pool). `PI_WALK_WORKERS` sets the count:
+`walk::walk` and `walk::collect` use a fixed pool of long-lived workers on the current tokio runtime; pi-walker has no runtime of its own. Workers share a directory queue and retain their sessions and buffers. Dropping the future sets the halt flag and aborts registered tasks, including startup. `walk::walk` returns a `Stream` of `Batch<T> { dir, items }`; unbounded grep scans files on these same workers before sending results. `walk::Tree` is a serial async cursor that spends tokio's coop budget per entry. `PI_WALK_WORKERS` (or `Fs::workers`) sets the worker count:
 
 - a positive `N` uses `N` workers;
 - unset or `0` uses the per-filesystem default: 4 on macOS, 8 on Linux, 4 elsewhere and for providers;
@@ -51,7 +51,7 @@ The cache is split into 64 shards behind read/write locks. It retains at most ab
 
 ## Native fast paths
 
-Native walks open child directories with `openat` relative to the parent handle and read listings in bulk: `__getdirentries64` (with its EOF flag) on macOS, plus `getattrlistbulk` for `Detail::Full`; `getdents64` plus `statx` on Linux; `NtQueryDirectoryFile` on Windows. Providers are read through `pi_vfs::BlockingFs`.
+Native walks open child directories with `openat` relative to the parent handle and read listings in bulk: `__getdirentries64` (with its EOF flag) on macOS, plus `getattrlistbulk` for `Detail::Full`; `getdents64` plus `statx` on Linux; `NtQueryDirectoryFile` on Windows. Native syscalls run inline in the async `fs::Session` methods; providers are read by awaiting the async `pi_vfs::Fs`.
 
 ## Adding a cache consumer
 

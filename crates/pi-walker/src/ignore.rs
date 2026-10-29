@@ -28,12 +28,10 @@
 use std::{
 	borrow::Cow,
 	ffi::OsStr,
-	io::{self, Read},
+	io,
 	path::{Path, PathBuf},
 	sync::Arc,
 };
-
-use pi_vfs::BlockingFs;
 
 use crate::{
 	fs::{Dir, FileType, Fs, Session, Stamp},
@@ -115,11 +113,20 @@ impl Rules {
 	}
 
 	/// Reads (at most 16 MiB of) and compiles the file at `path` through `fs`.
-	pub fn read(fs: &BlockingFs, path: &Path) -> io::Result<Self> {
+	pub async fn read(fs: &pi_vfs::Fs, path: &Path) -> io::Result<Self> {
+		const CHUNK: usize = 64 << 10;
+		let file = fs.open(path).await?;
 		let mut data = Vec::new();
-		fs.open(path)?
-			.take(MAX_IGNORE_BYTES)
-			.read_to_end(&mut data)?;
+		while (data.len() as u64) < MAX_IGNORE_BYTES {
+			let len = data.len();
+			let room = usize::try_from(MAX_IGNORE_BYTES - len as u64).map_or(CHUNK, |r| r.min(CHUNK));
+			data.resize(len + room, 0);
+			let read = file.read_async(&mut data[len..]).await;
+			data.truncate(len + read.as_ref().copied().unwrap_or(0));
+			if read? == 0 {
+				break;
+			}
+		}
 		Ok(Self::parse(&data))
 	}
 
@@ -279,12 +286,12 @@ pub(crate) struct DirIgnores {
 }
 
 /// Reads up to [`MAX_IGNORE_BYTES`] of an opened file into `buf`.
-fn read_opened(
+async fn read_opened(
 	opened: io::Result<(crate::fs::File, crate::fs::FileInfo)>,
 	buf: &mut Vec<u8>,
 ) -> io::Result<Stamp> {
 	let (mut file, info) = opened?;
-	file.read_into(buf, MAX_IGNORE_BYTES)?;
+	file.read_into(buf, MAX_IGNORE_BYTES).await?;
 	Ok(info.stamp)
 }
 
@@ -293,22 +300,29 @@ fn non_empty(rules: Rules) -> Option<Arc<Rules>> {
 	(!rules.is_empty()).then(|| Arc::new(rules))
 }
 
+/// Opens `.git/info/exclude` below `dir`.
+async fn open_exclude(
+	session: &mut Session,
+	dir: &Dir,
+) -> io::Result<(crate::fs::File, crate::fs::FileInfo)> {
+	let git = session.open_child(dir, b".git").await?;
+	let info = session.open_child(&git, b"info").await?;
+	session.open_file_at(&info, b"exclude").await
+}
+
 impl DirIgnores {
 	/// Reads the sources `names` calls for, relative to the open `dir`;
 	/// `stamped` also records their stamps.
-	pub(crate) fn load(session: &mut Session, dir: &Dir, names: Names, stamped: bool) -> Self {
+	pub(crate) async fn load(session: &mut Session, dir: &Dir, names: Names, stamped: bool) -> Self {
 		let mut out = Self::default();
 		let mut buf = Vec::new();
 		for (k, _) in Self::source_names(names) {
 			let opened = if k < 2 {
-				session.open_file_at(dir, SOURCES[k].as_bytes())
+				session.open_file_at(dir, SOURCES[k].as_bytes()).await
 			} else {
-				session.open_child(dir, b".git").and_then(|git| {
-					let info = session.open_child(&git, b"info")?;
-					session.open_file_at(&info, b"exclude")
-				})
+				open_exclude(session, dir).await
 			};
-			let Ok(stamp) = read_opened(opened, &mut buf) else {
+			let Ok(stamp) = read_opened(opened, &mut buf).await else {
 				continue;
 			};
 			if stamped {
@@ -443,20 +457,35 @@ impl Ignorer {
 	/// the frames of `root`'s ancestors up to the nearest repository root,
 	/// everything read through `session` on `fs`. `root` is absolute in `fs`'s
 	/// spelling. Returns the ignorer and the root's inherited frame.
-	pub(crate) fn new(session: &mut Session, _fs: &Fs, root: &Path) -> (Self, Option<Arc<Frame>>) {
+	pub(crate) async fn new(
+		session: &mut Session,
+		_fs: &Fs,
+		root: &Path,
+	) -> (Self, Option<Arc<Frame>>) {
 		let mut buf = Vec::new();
-		let excludes = global_excludes_path(&mut |p| {
-			read_opened(session.open_file(p), &mut buf)
-				.ok()
-				.map(|_| buf.clone())
-		});
-		let global = excludes
-			.and_then(|p| read_opened(session.open_file(&p), &mut buf).ok())
-			.map(|_| Rules::parse(&buf))
-			.filter(|rules| !rules.is_empty());
+		let GitConfigs { configs, home, fallback } = git_configs();
+		let mut excludes = None;
+		for config in configs.into_iter().flatten() {
+			let opened = session.open_file(&config).await;
+			if read_opened(opened, &mut buf).await.is_ok()
+				&& let Some(path) = parse_excludes_file(&buf, home.as_deref())
+			{
+				excludes = Some(path);
+				break;
+			}
+		}
+		let global = match excludes.or(fallback) {
+			Some(p) => {
+				let opened = session.open_file(&p).await;
+				read_opened(opened, &mut buf).await.ok()
+			},
+			None => None,
+		}
+		.map(|_| Rules::parse(&buf))
+		.filter(|rules| !rules.is_empty());
 		let cwd = std::env::current_dir().map_or_default(|cwd| match_spelling(&cwd).into_owned());
 		let ignorer = Self { global, cwd, root: match_spelling(root).into_owned() };
-		(ignorer, ancestor_frames(session, root, &mut buf))
+		(ignorer, ancestor_frames(session, root, &mut buf).await)
 	}
 
 	/// Whether the entry at walk-relative `rel` is ignored by the chain
@@ -555,12 +584,17 @@ fn match_spelling(path: &Path) -> Cow<'_, [u8]> {
 /// Frames for the directories from the nearest repository root at or above
 /// `root`'s parent down to that parent, minus rules that would ignore `root`.
 /// `None` when no ancestor is a repository root.
-fn ancestor_frames(session: &mut Session, root: &Path, buf: &mut Vec<u8>) -> Option<Arc<Frame>> {
-	let mut exists = |dir: &Path, name: &str| {
+async fn ancestor_frames(
+	session: &mut Session,
+	root: &Path,
+	buf: &mut Vec<u8>,
+) -> Option<Arc<Frame>> {
+	async fn exists(session: &mut Session, dir: &Path, name: &str) -> bool {
 		session
 			.stat(&pi_vfs::child_path(dir, OsStr::new(name)), true)
+			.await
 			.is_ok()
-	};
+	}
 	// (ancestor, root relative to it).
 	let mut ancestors: Vec<(&Path, Vec<u8>)> = Vec::new();
 	let mut up: Vec<u8> = Vec::new();
@@ -577,7 +611,7 @@ fn ancestor_frames(session: &mut Session, root: &Path, buf: &mut Vec<u8>) -> Opt
 		}
 		up = next;
 		ancestors.push((parent, up.clone()));
-		if exists(parent, ".git") || exists(parent, ".jj") {
+		if exists(session, parent, ".git").await || exists(session, parent, ".jj").await {
 			repo = Some(ancestors.len() - 1);
 			break;
 		}
@@ -586,17 +620,34 @@ fn ancestor_frames(session: &mut Session, root: &Path, buf: &mut Vec<u8>) -> Opt
 	let mut frame: Option<Arc<Frame>> = None;
 	for (i, (dir, up)) in ancestors[..=repo?].iter().enumerate().rev() {
 		let has_git = i == repo?;
-		let mut load = |rel: &str| {
-			let path = pi_vfs::join_path(dir, Path::new(rel));
-			read_opened(session.open_file(&path), buf).ok()?;
-			ancestor_rules(buf, up)
-		};
-		let files =
-			[load(SOURCES[0]), load(SOURCES[1]), if has_git { load(SOURCES[2]) } else { None }];
+		let files = [
+			load_ancestor(session, dir, SOURCES[0], up, buf).await,
+			load_ancestor(session, dir, SOURCES[1], up, buf).await,
+			if has_git {
+				load_ancestor(session, dir, SOURCES[2], up, buf).await
+			} else {
+				None
+			},
+		];
 		frame =
 			Some(Arc::new(Frame::new(frame, files, has_git, Box::default(), up.as_slice().into())));
 	}
 	frame
+}
+
+/// Reads and compiles the rule file `rel` of ancestor `dir` (see
+/// [`ancestor_rules`]).
+async fn load_ancestor(
+	session: &mut Session,
+	dir: &Path,
+	rel: &str,
+	up: &[u8],
+	buf: &mut Vec<u8>,
+) -> Option<Arc<Rules>> {
+	let path = pi_vfs::join_path(dir, Path::new(rel));
+	let opened = session.open_file(&path).await;
+	read_opened(opened, buf).await.ok()?;
+	ancestor_rules(buf, up)
 }
 
 /// Compiles an ancestor's rule file, dropping rules that would ignore the
@@ -614,8 +665,20 @@ fn ancestor_rules(data: &[u8], up: &[u8]) -> Option<Arc<Rules>> {
 	}))
 }
 
-/// Locates git's global excludes file, reading config files with `read`.
-fn global_excludes_path(read: &mut dyn FnMut(&Path) -> Option<Vec<u8>>) -> Option<PathBuf> {
+/// Where git looks for `core.excludesFile`.
+struct GitConfigs {
+	/// Config files in precedence order (first `excludesFile` wins).
+	configs:  [Option<PathBuf>; 4],
+	/// The home directory `~` expands to.
+	home:     Option<PathBuf>,
+	/// The excludes file when no config names one.
+	fallback: Option<PathBuf>,
+}
+
+/// Git's config files (`$GIT_CONFIG_GLOBAL`, `~/.gitconfig`,
+/// `$XDG_CONFIG_HOME/git/config`, `$GIT_CONFIG_SYSTEM` or `/etc/gitconfig`)
+/// and the `$XDG_CONFIG_HOME/git/ignore` fallback.
+fn git_configs() -> GitConfigs {
 	let env_path = |name: &str| {
 		std::env::var_os(name)
 			.filter(|v| !v.is_empty())
@@ -631,13 +694,7 @@ fn global_excludes_path(read: &mut dyn FnMut(&Path) -> Option<Vec<u8>>) -> Optio
 		config_home.as_ref().map(|d| d.join("git/config")),
 		Some(env_path("GIT_CONFIG_SYSTEM").unwrap_or_else(|| PathBuf::from("/etc/gitconfig"))),
 	];
-	for config in configs.into_iter().flatten() {
-		if let Some(path) = read(&config).and_then(|data| parse_excludes_file(&data, home.as_deref()))
-		{
-			return Some(path);
-		}
-	}
-	config_home.map(|d| d.join("git/ignore"))
+	GitConfigs { configs, home, fallback: config_home.map(|d| d.join("git/ignore")) }
 }
 
 /// Extracts `core.excludesFile` from raw git config contents: byte-for-byte

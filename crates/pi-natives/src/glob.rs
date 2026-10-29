@@ -118,7 +118,7 @@ impl From<pi_walker::glob::GlobMatch> for GlobMatch {
 		Self {
 			path:      entry.path,
 			file_type: entry.file_type.into(),
-			mtime:     entry.mtime.map(GlobMatch::millis),
+			mtime:     entry.mtime.map(Self::millis),
 			size:      entry.size.map(|size| size as f64),
 		}
 	}
@@ -126,7 +126,7 @@ impl From<pi_walker::glob::GlobMatch> for GlobMatch {
 
 impl GlobMatch {
 	/// Unix nanoseconds to the milliseconds JavaScript dates use.
-	pub(crate) fn millis(nanos: i64) -> f64 {
+	pub(crate) const fn millis(nanos: i64) -> f64 {
 		nanos.div_euclid(1_000_000) as f64
 	}
 }
@@ -164,7 +164,7 @@ pub fn glob<'env>(
 		filesystem,
 	} = options;
 
-	let filesystem = ShellFilesystem::blocking(filesystem);
+	let filesystem = ShellFilesystem::resolve(filesystem);
 	let opts = pi_walker::glob::GlobOptions {
 		pattern,
 		recursive: recursive.unwrap_or(true),
@@ -182,14 +182,15 @@ pub fn glob<'env>(
 	};
 
 	let ct = task::CancelToken::new(timeout_ms, signal);
-
-	task::filesystem(env, "glob", ct, filesystem, move |filesystem, ct| {
+	task::filesystem_future(env, "glob", ct, filesystem, move |filesystem| async move {
 		let root = pi_walker::fs::resolve_dir(&filesystem, std::path::Path::new(&path))
-			.map_err(|err| ct.walk_failure(err))?;
+			.await
+			.map_err(task::walk_failure)?;
 		let fs = pi_walker::Fs::new(&filesystem, &root);
-		let matches: Vec<GlobMatch> = pi_walker::glob::glob(&fs, &root, &opts, &ct)
+		let matches: Vec<GlobMatch> = pi_walker::glob::glob(&fs, &root, &opts)
+			.await
 			.map_err(|err| match err {
-				pi_walker::glob::GlobError::Walk(err) => ct.walk_failure(err),
+				pi_walker::glob::GlobError::Walk(err) => task::walk_failure(err),
 				err @ pi_walker::glob::GlobError::Pattern(_) => Error::from_reason(err.to_string()),
 			})?
 			.into_iter()

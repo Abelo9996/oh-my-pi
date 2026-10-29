@@ -1,514 +1,279 @@
-//! Ordered parallel execution over a candidate stream.
+//! Fixed pools of worker tasks fed through a channel.
 //!
-//! [`streamed`] runs `work` for every item a producer feeds, on several
-//! threads, while the calling thread consumes results strictly in feed order,
-//! so output is deterministic and a consumer can stop once it has what it
-//! needs: workers claim items front to back, at most a bounded window ahead of
-//! the consumed prefix, the producer pauses once it is far enough ahead of the
-//! workers, and everything ends as soon as the consumer stops. [`ordered`] is
-//! the same over the indices `0..len`.
+//! Per-item work (searching a file, one directory's files) runs on a few
+//! long-lived tasks that keep their own state (sessions, buffers, searchers)
+//! across items, instead of a task spawned per item. A feeder task drives the
+//! input stream into a bounded job channel the workers share; their outputs
+//! come back as a stream in input order ([`ordered`]).
+//! Dropping the output stream aborts the feeder and the
+//! workers at their next suspension point; a panic in `work` resumes in the
+//! consumer.
 //!
-//! Used by searches that must report the first results in path order
-//! (`grep` with a match budget, fed by a path-ordered walk that stops with
-//! it; the shell's `rg`/`grep`, which write each file's output as soon as
-//! every earlier file's output is written).
-//!
+//! # Example
 //! ```ignore
-//! let mut lines = Vec::new();
-//! exec::ordered(files.len(), 4, &Never, Vec::new, |buf, i| search(buf, &files[i]), |_, out| {
-//!     lines.extend(out);
-//!     Flow::Continue
+//! let lengths = exec::ordered(stream::iter(paths), 4, 64, Vec::new, |mut buf: Vec<u8>, path| async move {
+//!     let len = read_into(&path, &mut buf).await;
+//!     (buf, len)
 //! });
 //! ```
 
-use std::collections::VecDeque;
+use std::{
+	any::Any,
+	collections::VecDeque,
+	panic::AssertUnwindSafe,
+	pin::{Pin, pin},
+	sync::Arc,
+	task::{Context, Poll},
+};
 
-use parking_lot::{Condvar, Mutex};
+use futures::{FutureExt, Stream, StreamExt};
+use tokio::{
+	sync::{OwnedSemaphorePermit, Semaphore},
+	task::AbortHandle,
+};
 
-use crate::walk::Stop;
+/// A panic payload caught in a worker.
+type Panic = Box<dyn Any + Send>;
 
-/// A consumer's decision after one result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Flow {
-	/// Keep consuming.
-	Continue,
-	/// Stop: remaining items are abandoned (in-flight ones finish and are
-	/// dropped).
-	Stop,
+/// One item handed to a worker.
+struct Job<I> {
+	seq:    u64,
+	item:   I,
+	/// The in-flight slot of an [`ordered`] run, released once the output is
+	/// yielded.
+	permit: OwnedSemaphorePermit,
 }
 
-/// How many items per worker may be claimed ahead of the consumed prefix.
-const WINDOW_PER_WORKER: usize = 16;
-
-/// How many produced items may wait for a worker before the producer pauses,
-/// per window slot.
-const QUEUE_PER_SLOT: usize = 4;
-
-/// Runs `work(state, index)` for every index in `0..len`.
-///
-/// Work runs on up to `workers` threads (each with its own `init()` state;
-/// `workers <= 1` runs inline), and each result is handed to
-/// `consume(index, result)` on the calling thread in index order. Returns
-/// false when `consume` or `stop` ended it early.
-pub fn ordered<S, R, I, W, C>(
-	len: usize,
-	workers: usize,
-	stop: &dyn Stop,
-	init: I,
-	work: W,
-	consume: C,
-) -> bool
-where
-	S: Send,
-	R: Send,
-	I: Fn() -> S + Sync,
-	W: Fn(&mut S, usize) -> R + Sync,
-	C: FnMut(usize, R) -> Flow,
-{
-	let feed = |push: &mut dyn FnMut(usize) -> bool| {
-		for index in 0..len {
-			if !push(index) {
-				return;
-			}
-		}
-	};
-	streamed(workers.min(len), stop, feed, init, |state, &index| work(state, index), consume)
+/// One worker's output for the job `seq`.
+struct Done<O> {
+	seq:    u64,
+	output: Result<O, Panic>,
+	permit: OwnedSemaphorePermit,
 }
 
-/// Runs `work(state, &item)` for every item `produce` feeds through its push
-/// callback.
-///
-/// `produce` runs on its own thread; `push` returns false once the run ended
-/// (the consumer stopped, `stop` fired, or a thread panicked), and the
-/// producer should then return. Work runs on up to `workers` threads (each
-/// with its own `init()` state; `workers <= 1` runs everything inline on the
-/// calling thread), and each item is handed back with its result to
-/// `consume(item, result)` on the calling thread in feed order. Returns false
-/// when `consume` or `stop` ended it early.
-pub fn streamed<T, S, R, P, I, W, C>(
-	workers: usize,
-	stop: &dyn Stop,
-	produce: P,
-	init: I,
-	work: W,
-	mut consume: C,
-) -> bool
-where
-	T: Send,
-	S: Send,
-	R: Send,
-	P: FnOnce(&mut dyn FnMut(T) -> bool) + Send,
-	I: Fn() -> S + Sync,
-	W: Fn(&mut S, &T) -> R + Sync,
-	C: FnMut(T, R) -> Flow,
-{
-	if workers <= 1 {
-		return inline(stop, produce, &init, &work, &mut consume);
-	}
-	let window = workers * WINDOW_PER_WORKER;
-	let shared = Shared {
-		ring: Mutex::new(Ring {
-			queue:     VecDeque::new(),
-			slots:     (0..window).map(|_| None).collect(),
-			consumed:  0,
-			claimed:   0,
-			produced:  0,
-			closed:    false,
-			abandoned: false,
-		}),
-		ready: Condvar::new(),
-		work: Condvar::new(),
-		room: Condvar::new(),
-		window,
-	};
-	std::thread::scope(|scope| {
-		scope.spawn(|| run_producer(&shared, stop, produce));
-		for _ in 0..workers {
-			scope.spawn(|| run_worker(&shared, stop, &init, &work));
-		}
-		// Releases waiting threads however consumption ends, a panicking
-		// consumer included.
-		let _abandon = Abandon { shared: &shared, always: true };
-		consume_in_order(&shared, stop, &mut consume)
-	})
-}
+/// Aborts a pool's tasks when dropped.
+struct Tasks(Vec<AbortHandle>);
 
-/// [`streamed`] on the calling thread alone.
-fn inline<T, S, R, P, I, W, C>(
-	stop: &dyn Stop,
-	produce: P,
-	init: &I,
-	work: &W,
-	consume: &mut C,
-) -> bool
-where
-	P: FnOnce(&mut dyn FnMut(T) -> bool),
-	I: Fn() -> S,
-	W: Fn(&mut S, &T) -> R,
-	C: FnMut(T, R) -> Flow,
-{
-	let mut state = None;
-	let mut complete = true;
-	produce(&mut |item| {
-		if stop.stop() {
-			complete = false;
-			return false;
-		}
-		let result = work(state.get_or_insert_with(init), &item);
-		if consume(item, result) == Flow::Stop {
-			complete = false;
-			return false;
-		}
-		true
-	});
-	complete && !stop.stop()
-}
-
-/// State shared by the producer, the workers, and the consumer.
-struct Ring<T, R> {
-	/// Produced items no worker claimed yet, in feed order.
-	queue:     VecDeque<T>,
-	/// Slot `i % window` holds item `i` and its result once done, for
-	/// `consumed <= i < consumed + window`.
-	slots:     Vec<Option<(T, R)>>,
-	/// Items handed to the consumer so far.
-	consumed:  usize,
-	/// Items claimed by workers so far (the next claim's index).
-	claimed:   usize,
-	/// Items fed so far.
-	produced:  usize,
-	/// The producer returned; nothing more will be fed.
-	closed:    bool,
-	/// The consumer stopped, `stop` fired, or a thread panicked.
-	abandoned: bool,
-}
-
-struct Shared<T, R> {
-	ring:   Mutex<Ring<T, R>>,
-	/// Signalled when the item the consumer waits for is stored, or the feed
-	/// closes.
-	ready:  Condvar,
-	/// Signalled when workers may have something to claim: an item was fed,
-	/// the window moved, the feed closed, or the run was abandoned.
-	work:   Condvar,
-	/// Signalled when the producer may feed again: a worker claimed an item
-	/// or the run was abandoned.
-	room:   Condvar,
-	window: usize,
-}
-
-impl<T, R> Shared<T, R> {
-	fn abandon(&self, ring: &mut Ring<T, R>) {
-		ring.abandoned = true;
-		self.work.notify_all();
-		self.room.notify_all();
-		self.ready.notify_all();
-	}
-}
-
-fn run_producer<T, R, P>(shared: &Shared<T, R>, stop: &dyn Stop, produce: P)
-where
-	P: FnOnce(&mut dyn FnMut(T) -> bool),
-{
-	let _guard = Abandon { shared, always: false };
-	let cap = shared.window * QUEUE_PER_SLOT;
-	produce(&mut |item| {
-		let mut ring = shared.ring.lock();
-		loop {
-			if ring.abandoned {
-				return false;
-			}
-			if stop.stop() {
-				shared.abandon(&mut ring);
-				return false;
-			}
-			if ring.queue.len() < cap {
-				break;
-			}
-			shared.room.wait(&mut ring);
-		}
-		ring.queue.push_back(item);
-		ring.produced += 1;
-		drop(ring);
-		shared.work.notify_one();
-		true
-	});
-	let mut ring = shared.ring.lock();
-	ring.closed = true;
-	drop(ring);
-	shared.work.notify_all();
-	shared.ready.notify_all();
-}
-
-fn run_worker<T, S, R, I, W>(shared: &Shared<T, R>, stop: &dyn Stop, init: &I, work: &W)
-where
-	I: Fn() -> S,
-	W: Fn(&mut S, &T) -> R,
-{
-	let _guard = Abandon { shared, always: false };
-	let mut state = None;
-	loop {
-		let (index, item) = {
-			let mut ring = shared.ring.lock();
-			loop {
-				if ring.abandoned {
-					return;
-				}
-				if stop.stop() {
-					shared.abandon(&mut ring);
-					return;
-				}
-				if ring.claimed < ring.consumed + shared.window
-					&& let Some(item) = ring.queue.pop_front()
-				{
-					ring.claimed += 1;
-					shared.room.notify_one();
-					break (ring.claimed - 1, item);
-				}
-				if ring.closed && ring.queue.is_empty() {
-					return;
-				}
-				shared.work.wait(&mut ring);
-			}
-		};
-		let result = work(state.get_or_insert_with(init), &item);
-		let mut ring = shared.ring.lock();
-		if ring.abandoned {
-			return;
-		}
-		ring.slots[index % shared.window] = Some((item, result));
-		let wanted = ring.consumed == index;
-		drop(ring);
-		if wanted {
-			shared.ready.notify_one();
-		}
-	}
-}
-
-/// Abandons the run on drop (`always`) or when its thread panics, so no
-/// thread waits for a result, an item, or room that will not come; the scope
-/// re-raises any panic.
-struct Abandon<'a, T, R> {
-	shared: &'a Shared<T, R>,
-	always: bool,
-}
-
-impl<T, R> Drop for Abandon<'_, T, R> {
+impl Drop for Tasks {
 	fn drop(&mut self) {
-		if self.always || std::thread::panicking() {
-			self.shared.abandon(&mut self.shared.ring.lock());
+		for task in &self.0 {
+			task.abort();
 		}
 	}
 }
 
-/// Hands results to `consume` in feed order; false when it stopped early.
-fn consume_in_order<T, R, C>(shared: &Shared<T, R>, stop: &dyn Stop, consume: &mut C) -> bool
+/// Spawns the feeder and one worker per state, with at most `window` items
+/// in flight between the feeder and the consumer.
+fn start<In, I, O, S, W, Fut>(
+	inputs: In,
+	states: Vec<S>,
+	work: W,
+	window: usize,
+	results: flume::Sender<Done<O>>,
+) -> Tasks
 where
-	C: FnMut(T, R) -> Flow,
+	In: Stream<Item = I> + Send + 'static,
+	I: Send + 'static,
+	O: Send + 'static,
+	S: Send + 'static,
+	W: Fn(S, I) -> Fut + Send + Sync + 'static,
+	Fut: Future<Output = (S, O)> + Send + 'static,
 {
-	for index in 0.. {
-		let (item, result) = {
-			let mut ring = shared.ring.lock();
+	let (jobs, queue) = flume::bounded::<Job<I>>(states.len());
+	let mut tasks = Vec::with_capacity(states.len() + 1);
+	let permits = Arc::new(Semaphore::new(window.max(1)));
+	tasks.push(
+		tokio::spawn(async move {
+			let mut inputs = pin!(inputs);
+			let mut seq = 0;
 			loop {
-				if let Some(done) = ring.slots[index % shared.window].take() {
-					break done;
+				// Take the slot before pulling the input, so a lazy producer
+				// (a walk) never runs further ahead than the window.
+				let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+					return;
+				};
+				let Some(item) = inputs.next().await else {
+					return;
+				};
+				if jobs.send_async(Job { seq, item, permit }).await.is_err() {
+					return;
 				}
-				if ring.abandoned || stop.stop() {
-					return false;
-				}
-				if ring.closed && index >= ring.produced {
-					return true;
-				}
-				shared.ready.wait(&mut ring);
+				seq += 1;
 			}
-		};
-		if stop.stop() {
-			return false;
-		}
-		shared.ring.lock().consumed = index + 1;
-		shared.work.notify_all();
-		if consume(item, result) == Flow::Stop {
-			return false;
+		})
+		.abort_handle(),
+	);
+	let work = Arc::new(work);
+	for state in states {
+		let (queue, results, work) = (queue.clone(), results.clone(), Arc::clone(&work));
+		tasks.push(
+			tokio::spawn(async move {
+				let mut state = Some(state);
+				while let Ok(Job { seq, item, permit }) = queue.recv_async().await {
+					let current = state
+						.take()
+						.expect("a worker gets its state back after every job");
+					let output = match AssertUnwindSafe(work(current, item)).catch_unwind().await {
+						Ok((next, output)) => {
+							state = Some(next);
+							Ok(output)
+						},
+						Err(panic) => Err(panic),
+					};
+					let panicked = output.is_err();
+					if results
+						.send_async(Done { seq, output, permit })
+						.await
+						.is_err()
+						|| panicked
+					{
+						return;
+					}
+				}
+			})
+			.abort_handle(),
+		);
+	}
+	Tasks(tasks)
+}
+
+/// Resumes a worker's panic in the consumer.
+fn unwrap_output<O>(output: Result<O, Panic>) -> O {
+	output.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// Runs `work` over `inputs` on `workers` tasks and yields the outputs in
+/// input order.
+///
+/// Each worker owns one state from `init`, handed to `work` and returned with
+/// its output. At most `window` items are in flight between pulling an input
+/// and yielding its output, so the input stream is pulled lazily.
+pub fn ordered<In, I, O, S, W, Fut>(
+	inputs: In,
+	workers: usize,
+	window: usize,
+	init: impl FnMut() -> S,
+	work: W,
+) -> Ordered<O>
+where
+	In: Stream<Item = I> + Send + 'static,
+	I: Send + 'static,
+	O: Send + 'static,
+	S: Send + 'static,
+	W: Fn(S, I) -> Fut + Send + Sync + 'static,
+	Fut: Future<Output = (S, O)> + Send + 'static,
+{
+	let (results, outputs) = flume::unbounded();
+	let states = std::iter::repeat_with(init).take(workers.max(1)).collect();
+	let tasks = start(inputs, states, work, window.max(workers), results);
+	Ordered { outputs: outputs.into_stream(), next: 0, pending: VecDeque::new(), _tasks: tasks }
+}
+
+/// An output that finished ahead of its turn, with its in-flight slot.
+type Early<O> = (Result<O, Panic>, OwnedSemaphorePermit);
+
+/// The outputs of an [`ordered`] run, in input order.
+pub struct Ordered<O: 'static> {
+	outputs: flume::r#async::RecvStream<'static, Done<O>>,
+	/// Sequence number of the next output to yield.
+	next:    u64,
+	/// Outputs that finished ahead of `next`, indexed by `seq - next`.
+	pending: VecDeque<Option<Early<O>>>,
+	_tasks:  Tasks,
+}
+
+// Outputs are moved out, never pinned in place.
+impl<O: 'static> Unpin for Ordered<O> {}
+
+impl<O: 'static> Stream for Ordered<O> {
+	type Item = O;
+
+	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<O>> {
+		let this = &mut *self;
+		loop {
+			if this.pending.front().is_some_and(Option::is_some) {
+				let (output, permit) = this.pending.pop_front().flatten().expect("checked above");
+				drop(permit);
+				this.next += 1;
+				return Poll::Ready(Some(unwrap_output(output)));
+			}
+			match this.outputs.poll_next_unpin(cx) {
+				Poll::Ready(Some(Done { seq, output, permit })) => {
+					let index = usize::try_from(seq - this.next).expect("window fits in memory");
+					if this.pending.len() <= index {
+						this.pending.resize_with(index + 1, || None);
+					}
+					this.pending[index] = Some((output, permit));
+				},
+				Poll::Ready(None) => return Poll::Ready(None),
+				Poll::Pending => return Poll::Pending,
+			}
 		}
 	}
-	unreachable!("a feed longer than usize::MAX items")
 }
 
 #[cfg(test)]
 mod tests {
-	use std::{
-		sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-		time::Duration,
-	};
+	use std::time::Duration;
+
+	use futures::stream;
 
 	use super::*;
-	use crate::walk::Never;
 
-	/// Deterministic pseudo-random sleep per index, so items finish out of
-	/// order.
-	fn jitter(index: usize) {
-		let micros = (index.wrapping_mul(2_654_435_761) >> 7) % 400;
-		std::thread::sleep(Duration::from_micros(micros as u64));
-	}
-
-	#[test]
-	fn results_arrive_in_index_order_under_random_durations() {
-		for workers in [1, 2, 7] {
-			let mut seen = Vec::new();
-			let complete = ordered(
-				300,
-				workers,
-				&Never,
-				|| 0usize,
-				|count, index| {
-					*count += 1;
-					jitter(index);
-					index * 3
-				},
-				|index, value| {
-					assert_eq!(value, index * 3);
-					seen.push(index);
-					Flow::Continue
-				},
-			);
-			assert!(complete);
-			assert_eq!(seen, (0..300).collect::<Vec<_>>(), "workers={workers}");
-		}
-	}
-
-	#[test]
-	fn consumer_stop_abandons_later_items() {
-		let started = AtomicUsize::new(0);
-		let mut consumed = Vec::new();
-		let complete = ordered(
-			10_000,
+	/// Outputs come back in input order however long each item takes, and
+	/// each worker's state carries over between its items.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ordered_keeps_input_order_and_worker_state() {
+		let outputs: Vec<(u64, usize)> = ordered(
+			stream::iter(0..200_u64),
 			4,
-			&Never,
-			|| (),
-			|(), index| {
-				started.fetch_add(1, Ordering::Relaxed);
-				jitter(index);
-				index
+			16,
+			|| 0_usize,
+			|seen, n| async move {
+				tokio::time::sleep(Duration::from_micros((n * 7919) % 300)).await;
+				(seen + 1, (n, seen))
 			},
-			|index, _| {
-				consumed.push(index);
-				if index == 5 {
-					Flow::Stop
-				} else {
-					Flow::Continue
-				}
-			},
-		);
-		assert!(!complete);
-		assert_eq!(consumed, (0..=5).collect::<Vec<_>>());
-		// Nothing past the window beyond the stop point was started.
-		assert!(started.load(Ordering::Relaxed) <= 6 + 4 * WINDOW_PER_WORKER);
+		)
+		.collect()
+		.await;
+		assert_eq!(outputs.iter().map(|(n, _)| *n).collect::<Vec<_>>(), (0..200).collect::<Vec<_>>());
+		// Every worker counted its own items: the counts across workers sum to
+		// the items each worker had seen before each one.
+		assert!(outputs.iter().any(|(_, seen)| *seen > 0));
 	}
 
-	#[test]
-	fn workers_stay_within_the_window_of_a_slow_consumer() {
-		let max_ahead = AtomicUsize::new(0);
-		let consumed = AtomicUsize::new(0);
-		let workers = 3;
-		let complete = ordered(
-			400,
-			workers,
-			&Never,
-			|| (),
-			|(), index| {
-				let ahead = index.saturating_sub(consumed.load(Ordering::SeqCst));
-				max_ahead.fetch_max(ahead, Ordering::SeqCst);
-			},
-			|index, ()| {
-				if index % 50 == 0 {
-					std::thread::sleep(Duration::from_millis(2));
-				}
-				consumed.store(index + 1, Ordering::SeqCst);
-				Flow::Continue
-			},
-		);
-		assert!(complete);
-		assert!(max_ahead.load(Ordering::SeqCst) <= workers * WINDOW_PER_WORKER);
+	/// The window bounds how far the input stream is pulled ahead of the
+	/// consumer.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ordered_pulls_at_most_a_window_ahead() {
+		let pulled = Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let counter = Arc::clone(&pulled);
+		let inputs = stream::iter(0..1000_u64).inspect(move |_| {
+			counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+		});
+		let mut outputs = ordered(inputs, 2, 8, || (), |(), n| async move { ((), n) });
+		assert_eq!(outputs.next().await, Some(0));
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		assert!(pulled.load(std::sync::atomic::Ordering::Relaxed) <= 9);
 	}
 
-	#[test]
-	fn stop_signal_ends_the_run() {
-		let fired = AtomicBool::new(false);
-		let stop = || fired.load(Ordering::Relaxed);
-		let mut consumed = 0;
-		let complete = ordered(
-			100_000,
-			4,
-			&stop,
-			|| (),
-			|(), index| {
-				if index == 50 {
-					fired.store(true, Ordering::Relaxed);
-				}
-			},
-			|_, ()| {
-				consumed += 1;
-				Flow::Continue
-			},
-		);
-		assert!(!complete);
-		assert!(consumed < 100_000);
-	}
-
-	/// A slow producer is consumed in feed order as items arrive, and a
-	/// consumer stop ends the producer within its backpressure bound.
-	#[test]
-	fn streamed_follows_a_slow_producer_and_stops_it() {
-		let fed = AtomicUsize::new(0);
-		let mut seen = Vec::new();
-		let complete = streamed(
-			4,
-			&Never,
-			|push: &mut dyn FnMut(usize) -> bool| {
-				for item in 0..100_000 {
-					if item % 64 == 0 {
-						std::thread::sleep(Duration::from_micros(200));
-					}
-					fed.fetch_add(1, Ordering::Relaxed);
-					if !push(item) {
-						return;
-					}
-				}
-			},
-			|| (),
-			|(), &item| {
-				jitter(item);
-				item + 1
-			},
-			|item, result| {
-				assert_eq!(result, item + 1);
-				seen.push(item);
-				if item == 300 {
-					Flow::Stop
-				} else {
-					Flow::Continue
-				}
-			},
-		);
-		assert!(!complete);
-		assert_eq!(seen, (0..=300).collect::<Vec<_>>());
-		let window = 4 * WINDOW_PER_WORKER;
-		assert!(fed.load(Ordering::Relaxed) <= 301 + window + window * QUEUE_PER_SLOT + 1);
-	}
-
-	/// An empty feed completes without waiting.
-	#[test]
-	fn streamed_empty_feed_completes() {
-		for workers in [1, 4] {
-			let complete = streamed(
-				workers,
-				&Never,
-				|_: &mut dyn FnMut(usize) -> bool| {},
+	/// A panic in `work` resumes in the consumer.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn panics_resume_in_the_consumer() {
+		let run = tokio::spawn(async {
+			let _: Vec<u8> = ordered(
+				stream::iter([1_u8, 2, 3]),
+				2,
+				2,
 				|| (),
-				|(), _| (),
-				|_, ()| Flow::Continue,
-			);
-			assert!(complete);
-		}
+				|(), n| async move {
+					assert_ne!(n, 2, "boom");
+					((), n)
+				},
+			)
+			.collect()
+			.await;
+		});
+		assert!(run.await.unwrap_err().is_panic());
 	}
 }

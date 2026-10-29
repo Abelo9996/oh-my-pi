@@ -6,8 +6,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use pi_vfs::BlockingFs;
-
 use crate::walk::WalkError;
 
 /// Absolute spelling of `path`: `scheme://` URLs and absolute host paths are
@@ -27,8 +25,8 @@ pub fn absolute(path: &Path) -> io::Result<PathBuf> {
 ///
 /// A canonical form in another scheme (a URL whose provider resolves it to its
 /// backing host file) is ignored, so URL roots keep their URL spelling.
-pub fn canonical(fs: &BlockingFs, path: PathBuf) -> PathBuf {
-	match fs.canonicalize(&path) {
+pub async fn canonical(fs: &pi_vfs::Fs, path: PathBuf) -> PathBuf {
+	match fs.canonicalize(&path).await {
 		Ok(canonical) if pi_vfs::url_scheme(&canonical) == pi_vfs::url_scheme(&path) => canonical,
 		_ => path,
 	}
@@ -41,17 +39,17 @@ pub fn canonical(fs: &BlockingFs, path: PathBuf) -> PathBuf {
 /// [`WalkError::Root`] when the working directory cannot be read, `path`
 /// does not exist, or it is not a directory
 /// ([`io::ErrorKind::NotADirectory`]).
-pub fn resolve_dir(fs: &BlockingFs, path: &Path) -> Result<PathBuf, WalkError> {
+pub async fn resolve_dir(fs: &pi_vfs::Fs, path: &Path) -> Result<PathBuf, WalkError> {
 	let root_error = |error| WalkError::Root { path: path.to_path_buf(), error };
 	let root = absolute(path).map_err(root_error)?;
-	let metadata = fs.metadata(&root).map_err(root_error)?;
+	let metadata = fs.metadata(&root).await.map_err(root_error)?;
 	if !metadata.is_dir() {
 		return Err(root_error(io::Error::new(
 			io::ErrorKind::NotADirectory,
 			"search path must be a directory",
 		)));
 	}
-	Ok(canonical(fs, root))
+	Ok(canonical(fs, root).await)
 }
 
 #[cfg(test)]
@@ -61,16 +59,16 @@ mod tests {
 	/// Host roots resolve through symlinks; files and missing paths are
 	/// typed root errors.
 	#[cfg(unix)]
-	#[test]
-	fn resolve_dir_canonicalizes_and_rejects_non_directories() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn resolve_dir_canonicalizes_and_rejects_non_directories() {
 		let root = std::env::temp_dir().join(format!("pi-walker-root-{}", std::process::id()));
 		std::fs::create_dir_all(root.join("real")).unwrap();
 		std::fs::write(root.join("file.txt"), "x").unwrap();
 		std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
-		let fs = BlockingFs::native();
-		let linked = resolve_dir(&fs, &root.join("link"));
-		let file = resolve_dir(&fs, &root.join("file.txt"));
-		let missing = resolve_dir(&fs, &root.join("missing"));
+		let fs = pi_vfs::Fs::native();
+		let linked = resolve_dir(&fs, &root.join("link")).await;
+		let file = resolve_dir(&fs, &root.join("file.txt")).await;
+		let missing = resolve_dir(&fs, &root.join("missing")).await;
 		let real = std::fs::canonicalize(root.join("real")).unwrap();
 		let _ = std::fs::remove_dir_all(&root);
 		assert_eq!(linked.unwrap(), real);

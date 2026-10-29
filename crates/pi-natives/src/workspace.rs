@@ -196,74 +196,79 @@ fn probe_agents_md_at_walk_limit(
 	}
 }
 
-fn run_list_workspace(
+async fn run_list_workspace(
+	fs: &pi_vfs::Fs,
 	config: WorkspaceConfig,
-	ct: task::CancelToken,
 ) -> Result<ListWorkspaceResult> {
 	let mut results = WorkspaceResults::default();
 	let mut unreadable_directories = Vec::new();
 	let mut fatal = None;
-	pi_walker::walk::tree(
-		&pi_walker::Fs::native(),
+	let mut tree = pi_walker::walk::Tree::new(
+		&pi_walker::Fs::new(fs, &config.root),
 		&config.root,
 		&workspace_tree_options(&config),
-		&ct,
-		|event| match event {
+	)
+	.await
+	.map_err(task::walk_failure)?;
+	while let Some(event) = tree.next().await {
+		let prune = match event {
 			pi_walker::walk::Event::Entry(entry) => {
 				let relative = String::from_utf8_lossy(entry.path);
 				let file_type = FileType::from(entry.file_type);
 				if is_excluded_workspace_entry(&relative, file_type) {
-					return pi_walker::walk::Action::SkipDir;
-				}
-				if file_type == FileType::Dir {
-					if config.collect_agents_md && entry.depth == config.walk_max_depth {
-						probe_agents_md_at_walk_limit(entry.abs, &relative, entry.depth, &mut results);
+					true
+				} else {
+					if file_type == FileType::Dir {
+						if config.collect_agents_md && entry.depth == config.walk_max_depth {
+							probe_agents_md_at_walk_limit(entry.abs, &relative, entry.depth, &mut results);
+						}
+					} else if config.collect_agents_md
+						&& entry.name() == AGENTS_MD_FILENAME.as_bytes()
+						// AGENTS.md directory depth: root AGENTS.md is depth 0, child dir
+						// AGENTS.md is depth 1, and so on. Only depths 1..=4 are surfaced.
+						&& (AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&(entry.depth - 1))
+						&& is_file_or_file_symlink(entry.abs, file_type)
+					{
+						results.insert_agents_md(relative.clone().into_owned());
 					}
-				} else if config.collect_agents_md
-					&& entry.name() == AGENTS_MD_FILENAME.as_bytes()
-					// AGENTS.md directory depth: root AGENTS.md is depth 0, child dir
-					// AGENTS.md is depth 1, and so on. Only depths 1..=4 are surfaced.
-					&& (AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&(entry.depth - 1))
-					&& is_file_or_file_symlink(entry.abs, file_type)
-				{
-					results.insert_agents_md(relative.clone().into_owned());
+					if entry.depth <= config.max_depth {
+						results.insert_entry(GlobMatch {
+							path: relative.into_owned(),
+							file_type,
+							mtime: entry.mtime.map(GlobMatch::millis),
+							size: entry.size.map(|size| size as f64),
+						});
+					}
+					false
 				}
-				if entry.depth <= config.max_depth {
-					results.insert_entry(GlobMatch {
-						path: relative.into_owned(),
-						file_type,
-						mtime: entry.mtime.map(GlobMatch::millis),
-						size: entry.size.map(|size| size as f64),
-					});
-				}
-				pi_walker::walk::Action::Continue
 			},
 			pi_walker::walk::Event::Error(error) => {
-				if !config.report_directory_errors {
-					return pi_walker::walk::Action::Skip;
+				if config.report_directory_errors {
+					let relative = error
+						.path
+						.strip_prefix(&config.root)
+						.map_or_else(|_| error.path.to_string_lossy(), Path::to_string_lossy)
+						.replace('\\', "/");
+					if relative.is_empty() {
+						fatal = Some(Error::from_reason(format!(
+							"Native directory scan failed for {}: {}",
+							error.path.display(),
+							error.error
+						)));
+						break;
+					}
+					unreadable_directories.push(WorkspaceDirectoryError {
+						path:    relative,
+						message: error.error.to_string(),
+					});
 				}
-				let relative = error
-					.path
-					.strip_prefix(&config.root)
-					.map_or_else(|_| error.path.to_string_lossy(), Path::to_string_lossy)
-					.replace('\\', "/");
-				if relative.is_empty() {
-					fatal = Some(Error::from_reason(format!(
-						"Native directory scan failed for {}: {}",
-						error.path.display(),
-						error.error
-					)));
-					return pi_walker::walk::Action::Stop;
-				}
-				unreadable_directories.push(WorkspaceDirectoryError {
-					path:    relative,
-					message: error.error.to_string(),
-				});
-				pi_walker::walk::Action::Skip
+				false
 			},
-		},
-	)
-	.map_err(|err| ct.walk_failure(err))?;
+		};
+		if prune {
+			tree.skip_dir();
+		}
+	}
 	if let Some(err) = fatal {
 		return Err(err);
 	}
@@ -282,7 +287,10 @@ fn run_list_workspace(
 /// traversed directory directly when `collectAgentsMd` is enabled, but ignored
 /// directories are still pruned by the walk and are not searched.
 #[napi(js_name = "listWorkspace")]
-pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWorkspaceResult> {
+pub fn list_workspace<'env>(
+	env: &'env Env,
+	options: ListWorkspaceOptions<'_>,
+) -> Result<PromiseRaw<'env, ListWorkspaceResult>> {
 	let ListWorkspaceOptions {
 		path,
 		max_depth,
@@ -295,7 +303,7 @@ pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWo
 	} = options;
 
 	let ct = task::CancelToken::new(timeout_ms, signal);
-	task::blocking("listWorkspace", ct, move |ct| {
+	task::filesystem_future(env, "listWorkspace", ct, pi_vfs::Fs::native(), move |fs| async move {
 		let max_depth = max_depth as usize;
 		let collect_agents_md = collect_agents_md.unwrap_or(false);
 		let report_directory_errors = report_directory_errors.unwrap_or(false);
@@ -309,20 +317,19 @@ pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWo
 		} else {
 			max_depth
 		};
-		let root = pi_walker::fs::resolve_dir(&pi_vfs::BlockingFs::native(), Path::new(&path))
-			.map_err(|err| ct.walk_failure(err))?;
-		run_list_workspace(
-			WorkspaceConfig {
-				root,
-				max_depth,
-				walk_max_depth,
-				include_hidden: hidden.unwrap_or(false),
-				use_gitignore: gitignore.unwrap_or(true),
-				collect_agents_md,
-				report_directory_errors,
-			},
-			ct,
-		)
+		let root = pi_walker::fs::resolve_dir(&fs, Path::new(&path))
+			.await
+			.map_err(task::walk_failure)?;
+		run_list_workspace(&fs, WorkspaceConfig {
+			root,
+			max_depth,
+			walk_max_depth,
+			include_hidden: hidden.unwrap_or(false),
+			use_gitignore: gitignore.unwrap_or(true),
+			collect_agents_md,
+			report_directory_errors,
+		})
+		.await
 	})
 }
 

@@ -9,10 +9,10 @@
 //! Traversal defaults match `scour`: hidden entries skipped, ignore files
 //! honoured, `.git` and `node_modules` pruned.
 
-use std::{path::PathBuf, time::Instant};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use pi_walker::{
-	Fs, Never,
+	Fs,
 	glob::{self, GlobOptions},
 	grep::{self, Engine, GrepOptions},
 	walk,
@@ -64,18 +64,17 @@ fn parse(mut args: impl Iterator<Item = String>) -> Args {
 
 /// Runs `run` once to warm up, then `RUNS` times, and prints the timings
 /// with the warm-up's summary.
-fn bench(summary: &str, mut run: impl FnMut()) {
+async fn bench(summary: &str, run: impl AsyncFn()) {
 	let runs: usize = std::env::var("RUNS")
 		.ok()
 		.and_then(|v| v.parse().ok())
 		.unwrap_or(10);
-	let mut times: Vec<f64> = (0..runs.max(1))
-		.map(|_| {
-			let start = Instant::now();
-			run();
-			start.elapsed().as_secs_f64() * 1e3
-		})
-		.collect();
+	let mut times = Vec::with_capacity(runs.max(1));
+	for _ in 0..runs.max(1) {
+		let start = Instant::now();
+		run().await;
+		times.push(start.elapsed().as_secs_f64() * 1e3);
+	}
 	times.sort_by(f64::total_cmp);
 	println!(
 		"median={:.3}ms min={:.3}ms runs={} {summary}",
@@ -85,7 +84,8 @@ fn bench(summary: &str, mut run: impl FnMut()) {
 	);
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
 	let mut args = std::env::args().skip(1);
 	let mode = args.next().expect("grep or glob");
 	let args = parse(args);
@@ -97,23 +97,29 @@ fn main() {
 			} else {
 				args.pattern.clone()
 			};
-			let engine = Engine::compile(&pattern, args.ignore_case, false).expect("pattern");
+			let engine =
+				Arc::new(Engine::compile(&pattern, args.ignore_case, false).expect("pattern"));
 			let opts = GrepOptions {
 				max_count: args.max,
 				walk: args.walk.clone(),
-				..GrepOptions::new(&engine)
+				..GrepOptions::new(engine)
 			};
-			let run = || grep::grep(&fs, &args.root, &opts, &Never).expect("grep");
-			let first = run();
+			let run = async || {
+				grep::grep(&fs, &args.root, opts.clone())
+					.await
+					.expect("grep")
+			};
+			let first = run().await;
 			let summary = format!(
 				"matches={} files_with_matches={} files_searched={}",
 				first.matches.len(),
 				first.files_with_matches,
 				first.files_searched
 			);
-			bench(&summary, || {
-				run();
-			});
+			bench(&summary, async || {
+				run().await;
+			})
+			.await;
 		},
 		"glob" => {
 			let opts = GlobOptions {
@@ -124,11 +130,12 @@ fn main() {
 				walk: args.walk.clone(),
 				..GlobOptions::default()
 			};
-			let run = || glob::glob(&fs, &args.root, &opts, &Never).expect("glob");
-			let summary = format!("matches={}", run().len());
-			bench(&summary, || {
-				run();
-			});
+			let run = async || glob::glob(&fs, &args.root, &opts).await.expect("glob");
+			let summary = format!("matches={}", run().await.len());
+			bench(&summary, async || {
+				run().await;
+			})
+			.await;
 		},
 		other => panic!("unknown mode {other}"),
 	}

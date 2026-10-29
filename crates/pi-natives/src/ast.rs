@@ -12,7 +12,7 @@ use pi_ast::{
 	ops,
 	search::{self, MatchStrictness},
 };
-use pi_vfs::BlockingFs;
+use pi_vfs::Fs;
 use pi_walker::{glob::Selector, walk::WalkError};
 
 use crate::{shell::vfs::ShellFilesystem, task};
@@ -278,8 +278,11 @@ fn to_u32(value: usize) -> u32 {
 /// the token words them.
 fn failure(ct: &task::CancelToken, err: search::Error) -> Error {
 	match err {
-		search::Error::Stopped => ct.walk_failure(WalkError::Stopped),
-		search::Error::Root { path, error } => ct.walk_failure(WalkError::Root { path, error }),
+		search::Error::Stopped => ct
+			.heartbeat()
+			.err()
+			.unwrap_or_else(|| Error::from_reason("search stopped")),
+		search::Error::Root { path, error } => task::walk_failure(WalkError::Root { path, error }),
 		search::Error::Invalid(reason) => Error::from_reason(reason),
 	}
 }
@@ -306,8 +309,8 @@ fn explicit_lang(lang: Option<&str>) -> Option<&str> {
 /// Candidate files for `path` (default `.`) scoped by `glob`, with the
 /// natives' discovery rules: hidden files included, ignore files honoured,
 /// `node_modules` entered only when the glob names it.
-fn discover(
-	fs: &BlockingFs,
+async fn discover(
+	fs: &Fs,
 	path: Option<String>,
 	glob: Option<&str>,
 	lang: Option<&str>,
@@ -323,16 +326,18 @@ fn discover(
 		.transpose()
 		.map_err(|err| Error::from_reason(format!("Invalid glob pattern: {err}")))?;
 	let opts = search::Discover {
-		include: include.as_ref(),
-		hidden: true,
-		gitignore: true,
 		node_modules: include
 			.as_ref()
 			.is_some_and(Selector::mentions_node_modules),
+		include,
+		hidden: true,
+		gitignore: true,
 		any_file: lang.is_some(),
 		..Default::default()
 	};
-	search::discover(fs, &root, &opts, ct).map_err(|err| failure(ct, err))
+	search::discover(fs, &root, &opts)
+		.await
+		.map_err(|err| failure(ct, err))
 }
 
 fn normalize_pattern_list(patterns: Option<Vec<String>>) -> Result<Vec<String>> {
@@ -460,23 +465,25 @@ pub fn ast_grep<'env>(
 		filesystem,
 	} = options;
 
-	let fs = ShellFilesystem::blocking(filesystem);
+	let fs = ShellFilesystem::resolve(filesystem);
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	let page = page(offset, limit);
 
-	task::filesystem(env, "ast_grep", ct, fs, move |fs, ct| {
+	let cancel = ct.clone();
+	task::filesystem_future(env, "ast_grep", ct, fs, move |fs| async move {
 		let patterns = normalize_pattern_list(patterns)?;
-		let lang = explicit_lang(lang.as_deref());
-		let candidates = discover(&fs, path, glob.as_deref(), lang, &ct)?;
+		let candidates =
+			discover(&fs, path, glob.as_deref(), explicit_lang(lang.as_deref()), &cancel).await?;
 		let query = search::Query {
-			patterns: &patterns,
-			lang,
-			selector: selector.as_deref(),
+			patterns:   &patterns,
+			lang:       explicit_lang(lang.as_deref()),
+			selector:   selector.as_deref(),
 			strictness: resolve_strictness(strictness),
-			captures: include_meta.unwrap_or(false),
+			captures:   include_meta.unwrap_or(false),
 		};
-		let found =
-			search::find_page(&fs, candidates, &query, page, &ct).map_err(|err| failure(&ct, err))?;
+		let found = search::find_page(&fs, candidates, &query, page)
+			.await
+			.map_err(|err| failure(&cancel, err))?;
 		let missing_grammars = missing_grammars(&found.report);
 		Ok(AstFindResult {
 			matches: found
@@ -533,7 +540,8 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 			strictness: resolve_strictness(strictness),
 			captures:   include_meta.unwrap_or(false),
 		};
-		let found = search::find_source(&source, language, &query, page, &ct)
+		let stop = ct.cancellation();
+		let found = search::find_source(&source, language, &query, page, stop.token())
 			.map_err(|err| failure(&ct, err))?;
 		Ok(AstMatchResult {
 			matches:       found
@@ -571,13 +579,15 @@ pub fn ast_edit<'env>(
 		filesystem,
 	} = options;
 
-	let fs = ShellFilesystem::blocking(filesystem);
+	let fs = ShellFilesystem::resolve(filesystem);
 	let ct = task::CancelToken::new(timeout_ms, signal);
-	task::filesystem(env, "ast_edit", ct, fs, move |fs, ct| {
+	let cancel = ct.clone();
+	task::filesystem_future(env, "ast_edit", ct, fs, move |fs| async move {
 		let rules = normalize_rewrite_map(rewrites)?;
 		let dry_run = dry_run.unwrap_or(true);
+		let candidates =
+			discover(&fs, path, glob.as_deref(), explicit_lang(lang.as_deref()), &cancel).await?;
 		let lang = explicit_lang(lang.as_deref());
-		let candidates = discover(&fs, path, glob.as_deref(), lang, &ct)?;
 		if let Some(lang) = lang {
 			ops::resolve_supported_lang(lang).map_err(|err| Error::from_reason(err.to_string()))?;
 		} else if candidates.is_empty() {
@@ -601,8 +611,9 @@ pub fn ast_edit<'env>(
 				search::Mode::Write
 			},
 		};
-		let edited =
-			search::rewrite(&fs, candidates, &rewrite, &ct).map_err(|err| failure(&ct, err))?;
+		let edited = search::rewrite(&fs, candidates, &rewrite)
+			.await
+			.map_err(|err| failure(&cancel, err))?;
 		let missing_grammars = missing_grammars(&edited.report);
 		let mut changes = Vec::new();
 		let mut file_changes = Vec::with_capacity(edited.files.len());

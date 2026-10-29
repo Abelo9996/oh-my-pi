@@ -133,7 +133,7 @@ impl Cache {
 	/// The cached listing of the directory at `abs` if it is still current,
 	/// revalidating its ignore sources when `with_ignores` is set. `scratch`
 	/// is per-worker path scratch.
-	pub(crate) fn lookup(
+	pub(crate) async fn lookup(
 		&self,
 		session: &mut Session,
 		abs: &Path,
@@ -149,7 +149,7 @@ impl Cache {
 		};
 		// A directory reached through a followed link is stored under the
 		// link's path with the target's stamp.
-		match session.stat(abs, true) {
+		match session.stat(abs, true).await {
 			Ok(info) if info.stamp == dir.stamp => {},
 			_ => {
 				self.drop_key(key);
@@ -173,7 +173,10 @@ impl Cache {
 				// SAFETY: `scratch` joins an encoded path, an ASCII separator,
 				// and an ASCII name, which is valid encoded `OsStr` data.
 				let path = Path::new(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(scratch) });
-				let stamp = session.stat(path, true).map_or_default(|info| info.stamp);
+				let stamp = session
+					.stat(path, true)
+					.await
+					.map_or_default(|info| info.stamp);
 				if stamp != ignores.stamps[index] {
 					return None;
 				}

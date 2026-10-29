@@ -18,7 +18,6 @@ Terminology follows `docs/natives-architecture.md`:
 - `crates/pi-walker/src/lib.rs`
 - `crates/pi-walker/src/walk/mod.rs`
 - `crates/pi-walker/src/walk/cache.rs`
-- `crates/pi-walker/src/exec.rs`
 - `crates/pi-walker/src/glob.rs`
 - `crates/pi-walker/src/grep/mod.rs`
 - `crates/pi-natives/src/ast.rs`
@@ -63,7 +62,7 @@ Terminology follows `docs/natives-architecture.md`:
 
 1. Callers invoke generated native exports directly; there is no package-local TS wrapper that renames `search` to `searchContent`.
 2. Rust option structs in `grep.rs` deserialize camelCase fields including `ignoreCase`, `maxCount`, `maxCountPerFile`, `contextBefore`, `contextAfter`, `maxColumns`, and `timeoutMs`.
-3. `grep` creates `CancelToken` from `timeoutMs` + `AbortSignal` and runs inside `task::blocking("grep", ...)`. The pattern compiles once with `pi_walker::grep::Engine::compile`, and the search runs in `pi_walker::grep::grep`. Filesystem grep does not expose or use the shared listing cache. `filesystem?: ShellFilesystem` supplies host-injected stat/walk/read operations, including absolute `scheme://` paths.
+3. `grep` creates `CancelToken` from `timeoutMs` + `AbortSignal` and runs inside `task::filesystem_future(...)`, an async task on Tokio. The pattern compiles once with `pi_walker::grep::Engine::compile`, and the search runs in `pi_walker::grep::grep`. Filesystem grep does not expose or use the shared listing cache. `filesystem?: ShellFilesystem` supplies host-injected stat/walk/read operations, including absolute `scheme://` paths.
 4. `search` and `hasMatch` operate on provided string/`Uint8Array` content and do not scan the filesystem.
 
 ### Execution branches
@@ -73,7 +72,7 @@ Terminology follows `docs/natives-architecture.md`:
    - `hasMatch` compiles/checks pattern against provided content and returns a boolean.
    - No filesystem scan or listing cache.
 - **Single-file branch**
-   - `grep` resolves the path through the selected filesystem, checks metadata, and searches a file directly. Oversized files are searched over their leading 4 MiB.
+   - `grep` resolves the path through the selected filesystem, checks metadata, and searches a file directly. Oversized files are searched over their leading 4 MiB in a second pass; native oversized file roots are streamed through grep-searcher's reader inline, provider files are read async.
 - **Directory branch**
    - `pi_walker::grep::grep` walks with `walk::Options::cache` left `false`: directory searches never read or populate the shared listing cache.
    - The glob compiles to a `pi_walker::glob::Selector::scope` (files it matches plus every file under a directory it matches) that also prunes the walk; `exclude` patterns compile to `Selector::exclude`.
@@ -92,8 +91,8 @@ Terminology follows `docs/natives-architecture.md`:
    - `filesWithMatches` emits one path-only entry per matched file (`lineNumber=0`, `line=""`, `matchCount` omitted).
    - `offset` and `maxCount` are applied during aggregation across sorted file results; `maxCountPerFile` can additionally prevent one hot file consuming the content-mode budget.
    - Directory execution model (`pi_walker::grep::grep`):
-      - Without a match budget, files are read and scanned inside one parallel `walk::walk`; per-file results are put in path order afterwards.
-      - With a match budget (`maxCount`), a path-ordered `walk::tree` (`Order::Paths`) streams candidates into `pi_walker::exec::streamed`, which searches them in parallel, consumes results strictly in walk order, and stops the walk and the search once the budget is settled. Path-ordered first pages are deterministic.
+      - Without a match budget, each walker worker lists a directory and scans its selected files itself, reusing its filesystem session, scanner, and read buffer. Files open relative to the live directory handle, or by absolute path for cached listings. Only completed search results cross the bounded output channel; there is no second search pool or candidate handoff. Per-file results are put in path order afterwards.
+      - With a match budget (`maxCount`), a `walk::Tree` (`Order::Paths`, a serial async cursor) feeds `exec::ordered`: a fixed pool with worker-local sessions and scanners. Candidates are grouped in batches of up to 16 and at most `parallelism*16` candidates are in flight. Results are consumed strictly in path order; settling the budget drops the stream and stops the producer and workers. Path-ordered first pages are deterministic.
       - `maxCountPerFile` (content mode) caps matches collected per file so one hot file cannot exhaust the global `maxCount` budget before other files are reached.
       - Files over 4 MiB are ordered after all other files and searched over their first 4 MiB only.
       - `offset` and `maxCount` are applied while aggregating per-file results. The positional `onMatch(error, match)` callback is emitted after directory aggregation; the direct-file branch returns its matches without that callback.
@@ -102,7 +101,7 @@ Terminology follows `docs/natives-architecture.md`:
 
 `GrepOptions.onMatches(matches)` is a separate streaming API with no error-first argument. It delivers batches of at most 1024 entries while scanning, with no file-order guarantee. It supports content, count, and files-with-matches output. It cannot be combined with `maxCount` or a nonzero `offset`; `maxCountPerFile` remains available.
 
-The native bridge bounds in-flight delivery to eight batches and checks cancellation every 10ms while waiting for JS consumption. Successful completion waits for every callback, returns counters with `matches: []`, and does not call the positional `onMatch`. A callback throw rejects with that error. Cancellation interrupts delivery/acknowledgement waits, but callbacks already queued on JS may still run.
+Batches flow through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>` (each batch comes from one file) to a forwarder that awaits each JS call (`call_async_catch`) and coalesces queued batches up to 1024 matches; the channel holds 4 batches, so backpressure reaches the scan end to end. Successful completion waits for every callback, returns counters with `matches: []`, and does not call the positional `onMatch`. A callback throw rejects with that error. Cancellation drops the search future, but callbacks already queued on JS may still run.
 
 ### Result shaping back to JS
 
@@ -159,7 +158,7 @@ The native bridge bounds in-flight delivery to eight batches and checks cancella
 
 - Invalid glob pattern returns an error from selector compilation (`pi_walker::glob::GlobError::Pattern`).
 - Search root must resolve to an existing directory for directory discovery flows.
-- Cancellation/timeouts propagate as abort errors: pi-walker polls a `Stop` closure backed by the `CancelToken` in walker and result-processing loops.
+- Cancellation/timeouts propagate as abort errors: `task::filesystem_future` drops the pi-walker future on abort/timeout, and a drop guard sets the halt flag that cancels its spawned tasks. `walk::Tree` spends tokio's coop budget per entry so raced traversals cancel too.
 
 ### Malformed glob handling
 
@@ -173,6 +172,7 @@ The native bridge bounds in-flight delivery to eight batches and checks cancella
 
 `ast.rs` exposes syntax-aware code search and rewrite operations.
 
+- `astGrep`/`astEdit` run under `task::filesystem_future` with the resolved `pi_vfs::Fs`; `pi-ast`'s `discover`, `find`, `find_page`, and `rewrite` are async, with per-file work in `tokio::spawn` tasks kept in candidate order. `astMatch` uses the sync `find_source` on `task::blocking` with a `CancellationToken`.
 - `astGrep(options)` returns matches with byte/line/column coordinates and optional metavariable bindings.
 - `astMatch(options)` runs the same patterns against an in-memory `source` string instead of files; `lang` is required (there is no path to infer it from), and the result keeps matches, `totalMatches`, `limitReached`, and parse errors but omits the file-count fields.
 - `astEdit(options)` returns replacement changes, per-file counts, searched/touched file counts, parse errors, and whether edits were applied.
@@ -184,11 +184,11 @@ These exports are direct native APIs used by tooling; they are not mediated by a
 
 ## 4) Shared walk/cache lifecycle (`pi-walker`)
 
-`pi-walker` owns traversal, native/provider root resolution (`pi_walker::fs`), and cache policy. The N-API modules keep only JavaScript-facing DTO conversion and error mapping (`glob.rs` holds `FileType`/`GlobMatch`; `task::CancelToken::walk_failure` maps walk errors).
+`pi-walker` owns traversal, native/provider root resolution (`pi_walker::fs`), and cache policy. The N-API modules keep only JavaScript-facing DTO conversion and error mapping (`glob.rs` holds `FileType`/`GlobMatch`; `task::walk_failure` maps walk errors).
 
 The cache is process-wide and stores per-directory listings, not per-root entry lists: every walk that enables caching shares them regardless of root or traversal options, and the walker re-applies hidden/ignore policy, pruning, and filters on each walk. Only native-filesystem walks with `Detail::Minimal` and `walk::Options::cache = true` participate, and only on filesystems with stable stamps (APFS; ext4/XFS/Btrfs/tmpfs/F2FS/ZFS/bcachefs; NTFS/ReFS). Any injected filesystem provider disables caching, even if its root redirects to a host path.
 
-Walk parallelism: `walk::walk`/`walk::collect` use worker threads (worker 0 is the calling thread). `PI_WALK_WORKERS` set to a positive `N` uses `N` workers; unset or `0` uses the per-filesystem default (4 on macOS, 8 on Linux, 4 elsewhere and for providers), capped by available parallelism.
+Walk parallelism: pi-walker has no runtime of its own. Each walk starts `walk::Options::parallelism` long-lived workers on the current tokio runtime. Workers share a directory queue and retain their own sessions and buffers; no task is spawned per directory or file. `PI_WALK_WORKERS` set to a positive `N` uses `N` workers; unset or `0` uses the per-filesystem default (4 on macOS, 8 on Linux, 4 elsewhere and for providers), capped by available parallelism.
 
 ### Cache state transitions
 
@@ -281,6 +281,6 @@ The palette requires nine core semantic colors (`comment`, `keyword`, `function`
 1. Caller invokes generated native export with typed options.
 2. Rust validates/normalizes options and builds matcher/search config.
 3. For filesystem flows, `pi-walker` walks the tree (reusing unchanged directory listings where caching applies), then entries are filtered/scored/searched.
-4. pi-walker workers poll a `Stop` closure backed by the cancel token; timeout/abort can terminate execution.
+4. Timeout/abort drops the pi-walker future, cancelling its tasks.
 5. Rust shapes outputs into N-API objects (`lineNumber`, `matchCount`, `limitReached`, etc.).
 6. Generated bindings return typed JS objects. `glob` emits returned matches after ordering; `grep` supports post-aggregation positional directory callbacks or batched `onMatches` delivery during scanning.

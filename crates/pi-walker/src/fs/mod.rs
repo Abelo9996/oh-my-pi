@@ -2,7 +2,7 @@
 //! file contents, and change stamps.
 //!
 //! [`Fs::Native`] is the host filesystem with per-platform fast paths
-//! (`native/`); [`Fs::Provider`] adapts a [`BlockingFs`] provider
+//! (`native/`); [`Fs::Provider`] adapts a [`pi_vfs::Fs`] provider
 //! (`provider.rs`), such as an in-memory tree or a `scheme://` URL namespace.
 //! Walkers, ignore loading, the listing cache, and the searches only ever talk
 //! to an [`Fs`], so no tool bypasses the layer with its own I/O.
@@ -12,13 +12,13 @@
 //! worker. Directories are opened once ([`Session::open_dir`], then
 //! [`Session::open_child`] relative to the parent) and files are opened once
 //! ([`Session::open_file_at`], which also stats them) and then read into a
-//! reusable buffer ([`File::read_into`]) or streamed ([`std::io::Read`]).
+//! reusable buffer ([`File::read_into`]) or streamed ([`File::read`]).
 //!
 //! ```ignore
 //! let fs = Fs::native();
 //! let mut s = fs.session();
-//! let dir = s.open_dir(Path::new("/repo"))?;
-//! let listing = s.list(&dir, Detail::Minimal, 0)?;
+//! let dir = s.open_dir(Path::new("/repo")).await?;
+//! let listing = s.list(&dir, Detail::Minimal, 0).await?;
 //! for record in listing.records() {
 //!     println!("{:?} {:?}", listing.name(record), record.file_type);
 //! }
@@ -37,7 +37,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use pi_vfs::BlockingFs;
 pub use root::{absolute, canonical, resolve_dir};
 
 /// Kind of a listed entry. Special files (devices, FIFOs, sockets) are never
@@ -217,8 +216,8 @@ pub enum Fs {
 	/// The host filesystem through direct syscalls.
 	Native,
 	/// A provider (or any facade path that is not plain host storage), read
-	/// through its [`BlockingFs`] methods.
-	Provider(BlockingFs),
+	/// through its [`pi_vfs::Fs`] methods.
+	Provider(pi_vfs::Fs),
 }
 
 impl Fs {
@@ -230,7 +229,7 @@ impl Fs {
 	/// The layer that serves `root` and everything below it on `fs`:
 	/// [`Self::Native`] when `fs.is_native_local(root)`, else
 	/// [`Self::Provider`].
-	pub fn new(fs: &BlockingFs, root: &Path) -> Self {
+	pub fn new(fs: &pi_vfs::Fs, root: &Path) -> Self {
 		if fs.is_native_local(root) {
 			Self::Native
 		} else {
@@ -322,12 +321,12 @@ enum DirRepr {
 }
 
 /// An open regular file, read with [`File::read_into`] or streamed through
-/// [`std::io::Read`]. Closed on drop.
+/// [`File::read`]. Closed on drop.
 #[derive(Debug)]
 pub struct File {
 	repr: FileRepr,
 	size: u64,
-	/// Stream position of [`io::Read`].
+	/// Stream position of [`File::read`].
 	pos:  u64,
 }
 
@@ -348,26 +347,79 @@ impl File {
 	/// that returns exactly the remaining size is taken as end of file (no
 	/// confirming zero-length read); files reporting size 0 (pseudo files)
 	/// and short reads keep reading until end of file or `limit`.
-	pub fn read_into(&mut self, buf: &mut Vec<u8>, limit: u64) -> io::Result<()> {
+	pub async fn read_into(&mut self, buf: &mut Vec<u8>, limit: u64) -> io::Result<()> {
 		match &mut self.repr {
 			FileRepr::Native(handle) => {
-				read_into(buf, self.size, limit, |buf, end| native::read_append(handle, buf, end))
+				fill(buf, self.size, limit, |buf, end| native::read_append(handle, buf, end))
 			},
 			FileRepr::Provider(file) => {
 				if self.pos != 0 {
-					io::Seek::seek(file, io::SeekFrom::Start(0))?;
+					file.seek_async(io::SeekFrom::Start(0)).await?;
 					self.pos = 0;
 				}
-				let result = read_into(buf, self.size, limit, |buf, end| {
+				let window = Fill::new(buf, self.size, limit);
+				while let Some(end) = window.next(buf) {
 					let len = buf.len();
 					buf.resize(end, 0);
-					let read = io::Read::read(file, &mut buf[len..]);
+					let read = file.read_async(&mut buf[len..]).await;
 					buf.truncate(len + *read.as_ref().unwrap_or(&0));
-					read
-				});
+					if !Fill::more(read)? {
+						break;
+					}
+				}
 				self.pos = buf.len() as u64;
-				result
+				Ok(())
 			},
+		}
+	}
+}
+
+/// The read loop of [`File::read_into`], shared by its sync (native) and
+/// async (provider) arms.
+struct Fill {
+	bound: usize,
+}
+
+impl Fill {
+	/// Clears `buf` and reserves for up to `limit` bytes of a file whose size
+	/// at open time was `size` (0: empty or a pseudo file, read to end of
+	/// file).
+	fn new(buf: &mut Vec<u8>, size: u64, limit: u64) -> Self {
+		buf.clear();
+		let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+		let bound = if size > 0 {
+			usize::try_from(size).unwrap_or(usize::MAX).min(limit)
+		} else {
+			limit
+		};
+		buf.reserve(if size > 0 { bound } else { bound.min(4096) });
+		Self { bound }
+	}
+
+	/// End of the next read window (growing `buf`), `None` once full.
+	fn next(&self, buf: &mut Vec<u8>) -> Option<usize> {
+		if buf.len() >= self.bound {
+			return None;
+		}
+		if buf.len() == buf.capacity() {
+			let grown = buf
+				.capacity()
+				.saturating_mul(2)
+				.saturating_add(4096)
+				.min(self.bound);
+			buf.reserve(grown - buf.len());
+		}
+		Some(buf.capacity().min(self.bound))
+	}
+
+	/// Whether to keep reading after a read returned `read` (0 is end of
+	/// file; interrupted reads retry).
+	fn more(read: io::Result<usize>) -> io::Result<bool> {
+		match read {
+			Ok(0) => Ok(false),
+			Ok(_) => Ok(true),
+			Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(true),
+			Err(err) => Err(err),
 		}
 	}
 }
@@ -376,49 +428,56 @@ impl File {
 /// `size` reported at open time; see [`File::read_into`]. `read(buf, end)`
 /// appends at most `end - buf.len()` bytes and returns the count (0 at end of
 /// file).
-fn read_into(
+fn fill(
 	buf: &mut Vec<u8>,
 	size: u64,
 	limit: u64,
 	mut read: impl FnMut(&mut Vec<u8>, usize) -> io::Result<usize>,
 ) -> io::Result<()> {
-	buf.clear();
-	let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-	// Size 0: empty, or a pseudo file of unknown size, read until end of file.
-	let bound = if size > 0 {
-		usize::try_from(size).unwrap_or(usize::MAX).min(limit)
-	} else {
-		limit
-	};
-	buf.reserve(if size > 0 { bound } else { bound.min(4096) });
-	while buf.len() < bound {
-		if buf.len() == buf.capacity() {
-			let grown = buf
-				.capacity()
-				.saturating_mul(2)
-				.saturating_add(4096)
-				.min(bound);
-			buf.reserve(grown - buf.len());
-		}
-		let end = buf.capacity().min(bound);
-		match read(buf, end) {
-			Ok(0) => break,
-			Ok(_) => {},
-			Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
-			Err(err) => return Err(err),
+	let window = Fill::new(buf, size, limit);
+	while let Some(end) = window.next(buf) {
+		if !Fill::more(read(buf, end))? {
+			break;
 		}
 	}
 	Ok(())
 }
 
-impl io::Read for File {
+/// Sequential reads of a native [`File`], executed inline (see
+/// [`File::native_reader`]).
+pub struct NativeReader<'a> {
+	handle: &'a native::Handle,
+	pos:    &'a mut u64,
+}
+
+impl io::Read for NativeReader<'_> {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		let n = native::read_at(self.handle, buf, *self.pos)?;
+		*self.pos += n as u64;
+		Ok(n)
+	}
+}
+
+impl File {
+	/// Reads the next bytes of the file into `buf`, returning the count (0 at
+	/// end of file).
+	pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		let n = match &mut self.repr {
 			FileRepr::Native(handle) => native::read_at(handle, buf, self.pos)?,
-			FileRepr::Provider(file) => io::Read::read(file, buf)?,
+			FileRepr::Provider(file) => file.read_async(buf).await?,
 		};
 		self.pos += n as u64;
 		Ok(n)
+	}
+
+	/// A synchronous reader continuing at the stream position, for native
+	/// files (plain syscalls, like every native operation); `None` for
+	/// provider files, which are only read asynchronously.
+	pub const fn native_reader(&mut self) -> Option<NativeReader<'_>> {
+		match &self.repr {
+			FileRepr::Native(handle) => Some(NativeReader { handle, pos: &mut self.pos }),
+			FileRepr::Provider(_) => None,
+		}
 	}
 }
 
@@ -454,7 +513,7 @@ pub struct Session {
 
 enum Imp {
 	Native(native::Scratch),
-	Provider(BlockingFs),
+	Provider(pi_vfs::Fs),
 }
 
 /// A directory from another kind of [`Fs`] than the session's.
@@ -464,21 +523,21 @@ fn foreign_dir() -> io::Error {
 
 impl Session {
 	/// Opens the directory at an absolute path, following symlinks.
-	pub fn open_dir(&mut self, path: &Path) -> io::Result<Dir> {
+	pub async fn open_dir(&mut self, path: &Path) -> io::Result<Dir> {
 		let repr = match &mut self.imp {
 			Imp::Native(s) => DirRepr::Native(native::open_dir(s, path)?),
-			Imp::Provider(fs) => DirRepr::Provider(provider::open_dir(fs, path)?),
+			Imp::Provider(fs) => DirRepr::Provider(provider::open_dir(fs, path).await?),
 		};
 		Ok(Dir { repr })
 	}
 
 	/// Opens the subdirectory `name` of `parent` without following a symlink
 	/// that replaced it since `parent` was listed.
-	pub fn open_child(&mut self, parent: &Dir, name: &[u8]) -> io::Result<Dir> {
+	pub async fn open_child(&mut self, parent: &Dir, name: &[u8]) -> io::Result<Dir> {
 		let repr = match (&mut self.imp, &parent.repr) {
 			(Imp::Native(s), DirRepr::Native(h)) => DirRepr::Native(native::open_child(s, h, name)?),
 			(Imp::Provider(fs), DirRepr::Provider(path)) => {
-				DirRepr::Provider(provider::open_child(fs, path, name)?)
+				DirRepr::Provider(provider::open_child(fs, path, name).await?)
 			},
 			_ => return Err(foreign_dir()),
 		};
@@ -493,34 +552,34 @@ impl Session {
 	/// [`io::ErrorKind::InvalidData`]. A native handle reads from its current
 	/// position (no rewind syscall), so list each [`Dir`] once; open it again
 	/// to list it again.
-	pub fn list(&mut self, dir: &Dir, detail: Detail, children: u32) -> io::Result<&Listing> {
-		list_with(&mut self.imp, dir, detail, children, &mut self.listing)?;
+	pub async fn list(&mut self, dir: &Dir, detail: Detail, children: u32) -> io::Result<&Listing> {
+		list_with(&mut self.imp, dir, detail, children, &mut self.listing).await?;
 		Ok(&self.listing)
 	}
 
 	/// [`Self::list`] into a caller-owned listing (cleared first), so callers
 	/// can keep it while using the session again.
-	pub(crate) fn list_into(
+	pub(crate) async fn list_into(
 		&mut self,
 		dir: &Dir,
 		detail: Detail,
 		children: u32,
 		out: &mut Listing,
 	) -> io::Result<()> {
-		list_with(&mut self.imp, dir, detail, children, out)
+		list_with(&mut self.imp, dir, detail, children, out).await
 	}
 
 	/// Opens the regular file `name` (one component) in `dir`, following
 	/// symlinks, and describes it. Fails for directories and special files
 	/// (see [`is_not_regular`]); FIFOs never block the open.
-	pub fn open_file_at(&mut self, dir: &Dir, name: &[u8]) -> io::Result<(File, FileInfo)> {
+	pub async fn open_file_at(&mut self, dir: &Dir, name: &[u8]) -> io::Result<(File, FileInfo)> {
 		let (repr, info) = match (&mut self.imp, &dir.repr) {
 			(Imp::Native(s), DirRepr::Native(h)) => {
 				let (handle, info) = native::open_file_at(s, h, name)?;
 				(FileRepr::Native(handle), info)
 			},
 			(Imp::Provider(fs), DirRepr::Provider(path)) => {
-				let (file, info) = provider::open_file(fs, &provider::child(path, name))?;
+				let (file, info) = provider::open_file(fs, &provider::child(path, name)).await?;
 				(FileRepr::Provider(file), info)
 			},
 			_ => return Err(foreign_dir()),
@@ -529,14 +588,14 @@ impl Session {
 	}
 
 	/// [`Self::open_file_at`] for an absolute path.
-	pub fn open_file(&mut self, path: &Path) -> io::Result<(File, FileInfo)> {
+	pub async fn open_file(&mut self, path: &Path) -> io::Result<(File, FileInfo)> {
 		let (repr, info) = match &mut self.imp {
 			Imp::Native(s) => {
 				let (handle, info) = native::open_file(s, path)?;
 				(FileRepr::Native(handle), info)
 			},
 			Imp::Provider(fs) => {
-				let (file, info) = provider::open_file(fs, path)?;
+				let (file, info) = provider::open_file(fs, path).await?;
 				(FileRepr::Provider(file), info)
 			},
 		};
@@ -545,19 +604,19 @@ impl Session {
 
 	/// Describes the file or directory at an absolute path, following a final
 	/// symlink only when `follow` is set.
-	pub fn stat(&mut self, path: &Path, follow: bool) -> io::Result<FileInfo> {
+	pub async fn stat(&mut self, path: &Path, follow: bool) -> io::Result<FileInfo> {
 		match &mut self.imp {
 			Imp::Native(s) => native::stat(s, path, follow),
-			Imp::Provider(fs) => provider::stat(fs, path, follow),
+			Imp::Provider(fs) => provider::stat(fs, path, follow).await,
 		}
 	}
 
 	/// Stamps an open directory.
-	pub fn stat_dir(&mut self, dir: &Dir) -> io::Result<Stamp> {
+	pub async fn stat_dir(&mut self, dir: &Dir) -> io::Result<Stamp> {
 		match (&mut self.imp, &dir.repr) {
 			(Imp::Native(_), DirRepr::Native(h)) => native::stat_dir(h),
 			(Imp::Provider(fs), DirRepr::Provider(path)) => {
-				provider::stat(fs, path, true).map(|info| info.stamp)
+				provider::stat(fs, path, true).await.map(|info| info.stamp)
 			},
 			_ => Err(foreign_dir()),
 		}
@@ -566,18 +625,18 @@ impl Session {
 	/// Identity of the file or directory at an absolute path, following
 	/// symlinks. Walkers compare identities to stop symlink cycles and to
 	/// stay on one filesystem.
-	pub fn identify(&mut self, path: &Path) -> io::Result<FileId> {
+	pub async fn identify(&mut self, path: &Path) -> io::Result<FileId> {
 		match &mut self.imp {
 			Imp::Native(s) => native::identify(s, path),
-			Imp::Provider(fs) => provider::identify(fs, path),
+			Imp::Provider(fs) => provider::identify(fs, path).await,
 		}
 	}
 
 	/// Identity of an open directory.
-	pub fn identify_dir(&mut self, dir: &Dir) -> io::Result<FileId> {
+	pub async fn identify_dir(&mut self, dir: &Dir) -> io::Result<FileId> {
 		match (&mut self.imp, &dir.repr) {
 			(Imp::Native(_), DirRepr::Native(h)) => native::identify_dir(h),
-			(Imp::Provider(fs), DirRepr::Provider(path)) => provider::identify(fs, path),
+			(Imp::Provider(fs), DirRepr::Provider(path)) => provider::identify(fs, path).await,
 			_ => Err(foreign_dir()),
 		}
 	}
@@ -595,7 +654,7 @@ impl Session {
 	}
 }
 
-fn list_with(
+async fn list_with(
 	imp: &mut Imp,
 	dir: &Dir,
 	detail: Detail,
@@ -605,7 +664,7 @@ fn list_with(
 	out.clear();
 	match (imp, &dir.repr) {
 		(Imp::Native(s), DirRepr::Native(h)) => native::list(s, h, detail, children, out),
-		(Imp::Provider(fs), DirRepr::Provider(path)) => provider::list(fs, path, detail, out),
+		(Imp::Provider(fs), DirRepr::Provider(path)) => provider::list(fs, path, detail, out).await,
 		_ => Err(foreign_dir()),
 	}
 }

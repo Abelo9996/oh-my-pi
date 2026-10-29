@@ -7,12 +7,12 @@ use std::{
 	collections::HashMap,
 	ffi::OsString,
 	fmt::Write as _,
-	io::{Read, Write},
-	ops::ControlFlow,
+	io::{self, Write},
 	path::Path,
 };
 
 use clap::{ArgAction, Parser, ValueEnum};
+use futures::StreamExt;
 use pi_ast::{
 	SupportLang, ops,
 	search::{
@@ -22,8 +22,9 @@ use pi_ast::{
 };
 use pi_walker::glob::Selector;
 use similar::{ChangeTag, TextDiff};
+use tokio_util::sync::CancellationToken;
 
-use crate::host::{Host, Utility};
+use crate::host::{AsyncUtility, Host};
 
 const DOC_SITE_HOST: &str = "https://ast-grep.github.io";
 const PATTERN_GUIDE: &str = "/guide/pattern-syntax.html";
@@ -728,7 +729,7 @@ impl AstGrep {
 
 	/// Files below every operand, in operand order, displayed as ast-grep does;
 	/// walk failures are reported and skipped.
-	fn candidates(&self, host: &mut Host) -> Result<Vec<Candidate>, i32> {
+	async fn candidates(&self, host: &mut Host) -> Result<Vec<Candidate>, i32> {
 		let (include, exclude) = match glob_selectors(&self.globs) {
 			Ok(selectors) => selectors,
 			Err(error) => {
@@ -745,8 +746,8 @@ impl AstGrep {
 		};
 		let ignores = |kind| self.no_ignore.contains(&kind);
 		let options = Discover {
-			include: include.as_ref(),
-			exclude: exclude.as_ref(),
+			include,
+			exclude,
 			hidden: ignores(IgnoreFile::Hidden),
 			gitignore: !ignores(IgnoreFile::Dot) && !ignores(IgnoreFile::Vcs),
 			node_modules: true,
@@ -754,13 +755,12 @@ impl AstGrep {
 			workers: (self.threads > 0).then_some(self.threads),
 			any_file: false,
 		};
-		let fs = host.fs().clone();
-		let stop = host.cancel_stop();
+		let vfs = host.vfs();
 		let mut candidates = Vec::new();
 		for operand in &self.paths {
 			let root = host.resolve(operand);
-			let root_is_dir = fs.metadata(&root).is_ok_and(|meta| meta.is_dir());
-			match search::discover(&fs, &root, &options, &stop) {
+			let root_is_dir = vfs.metadata(&root).await.is_ok_and(|meta| meta.is_dir());
+			match search::discover(&vfs, &root, &options).await {
 				Ok(found) => candidates.extend(
 					found
 						.into_iter()
@@ -781,10 +781,10 @@ impl AstGrep {
 
 	/// Searches (and with `-r`, previews rewrites of) every file; returns
 	/// whether anything matched.
-	fn search_paths(&self, host: &mut Host, out: &mut dyn Write, printer: &mut Printer) -> Result<bool, i32> {
-		let candidates = self.candidates(host)?;
-		let fs = host.fs().clone();
-		let stop = host.cancel_stop();
+	async fn search_paths(&self, host: &mut Host, out: &mut (dyn Write + Send), printer: &mut Printer) -> Result<bool, i32> {
+		let candidates = self.candidates(host).await?;
+		let vfs = host.vfs();
+		let stop = CancellationToken::new();
 		let patterns = [self.pattern.clone()];
 		let query = Query {
 			patterns:   &patterns,
@@ -796,15 +796,20 @@ impl AstGrep {
 		let rules = self.rewrite.as_ref().map(|template| [(self.pattern.clone(), template.clone())]);
 		let rewrite = rules.as_ref().map(|rules| self.rewrite_spec(rules, Mode::Preview));
 		let mut any = false;
-		let mut failure = None;
-		let found = search::find(&fs, candidates, &query, &stop, |file| {
+		let mut finder = search::find(&vfs, candidates, &query);
+		while let Some(file) = finder.next().await {
+			let file = match file {
+				Ok(file) => file,
+				Err(SearchError::Stopped) => return Err(1),
+				Err(error) => {
+					let _ = writeln!(host.stderr, "ERROR: {error}");
+					return Ok(any);
+				},
+			};
 			let changes = match &rewrite {
 				Some(rewrite) => match search::rewrite_source(&file.source, file.language, rewrite, &stop) {
 					Ok(edit) => Some(edit.changes),
-					Err(error) => {
-						failure = Some(error);
-						return ControlFlow::Break(());
-					},
+					Err(error) => return Err(parse_pattern_error(host, error.to_string())),
 				},
 				None => None,
 			};
@@ -819,44 +824,38 @@ impl AstGrep {
 			printer.file(&mut buffer, &view);
 			any = true;
 			if out.write_all(&buffer).is_err() {
-				return ControlFlow::Break(());
+				break;
 			}
-			ControlFlow::Continue(())
-		});
-		if let Some(error) = failure {
-			return Err(parse_pattern_error(host, error.to_string()));
+			let _ = host.flush_output().await;
 		}
-		match found {
-			Ok(_) => Ok(any),
-			Err(SearchError::Stopped) => Err(1),
-			Err(error) => {
-				let _ = writeln!(host.stderr, "ERROR: {error}");
-				Ok(any)
-			},
-		}
+		Ok(any)
 	}
 
 	/// `-U` over files: rewrites every file in place and reports the count.
-	fn apply_paths(&self, host: &mut Host) -> Result<usize, i32> {
-		let candidates = self.candidates(host)?;
-		let fs = host.fs().clone();
-		let stop = host.cancel_stop();
+	async fn apply_paths(&self, host: &mut Host) -> Result<usize, i32> {
+		let candidates = self.candidates(host).await?;
+		let vfs = host.vfs();
 		let rules = [(self.pattern.clone(), self.rewrite.clone().unwrap_or_default())];
-		match search::rewrite(&fs, candidates, &self.rewrite_spec(&rules, Mode::Write), &stop) {
+		match search::rewrite(&vfs, candidates, &self.rewrite_spec(&rules, Mode::Write)).await {
 			Ok(edited) => Ok(edited.files.iter().map(|file| file.changes.len()).sum()),
 			Err(SearchError::Stopped) => Err(1),
 			Err(error) => Err(parse_pattern_error(host, error.to_string())),
 		}
 	}
 
-	/// `--stdin`: searches (or rewrites) the code on standard input.
-	fn run_stdin(&self, host: &mut Host, lang: SupportLang, out: &mut dyn Write, printer: &mut Printer) -> Result<bool, i32> {
-		let mut source = String::new();
-		if let Err(error) = host.stdin.read_to_string(&mut source) {
-			let _ = writeln!(host.stderr, "ERROR: {error}");
-			return Err(1);
-		}
-		let stop = host.cancel_stop();
+	async fn run_stdin(&self, host: &mut Host, lang: SupportLang, out: &mut (dyn Write + Send), printer: &mut Printer) -> Result<bool, i32> {
+		let mut bytes = Vec::new();
+		let read = host.read_stdin_to_end(&mut bytes, usize::MAX).await.and_then(|_| {
+			String::from_utf8(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8"))
+		});
+		let source = match read {
+			Ok(source) => source,
+			Err(error) => {
+				let _ = writeln!(host.stderr, "ERROR: {error}");
+				return Err(1);
+			},
+		};
+		let stop = CancellationToken::new();
 		let patterns = [self.pattern.clone()];
 		let query = Query {
 			patterns:   &patterns,
@@ -904,7 +903,7 @@ impl AstGrep {
 		Ok(true)
 	}
 
-	fn execute(&self, host: &mut Host) -> Result<bool, i32> {
+	async fn execute(&self, host: &mut Host) -> Result<bool, i32> {
 		let lang = match (self.stdin, self.lang) {
 			(true, None) => {
 				Report {
@@ -932,20 +931,21 @@ impl AstGrep {
 		printer.before(&mut head);
 		let _ = out.write_all(&head);
 		let matched = match lang {
-			Some(lang) if self.stdin => self.run_stdin(host, lang, &mut out, &mut printer)?,
+			Some(lang) if self.stdin => self.run_stdin(host, lang, &mut out, &mut printer).await?,
 			_ if self.applies() => {
-				let applied = self.apply_paths(host)?;
+				let applied = self.apply_paths(host).await?;
 				if applied > 0 {
 					let _ = writeln!(host.stderr, "Applied {applied} changes");
 				}
 				applied > 0
 			},
-			_ => self.search_paths(host, &mut out, &mut printer)?,
+			_ => self.search_paths(host, &mut out, &mut printer).await?,
 		};
 		let mut tail = Vec::new();
 		printer.after(&mut tail);
 		let _ = out.write_all(&tail);
 		let _ = out.flush();
+		let _ = host.flush_output().await;
 		if !matched && has_error {
 			Report {
 				warning: true,
@@ -961,7 +961,7 @@ impl AstGrep {
 	}
 }
 
-impl Utility for AstGrep {
+impl AsyncUtility for AstGrep {
 	const NAME: &'static str = "ast-grep";
 	const USAGE_ERROR: u8 = 2;
 
@@ -995,8 +995,8 @@ impl Utility for AstGrep {
 		Ok(argv)
 	}
 
-	fn run(self, host: &mut Host) -> i32 {
-		match self.execute(host) {
+	async fn run(self, host: &mut Host) -> i32 {
+		match self.execute(host).await {
 			Ok(true) => 0,
 			Ok(false) => 1,
 			Err(code) => code,
@@ -1007,7 +1007,7 @@ impl Utility for AstGrep {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::host::run_util;
+	use crate::host::run_async_util;
 
 	const A_RS: &str = "fn main() {\n    let a = foo(1);\n    let b = 2;\n    let c = foo(a, b);\n    println!(\"{}\", c);\n}\n";
 	const B_RS: &str = "fn g() -> i32 {\n    foo(3)\n}\n";
@@ -1031,29 +1031,29 @@ mod tests {
 		tree
 	}
 
-	fn run(tree: &tempfile::TempDir, args: &[&str]) -> (i32, String, String) {
-		let (code, capture) = run_util::<AstGrep>(args, "", tree.path());
+	async fn run(tree: &tempfile::TempDir, args: &[&str]) -> (i32, String, String) {
+		let (code, capture) = run_async_util::<AstGrep>(args, "", tree.path()).await;
 		(code, capture.out(), capture.err())
 	}
 
-	#[test]
-	fn default_prints_path_line_and_text() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn default_prints_path_line_and_text() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-l", "rust", "a.rs"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-l", "rust", "a.rs"]).await;
 		assert_eq!((code, out.as_str()), (0, "a.rs:2:    let a = foo(1);\n"), "{err}");
 	}
 
-	#[test]
-	fn heading_always_prints_numbered_block_per_file() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn heading_always_prints_numbered_block_per_file() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["-p", "foo($$$A)", "--heading", "always", "a.rs"]);
+		let (code, out, err) = run(&tree, &["-p", "foo($$$A)", "--heading", "always", "a.rs"]).await;
 		assert_eq!((code, out.as_str()), (0, "a.rs\n2│    let a = foo(1);\n4│    let c = foo(a, b);\n\n"), "{err}");
 	}
 
-	#[test]
-	fn context_lines_are_separated_between_groups() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn context_lines_are_separated_between_groups() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-C", "1", "big.rs"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-C", "1", "big.rs"]).await;
 		assert_eq!(
 			(code, out.as_str()),
 			(
@@ -1063,7 +1063,7 @@ mod tests {
 			),
 			"{err}"
 		);
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-A", "1", "--heading", "always", "big.rs"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-A", "1", "--heading", "always", "big.rs"]).await;
 		assert_eq!(
 			(code, out.as_str()),
 			(0, "big.rs\n3│    foo(1);\n4│    let x4 = 0;\n╴┤\n15│    foo(2);\n16│    let x16 = 0;\n\n"),
@@ -1071,10 +1071,10 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn rewrite_prints_diff_hunks() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn rewrite_prints_diff_hunks() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-r", "bar($A)", "big.rs"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-r", "bar($A)", "big.rs"]).await;
 		assert_eq!(
 			(code, out.as_str()),
 			(
@@ -1089,19 +1089,19 @@ mod tests {
 		assert_eq!(std::fs::read_to_string(tree.path().join("big.rs")).unwrap(), big_rs());
 	}
 
-	#[test]
-	fn update_all_rewrites_files_and_reports_count() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn update_all_rewrites_files_and_reports_count() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-r", "bar($A)", "-l", "rust", "-U", "a.rs", "b.rs"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-r", "bar($A)", "-l", "rust", "-U", "a.rs", "b.rs"]).await;
 		assert_eq!((code, out.as_str(), err.as_str()), (0, "", "Applied 2 changes\n"));
 		assert_eq!(std::fs::read_to_string(tree.path().join("a.rs")).unwrap(), A_RS.replace("foo(1)", "bar(1)"));
 		assert_eq!(std::fs::read_to_string(tree.path().join("b.rs")).unwrap(), B_RS.replace("foo(3)", "bar(3)"));
 	}
 
-	#[test]
-	fn json_pretty_prints_match_array() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn json_pretty_prints_match_array() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($$$A)", "-l", "rust", "--json", "b.rs"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($$$A)", "-l", "rust", "--json", "b.rs"]).await;
 		let expected = r#"[
 {
   "text": "foo(3)",
@@ -1157,10 +1157,10 @@ mod tests {
 		assert_eq!((code, out.as_str()), (0, expected), "{err}");
 	}
 
-	#[test]
-	fn json_stream_prints_one_object_per_line() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn json_stream_prints_one_object_per_line() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "--json=stream", "b.rs"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "--json=stream", "b.rs"]).await;
 		let expected = concat!(
 			r#"{"text":"foo(3)","range":{"byteOffset":{"start":20,"end":26},"start":{"line":1,"column":4},"end":{"line":1,"column":10}},"#,
 			r#""file":"b.rs","lines":"    foo(3)","charCount":{"leading":4,"trailing":0},"language":"Rust","#,
@@ -1170,10 +1170,10 @@ mod tests {
 		assert_eq!((code, out.as_str()), (0, expected), "{err}");
 	}
 
-	#[test]
-	fn json_compact_with_rewrite_includes_replacement() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn json_compact_with_rewrite_includes_replacement() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-r", "bar($A)", "--json=compact", "b.rs"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-r", "bar($A)", "--json=compact", "b.rs"]).await;
 		let expected = concat!(
 			r#"[{"text":"foo(3)","range":{"byteOffset":{"start":20,"end":26},"start":{"line":1,"column":4},"end":{"line":1,"column":10}},"#,
 			r#""file":"b.rs","lines":"    foo(3)","charCount":{"leading":4,"trailing":0},"replacement":"bar(3)","replacementOffsets":{"start":20,"end":26},"language":"Rust","#,
@@ -1183,32 +1183,32 @@ mod tests {
 		assert_eq!((code, out.as_str()), (0, expected), "{err}");
 	}
 
-	#[test]
-	fn files_with_matches_lists_matching_files() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn files_with_matches_lists_matching_files() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($$$A)", "--files-with-matches", "a.rs", "b.rs", "big.rs"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($$$A)", "--files-with-matches", "a.rs", "b.rs", "big.rs"]).await;
 		assert_eq!((code, out.as_str()), (0, "a.rs\nb.rs\nbig.rs\n"), "{err}");
 	}
 
-	#[test]
-	fn no_match_exits_one() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn no_match_exits_one() {
 		let tree = tree();
-		assert_eq!(run(&tree, &["run", "-p", "nope($A)", "a.rs"]), (1, String::new(), String::new()));
-		assert_eq!(run(&tree, &["run", "-p", "nope($A)", "--json", "a.rs"]), (1, "[]\n".to_owned(), String::new()));
+		assert_eq!(run(&tree, &["run", "-p", "nope($A)", "a.rs"]).await, (1, String::new(), String::new()));
+		assert_eq!(run(&tree, &["run", "-p", "nope($A)", "--json", "a.rs"]).await, (1, "[]\n".to_owned(), String::new()));
 	}
 
-	#[test]
-	fn directory_operand_displays_relative_paths() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn directory_operand_displays_relative_paths() {
 		let tree = tree();
-		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-l", "rust"]);
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "-l", "rust"]).await;
 		assert_eq!((code, out.as_str()), (0, "a.rs:2:    let a = foo(1);\nb.rs:2:    foo(3)\nbig.rs:3:    foo(1);\nbig.rs:15:    foo(2);\n"), "{err}");
 	}
 
-	#[test]
-	fn stdin_requires_lang_and_reads_code() {
-		let (code, capture) = run_util::<AstGrep>(&["run", "-p", "foo($A)", "-l", "rust", "--stdin"], "let x = foo(1);\n", "/");
+	#[tokio::test(flavor = "multi_thread")]
+	async fn stdin_requires_lang_and_reads_code() {
+		let (code, capture) = run_async_util::<AstGrep>(&["run", "-p", "foo($A)", "-l", "rust", "--stdin"], "let x = foo(1);\n", "/").await;
 		assert_eq!((code, capture.out().as_str()), (0, "STDIN:1:let x = foo(1);\n"), "{}", capture.err());
-		let (code, capture) = run_util::<AstGrep>(&["run", "-p", "foo($A)", "--stdin"], "", "/");
+		let (code, capture) = run_async_util::<AstGrep>(&["run", "-p", "foo($A)", "--stdin"], "", "/").await;
 		assert_eq!(
 			(code, capture.err().as_str()),
 			(
@@ -1219,12 +1219,12 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn unsupported_features_exit_two() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn unsupported_features_exit_two() {
 		let tree = tree();
-		assert_eq!(run(&tree, &["scan"]), (2, String::new(), "ast-grep: scan is not supported by the built-in ast-grep\n".to_owned()));
+		assert_eq!(run(&tree, &["scan"]).await, (2, String::new(), "ast-grep: scan is not supported by the built-in ast-grep\n".to_owned()));
 		assert_eq!(
-			run(&tree, &["run", "-p", "foo", "--interactive", "a.rs"]),
+			run(&tree, &["run", "-p", "foo", "--interactive", "a.rs"]).await,
 			(2, String::new(), "ast-grep: --interactive is not supported by the built-in ast-grep\n".to_owned())
 		);
 	}
@@ -1232,9 +1232,9 @@ mod tests {
 
 use brush_core::{ShellExtensions, builtins::Registration};
 
-use crate::host::util;
+use crate::host::async_util;
 
 /// Creates the `ast-grep` (and `sg`) builtin registration.
 pub(crate) fn ast_grep_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<AstGrep, SE>()
+	async_util::<AstGrep, SE>()
 }

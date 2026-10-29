@@ -1,4 +1,4 @@
-//! [`BlockingFs`] providers: directories are paths, listings come from
+//! [`pi_vfs::Fs`] providers: directories are paths, listings come from
 //! `read_dir`, and files are provider [`pi_vfs::File`]s. URL children are
 //! joined with [`pi_vfs::child_path`], which percent-encodes raw names.
 
@@ -9,7 +9,7 @@ use std::{
 	time::UNIX_EPOCH,
 };
 
-use pi_vfs::{BlockingFs, Metadata};
+use pi_vfs::{Fs, Metadata};
 
 use super::{Detail, FileId, FileInfo, FileType, Listing, Stamp, not_regular, os_name};
 
@@ -81,28 +81,23 @@ pub(super) fn child(dir: &Path, name: &[u8]) -> PathBuf {
 	pi_vfs::child_path(dir, &os_name(name))
 }
 
-pub(super) fn open_dir(fs: &BlockingFs, path: &Path) -> io::Result<PathBuf> {
-	if !fs.metadata(path)?.is_dir() {
+pub(super) async fn open_dir(fs: &Fs, path: &Path) -> io::Result<PathBuf> {
+	if !fs.metadata(path).await?.is_dir() {
 		return Err(not_a_directory());
 	}
 	Ok(path.to_path_buf())
 }
 
-pub(super) fn open_child(fs: &BlockingFs, parent: &Path, name: &[u8]) -> io::Result<PathBuf> {
+pub(super) async fn open_child(fs: &Fs, parent: &Path, name: &[u8]) -> io::Result<PathBuf> {
 	let path = child(parent, name);
-	if !fs.symlink_metadata(&path)?.is_dir() {
+	if !fs.symlink_metadata(&path).await?.is_dir() {
 		return Err(not_a_directory());
 	}
 	Ok(path)
 }
 
-pub(super) fn list(
-	fs: &BlockingFs,
-	dir: &Path,
-	detail: Detail,
-	out: &mut Listing,
-) -> io::Result<()> {
-	for entry in fs.read_dir(dir)? {
+pub(super) async fn list(fs: &Fs, dir: &Path, detail: Detail, out: &mut Listing) -> io::Result<()> {
+	for entry in fs.read_dir(dir).await? {
 		let entry = entry?;
 		let name = entry.file_name();
 		if matches!(name.as_encoded_bytes(), b"." | b"..") {
@@ -114,7 +109,7 @@ pub(super) fn list(
 				format!("filesystem returned invalid directory entry name {}", name.display()),
 			));
 		}
-		let file_type = match entry.file_type() {
+		let file_type = match entry.file_type_async().await {
 			Ok(file_type) => file_type,
 			Err(err) if is_skippable(&err) => continue,
 			Err(err) => return Err(err),
@@ -124,7 +119,7 @@ pub(super) fn list(
 		};
 		let (size, mtime) = match detail {
 			Detail::Minimal => (None, None),
-			Detail::Full => match entry.metadata() {
+			Detail::Full => match entry.metadata_async().await {
 				Ok(meta) => ((file_type == FileType::File).then(|| meta.len()), mtime_of(&meta)),
 				Err(err) if is_skippable(&err) => continue,
 				Err(err) => return Err(err),
@@ -137,24 +132,24 @@ pub(super) fn list(
 
 /// Opens the regular file at `path`, following symlinks. The type is checked
 /// before opening so directories and special files are never opened.
-pub(super) fn open_file(fs: &BlockingFs, path: &Path) -> io::Result<(pi_vfs::File, FileInfo)> {
-	let info = info_of(&fs.metadata(path)?);
+pub(super) async fn open_file(fs: &Fs, path: &Path) -> io::Result<(pi_vfs::File, FileInfo)> {
+	let info = info_of(&fs.metadata(path).await?);
 	if info.file_type != Some(FileType::File) {
 		return Err(not_regular());
 	}
-	Ok((fs.open(path)?, info))
+	Ok((fs.open(path).await?, info))
 }
 
-pub(super) fn stat(fs: &BlockingFs, path: &Path, follow: bool) -> io::Result<FileInfo> {
+pub(super) async fn stat(fs: &Fs, path: &Path, follow: bool) -> io::Result<FileInfo> {
 	let meta = if follow {
-		fs.metadata(path)?
+		fs.metadata(path).await?
 	} else {
-		fs.symlink_metadata(path)?
+		fs.symlink_metadata(path).await?
 	};
 	Ok(info_of(&meta))
 }
 
-pub(super) fn identify(fs: &BlockingFs, path: &Path) -> io::Result<FileId> {
-	let id = fs.file_id(path, true)?;
+pub(super) async fn identify(fs: &Fs, path: &Path) -> io::Result<FileId> {
+	let id = fs.file_id(path, true).await?;
 	Ok(FileId { dev: id.dev(), ino: id.ino(), native: id.is_native() })
 }

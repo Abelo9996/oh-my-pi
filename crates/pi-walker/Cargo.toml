@@ -11,6 +11,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+flume.workspace = true
+futures.workspace = true
 grep-matcher.workspace = true
 grep-pcre2.workspace = true
 grep-regex.workspace = true
@@ -19,6 +21,7 @@ memchr = "2.7.4"
 parking_lot.workspace = true
 pi-vfs.workspace = true
 regex.workspace = true
+tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -39,4 +42,3 @@ windows-sys = { workspace = true, features = [
 async-trait.workspace = true
 globset.workspace = true
 ignore.workspace = true
-tokio.workspace = true

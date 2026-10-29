@@ -7,10 +7,7 @@ use std::{
 	ffi::{OsStr, OsString},
 	io::{self, Write},
 	path::{Path, PathBuf},
-	sync::{
-		Arc,
-		atomic::{AtomicBool, Ordering},
-	},
+	sync::Arc,
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,12 +17,12 @@ use globset::{GlobBuilder, GlobMatcher};
 use pi_walker::{
 	FileType,
 	ignore::{Match as RuleMatch, Rules},
-	walk::{Action, Event, Follow, Order, TreeOptions, WalkError},
+	walk::{Action, Event, Follow, Order, Tree, TreeOptions, WalkError},
 };
-use pi_vfs::{BlockingFs, Metadata};
+use pi_vfs::Metadata;
 use regex::{Regex, RegexBuilder};
 
-use crate::host::{Host, Utility, forward_slash_display, util};
+use crate::host::{AsyncUtility, Host, async_util, forward_slash_display};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -326,7 +323,7 @@ impl Excludes {
 }
 
 struct FdIgnoreMatcher {
-	fs:      BlockingFs,
+	fs:      pi_vfs::Fs,
 	enabled: bool,
 	root:    PathBuf,
 	global:  Vec<IgnoreFile>,
@@ -357,7 +354,7 @@ impl IgnoreFile {
 }
 
 impl FdIgnoreMatcher {
-	fn new(fs: &BlockingFs, base_dir: &Path, root: &Path, cli: &FdCli) -> io::Result<Self> {
+	async fn new(fs: &pi_vfs::Fs, base_dir: &Path, root: &Path, cli: &FdCli) -> io::Result<Self> {
 		let root = normalize_fdignore_path(root);
 		let enabled = !no_ignore(cli);
 		let mut matcher = Self {
@@ -374,6 +371,7 @@ impl FdIgnoreMatcher {
 		for ignore_file in &cli.ignore_files {
 			let path = pi_vfs::absolute_path(base_dir, ignore_file);
 			let rules = Rules::read(fs, &path)
+				.await
 				.map_err(|err| io::Error::other(format!("{}: {err}", path.display())))?;
 			if !rules.is_empty() {
 				matcher.global.push(IgnoreFile { base: base_dir.to_path_buf(), rules });
@@ -383,20 +381,20 @@ impl FdIgnoreMatcher {
 		let parent = if cli.no_ignore_parent {
 			None
 		} else {
-			build_fdignore_parent_states(fs, &root)
+			build_fdignore_parent_states(fs, &root).await
 		};
-		let root_state = load_fdignore_state(fs, &root, parent);
+		let root_state = load_fdignore_state(fs, &root, parent).await;
 		matcher.states.insert(root, root_state);
 		Ok(matcher)
 	}
 
-	fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
+	async fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
 		if !self.enabled {
 			return false;
 		}
 		let path = normalize_fdignore_path(path);
 		let state_dir = pi_vfs::parent_path(&path).unwrap_or(&self.root).to_path_buf();
-		let state = self.state_for_dir(&state_dir);
+		let state = self.state_for_dir(&state_dir).await;
 		if let Some(ignored) = fdignore_state_match(&state, &path, is_dir) {
 			return ignored;
 		}
@@ -407,7 +405,7 @@ impl FdIgnoreMatcher {
 			.unwrap_or(false)
 	}
 
-	fn state_for_dir(&mut self, dir: &Path) -> Arc<FdIgnoreState> {
+	async fn state_for_dir(&mut self, dir: &Path) -> Arc<FdIgnoreState> {
 		if let Some(state) = self.states.get(dir) {
 			return Arc::clone(state);
 		}
@@ -417,22 +415,30 @@ impl FdIgnoreMatcher {
 				.get(&self.root)
 				.map_or_else(|| Arc::new(FdIgnoreState { parent: None, matcher: None }), Arc::clone);
 		}
-		let parent = if dir == self.root.as_path() {
-			self
-				.states
-				.get(&self.root)
-				.and_then(|state| state.parent.as_ref().map(Arc::clone))
-		} else {
-			pi_vfs::parent_path(dir).map(|parent| self.state_for_dir(parent))
+		let mut missing = Vec::new();
+		let mut current = dir.to_path_buf();
+		let mut state = loop {
+			if let Some(state) = self.states.get(&current) {
+				break Some(Arc::clone(state));
+			}
+			let parent = pi_vfs::parent_path(&current).map(Path::to_path_buf);
+			missing.push(current);
+			match parent {
+				Some(parent) => current = parent,
+				None => break None,
+			}
 		};
-		let state = load_fdignore_state(&self.fs, dir, parent);
-		self.states.insert(dir.to_path_buf(), Arc::clone(&state));
-		state
+		for missing_dir in missing.into_iter().rev() {
+			let loaded = load_fdignore_state(&self.fs, &missing_dir, state).await;
+			self.states.insert(missing_dir, Arc::clone(&loaded));
+			state = Some(loaded);
+		}
+		state.unwrap_or_else(|| Arc::new(FdIgnoreState { parent: None, matcher: None }))
 	}
 }
 
 /// Load `.fdignore` state for every ancestor of `root`, outermost first.
-fn build_fdignore_parent_states(fs: &BlockingFs, root: &Path) -> Option<Arc<FdIgnoreState>> {
+async fn build_fdignore_parent_states(fs: &pi_vfs::Fs, root: &Path) -> Option<Arc<FdIgnoreState>> {
 	let mut ancestors = Vec::new();
 	let mut dir = pi_vfs::parent_path(root);
 	while let Some(path) = dir {
@@ -441,7 +447,7 @@ fn build_fdignore_parent_states(fs: &BlockingFs, root: &Path) -> Option<Arc<FdIg
 	}
 	let mut parent = None;
 	for ancestor in ancestors.into_iter().rev() {
-		parent = Some(load_fdignore_state(fs, ancestor, parent));
+		parent = Some(load_fdignore_state(fs, ancestor, parent).await);
 	}
 	parent
 }
@@ -456,16 +462,14 @@ fn normalize_fdignore_path(path: &Path) -> PathBuf {
 	}
 }
 
-fn load_fdignore_state(
-	fs: &BlockingFs,
+async fn load_fdignore_state(
+	fs: &pi_vfs::Fs,
 	dir: &Path,
 	parent: Option<Arc<FdIgnoreState>>,
 ) -> Arc<FdIgnoreState> {
 	let file = pi_vfs::join_path(dir, Path::new(".fdignore"));
-	let matcher = fs
-		.is_file(&file)
-		.then(|| Rules::read(fs, &file).ok())
-		.flatten()
+	let rules = if fs.is_file(&file).await { Rules::read(fs, &file).await.ok() } else { None };
+	let matcher = rules
 		.filter(|rules| !rules.is_empty())
 		.map(|rules| IgnoreFile { base: dir.to_path_buf(), rules });
 	Arc::new(FdIgnoreState { parent, matcher })
@@ -536,7 +540,7 @@ struct OwnerMatcher {
 
 #[derive(Clone)]
 struct SearchConfig {
-	fs:             BlockingFs,
+	fs:             pi_vfs::Fs,
 	base_dir:       PathBuf,
 	absolute_roots: Vec<PathBuf>,
 	matcher:        Arc<SearchMatcher>,
@@ -562,11 +566,11 @@ struct SearchState {
 	had_error: bool,
 }
 
-impl Utility for FdCli {
+impl AsyncUtility for FdCli {
 	const NAME: &'static str = "fd";
 	const USAGE_ERROR: u8 = 2;
 
-	fn run(mut self, host: &mut Host) -> i32 {
+	async fn run(mut self, host: &mut Host) -> i32 {
 		let quiet = self.quiet;
 		let base_dir = self
 			.base_directory
@@ -577,9 +581,7 @@ impl Utility for FdCli {
 			.iter()
 			.map(|path| host.resolve(pi_vfs::absolute_path(&base_dir, path)))
 			.collect();
-		let cancelled = host.cancel_flag();
-
-		match search(self, base_dir, host, &cancelled) {
+		match search(self, base_dir, host).await {
 			Ok(state) => {
 				if state.had_error {
 					2
@@ -603,15 +605,10 @@ impl Utility for FdCli {
 
 /// Creates the `fd` builtin registration.
 pub(crate) fn fd_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<FdCli, SE>()
+	async_util::<FdCli, SE>()
 }
 
-fn search(
-	cli: FdCli,
-	base_dir: PathBuf,
-	host: &mut Host,
-	cancelled: &AtomicBool,
-) -> io::Result<SearchState> {
+async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<SearchState> {
 	if cli.list_details || !cli.exec.is_empty() || !cli.exec_batch.is_empty() || cli.batch_size != 0
 	{
 		return Err(io::Error::new(
@@ -649,7 +646,7 @@ fn search(
 	};
 	let separator = cli.path_separator.clone().unwrap_or_else(|| "/".to_string());
 	let config = SearchConfig {
-		fs: host.fs().clone(),
+		fs: host.vfs(),
 		base_dir,
 		absolute_roots,
 		matcher,
@@ -671,64 +668,58 @@ fn search(
 	};
 
 	let opts = fd_tree_options(&cli);
-	let stop = host.cancel_stop();
 	let mut out = host.stdout_writer();
 	let mut state = SearchState { matches: 0, had_error: false };
 	for search_path in &search_paths {
-		if cancelled.load(Ordering::Relaxed) || max_results.is_some_and(|max| state.matches >= max) {
+		if max_results.is_some_and(|max| state.matches >= max) {
 			break;
 		}
 		let mut fd_ignores =
-			FdIgnoreMatcher::new(&config.fs, &config.base_dir, &search_path.resolved, &cli)?;
+			FdIgnoreMatcher::new(&config.fs, &config.base_dir, &search_path.resolved, &cli).await?;
 		let layer = pi_walker::Fs::new(&config.fs, &search_path.resolved);
-		let mut failed = None;
-		let walked = pi_walker::walk::tree(&layer, &search_path.resolved, &opts, &stop, |event| match event {
-			Event::Entry(entry) => {
-				if max_results.is_some_and(|max| state.matches >= max) {
-					return Action::Stop;
-				}
-				let action = match visit_entry(
-					&config,
-					&cli.ignore_contains,
-					&mut fd_ignores,
-					entry.abs,
-					entry.depth,
-					entry.file_type,
-					&mut out,
-					&mut state,
-				) {
-					Ok(action) => action,
-					Err(error) => {
-						failed = Some(error);
-						return Action::Stop;
-					},
-				};
-				if max_results.is_some_and(|max| state.matches >= max) {
-					Action::Stop
-				} else {
-					action
-				}
-			},
-			Event::Error(error) => {
-				if config.show_errors {
-					state.had_error = true;
-					let _ = writeln!(host.stderr, "fd: {}", error.error);
-				}
-				Action::Continue
-			},
-		});
-		if let Some(error) = failed {
-			return Err(error);
-		}
-		match walked {
-			Ok(_) => {},
-			Err(WalkError::Stopped) => break,
+		let mut tree = match Tree::new(&layer, &search_path.resolved, &opts).await {
+			Ok(tree) => tree,
 			Err(WalkError::Root { path, error }) => {
 				return Err(io::Error::other(format!("{}: {error}", path.display())));
 			},
+		};
+		while let Some(event) = tree.next().await {
+			match event {
+				Event::Entry(entry) => {
+					if max_results.is_some_and(|max| state.matches >= max) {
+						break;
+					}
+					let action = visit_entry(
+						&config,
+						&cli.ignore_contains,
+						&mut fd_ignores,
+						entry.abs,
+						entry.depth,
+						entry.file_type,
+						&mut out,
+						&mut state,
+					)
+					.await?;
+					if matches!(action, Action::SkipDir) {
+						tree.skip_dir();
+					}
+					let _ = host.flush_output().await;
+					if max_results.is_some_and(|max| state.matches >= max) {
+						break;
+					}
+				},
+				Event::Error(error) => {
+					if config.show_errors {
+						state.had_error = true;
+						let _ = writeln!(host.stderr, "fd: {}", error.error);
+						let _ = host.flush_output().await;
+					}
+				},
+			}
 		}
 	}
 	out.flush()?;
+	let _ = host.flush_output().await;
 	Ok(state)
 }
 
@@ -751,7 +742,7 @@ fn fd_tree_options(cli: &FdCli) -> TreeOptions {
 /// Decides one walked entry: prunes ignored and excluded directories, prints
 /// a match.
 #[allow(clippy::too_many_arguments)]
-fn visit_entry<W: Write>(
+async fn visit_entry<W: Write + Send>(
 	config: &SearchConfig,
 	ignore_contains: &[OsString],
 	fd_ignores: &mut FdIgnoreMatcher,
@@ -765,11 +756,13 @@ fn visit_entry<W: Write>(
 	if depth == 0 && is_directory {
 		return Ok(Action::Continue);
 	}
-	if fd_ignores.is_ignored(path, is_directory) || config.excludes.matches(path, &config.base_dir) {
+	if fd_ignores.is_ignored(path, is_directory).await
+		|| config.excludes.matches(path, &config.base_dir)
+	{
 		return Ok(if is_directory { Action::SkipDir } else { Action::Skip });
 	}
 	if is_directory
-		&& (contains_ignore_marker(&config.fs, path, ignore_contains)
+		&& (contains_ignore_marker(&config.fs, path, ignore_contains).await
 			|| (config.prune
 				&& config
 					.matcher
@@ -778,7 +771,7 @@ fn visit_entry<W: Write>(
 		return Ok(Action::SkipDir);
 	}
 
-	if !matches_entry(config, path, file_type) {
+	if !matches_entry(config, path, file_type).await {
 		return Ok(Action::Continue);
 	}
 
@@ -800,7 +793,7 @@ fn visit_entry<W: Write>(
 /// Whether an entry passes every filter: the ones the listing answers (kind,
 /// extension, the pattern) first, then, only if the command asked for one,
 /// those that need the entry's metadata, so a plain `fd foo` stats nothing.
-fn matches_entry(config: &SearchConfig, path: &Path, file_type: FileType) -> bool {
+async fn matches_entry(config: &SearchConfig, path: &Path, file_type: FileType) -> bool {
 	let filter = &config.types;
 	if filter.has_kind()
 		&& !((filter.regular && file_type == FileType::File)
@@ -827,12 +820,12 @@ fn matches_entry(config: &SearchConfig, path: &Path, file_type: FileType) -> boo
 	if !needs_metadata {
 		return true;
 	}
-	let metadata = config.fs.symlink_metadata(path).ok();
+	let metadata = config.fs.symlink_metadata(path).await.ok();
 	let metadata = metadata.as_ref();
 	if filter.executable && !is_executable(metadata) {
 		return false;
 	}
-	if filter.empty && !is_empty_entry(&config.fs, path, metadata, filter) {
+	if filter.empty && !is_empty_entry(&config.fs, path, metadata, filter).await {
 		return false;
 	}
 	if !config.sizes.is_empty() && !matches_size_filters(&config.sizes, metadata) {
@@ -850,10 +843,13 @@ fn matches_entry(config: &SearchConfig, path: &Path, file_type: FileType) -> boo
 }
 
 /// Whether directory `path` contains any `--ignore-contains` marker entry.
-fn contains_ignore_marker(fs: &BlockingFs, path: &Path, markers: &[OsString]) -> bool {
-	markers
-		.iter()
-		.any(|name| fs.exists(pi_vfs::join_path(path, Path::new(name))))
+async fn contains_ignore_marker(fs: &pi_vfs::Fs, path: &Path, markers: &[OsString]) -> bool {
+	for name in markers {
+		if fs.exists(pi_vfs::join_path(path, Path::new(name))).await {
+			return true;
+		}
+	}
+	false
 }
 
 #[cfg(unix)]
@@ -866,8 +862,8 @@ fn is_executable(metadata: Option<&Metadata>) -> bool {
 	metadata.is_some_and(|meta| meta.is_file())
 }
 
-fn is_empty_entry(
-	fs: &BlockingFs,
+async fn is_empty_entry(
+	fs: &pi_vfs::Fs,
 	path: &Path,
 	metadata: Option<&Metadata>,
 	filter: &TypeFilter,
@@ -879,7 +875,7 @@ fn is_empty_entry(
 		return metadata.len() == 0;
 	}
 	if metadata.is_dir() && (!filter.has_kind() || filter.directory) {
-		return fs.read_dir(path).is_ok_and(|mut entries| entries.next().is_none());
+		return fs.read_dir(path).await.is_ok_and(|mut entries| entries.next().is_none());
 	}
 	false
 }
@@ -1384,7 +1380,7 @@ mod tests {
 	use clap::Parser;
 
 	use super::{FdCli, fd_tree_options};
-	use crate::host::{Host, run_util};
+	use crate::host::{Host, run_async_util};
 
 	/// Build a fresh temp directory containing a single matchable file plus a
 	/// filler file, so the walker has more than one entry to iterate. Both the
@@ -1402,46 +1398,34 @@ mod tests {
 		tree
 	}
 
-	// Regression note (#3949): `search` feeds the walk `Host::cancel_stop`.
-	// `search` also carries an outer pre-loop `if cancelled { break }` guard
-	// that fires when the flag is already set before search runs, so a
-	// pre-set-flag test at the `search()` level never reaches the walker and
-	// does not protect the regression. This test drives the walk fd builds
-	// directly with the host's stop predicate, so a revert to a predicate that
-	// never fires fails immediately.
-	#[test]
-	fn cancel_stop_aborts_the_walk_before_any_entry() {
+	// Dropping the cursor mid-walk ends the traversal; a fresh one still sees every entry.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn dropping_the_walk_visits_nothing() {
 		let tree = seeded_tree("stream");
 		let (host, _) = Host::for_test("fd", "", tree.path());
 		host.cancel_for_test();
 		let cli = FdCli::try_parse_from(["fd", "-u"]).expect("fd args parse");
+		let (fs, opts) = (pi_walker::Fs::native(), fd_tree_options(&cli));
+		let mut walk = pi_walker::walk::Tree::new(&fs, tree.path(), &opts)
+			.await
+			.expect("tree opens");
+		assert!(walk.next().await.is_some(), "the root is reported");
+		drop(walk);
+		let mut walk = pi_walker::walk::Tree::new(&fs, tree.path(), &opts)
+			.await
+			.expect("tree opens");
 		let mut visited = 0_usize;
-		let result = pi_walker::walk::tree(
-			&pi_walker::Fs::native(),
-			tree.path(),
-			&fd_tree_options(&cli),
-			&host.cancel_stop(),
-			|_event| {
-				visited += 1;
-				pi_walker::walk::Action::Continue
-			},
-		);
-		assert!(
-			matches!(result, Err(pi_walker::walk::WalkError::Stopped)),
-			"cancellation should end the walk with WalkError::Stopped, got {result:?}"
-		);
-		assert_eq!(visited, 0, "no entry may be visited once the host has cancelled");
+		while walk.next().await.is_some() {
+			visited += 1;
+		}
+		assert_eq!(visited, 3, "root plus both seeded files");
 	}
 
-	#[test]
-	fn walk_completes_normally_when_cancel_flag_is_unset() {
-		// Pin the non-cancelled contract: the cancel-observing stop predicate
-		// must not affect a normal walk. `fd` still exercises both `search()`
-		// and its walker call (the outer pre-loop guard passes with
-		// cancelled=false), then finds the seeded match.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn walk_completes_normally() {
 		let tree = seeded_tree("normal");
 		let path = tree.path().to_str().expect("utf8 path");
-		let (code, capture) = run_util::<FdCli>(&["haystack", path], "", tree.path());
+		let (code, capture) = run_async_util::<FdCli>(&["haystack", path], "", tree.path()).await;
 
 		assert_eq!(code, 0);
 		assert!(
@@ -1453,26 +1437,26 @@ mod tests {
 	}
 
 	#[cfg(unix)]
-	#[test]
-	fn walks_a_symlinked_root_operand_but_not_nested_links() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn walks_a_symlinked_root_operand_but_not_nested_links() {
 		let tree = Builder::new().prefix("fd-root-link").tempdir().expect("tempdir");
 		fs::create_dir_all(tree.path().join("real/sub")).expect("mkdir");
 		fs::write(tree.path().join("real/a.txt"), "").expect("write");
 		std::os::unix::fs::symlink("real", tree.path().join("link")).expect("link");
 		fs::create_dir(tree.path().join("parent")).expect("mkdir");
 		std::os::unix::fs::symlink("../real", tree.path().join("parent/inner")).expect("link");
-		let list = |args: &[&str]| {
-			let (code, capture) = run_util::<FdCli>(args, "", tree.path());
+		let list = async |args: &[&str]| {
+			let (code, capture) = run_async_util::<FdCli>(args, "", tree.path()).await;
 			let mut lines: Vec<String> = capture.out().lines().map(|line| line.trim_end_matches('/').to_owned()).collect();
 			lines.sort();
 			(code, lines)
 		};
 
-		assert_eq!(list(&[".", "link"]), (0, vec!["link/a.txt".to_owned(), "link/sub".to_owned()]));
+		assert_eq!(list(&[".", "link"]).await, (0, vec!["link/a.txt".to_owned(), "link/sub".to_owned()]));
 		// Links met during the walk are listed, not entered, unless -L asks.
-		assert_eq!(list(&[".", "parent"]), (0, vec!["parent/inner".to_owned()]));
+		assert_eq!(list(&[".", "parent"]).await, (0, vec!["parent/inner".to_owned()]));
 		assert_eq!(
-			list(&["-L", ".", "parent"]),
+			list(&["-L", ".", "parent"]).await,
 			(0, vec!["parent/inner".to_owned(), "parent/inner/a.txt".to_owned(), "parent/inner/sub".to_owned()])
 		);
 	}

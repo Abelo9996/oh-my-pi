@@ -117,6 +117,7 @@ mod file_backup;
 #[cfg(any(feature = "util.ls", feature = "util.stat", feature = "util.find"))]
 mod fsmeta;
 mod host;
+mod stdio;
 /// The shell's locale categories, shared by the locale-aware utilities.
 #[cfg(any(
 	feature = "util.date",
