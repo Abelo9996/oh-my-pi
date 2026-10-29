@@ -522,10 +522,16 @@ export interface ModelMatchPreferences {
 	providerOrder?: readonly string[];
 	/** Providers to deprioritize when no recent usage or provider priority is available. */
 	deprioritizeProviders?: string[];
+	/**
+	 * Whether a provider exists beyond the models matched against, such as a
+	 * discovery provider whose cache is still empty: a `provider/id` selector
+	 * naming one never falls back to another provider's ids.
+	 */
+	isKnownProvider?: (provider: string) => boolean;
 }
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
-type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
+type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable"> & Partial<Pick<ModelRegistry, "hasProvider">>;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
 
@@ -553,6 +559,7 @@ interface ModelPreferenceContext {
 	providerPriorityRank: Map<string, number>;
 	deprioritizedProviders: Set<string>;
 	modelOrder: Map<string, number>;
+	isKnownProvider: ((provider: string) => boolean) | undefined;
 }
 
 function buildPreferenceContext(
@@ -576,7 +583,14 @@ function buildPreferenceContext(
 	const deprioritizedProviders = new Set(preferences?.deprioritizeProviders ?? []);
 	const modelOrder = getModelOrderIndex(availableModels);
 
-	return { modelUsageRank, providerUsageRank, providerPriorityRank, deprioritizedProviders, modelOrder };
+	return {
+		modelUsageRank,
+		providerUsageRank,
+		providerPriorityRank,
+		deprioritizedProviders,
+		modelOrder,
+		isKnownProvider: preferences?.isKnownProvider,
+	};
 }
 
 export function getModelMatchPreferences(settings?: Settings): ModelMatchPreferences {
@@ -596,6 +610,7 @@ function mergeModelMatchPreferences(
 		usageOrder: preferences?.usageOrder ?? settingsPreferences.usageOrder,
 		providerOrder: preferences?.providerOrder ?? settingsPreferences.providerOrder,
 		deprioritizeProviders: preferences?.deprioritizeProviders,
+		isKnownProvider: preferences?.isKnownProvider,
 	};
 }
 
@@ -811,11 +826,16 @@ function matchModel(
 	const slashIndex = modelPattern.indexOf("/");
 	if (slashIndex !== -1) {
 		const lowerProvider = modelPattern.substring(0, slashIndex).toLowerCase();
-		// Known means in this candidate set or a catalog provider (KDL), even one
-		// with no bundled rows or credentials: absent from an availability-filtered
+		// Known means in this candidate set, a catalog provider (KDL), even one
+		// with no bundled rows or credentials, or one the caller knows otherwise (a
+		// discovery provider with an empty cache): absent from an availability-filtered
 		// pool, its selector must still not fall through to another provider's raw
 		// ids (`google/gemini-2.5` → OpenRouter's `google/gemini-2.5-*`).
-		if (availableModels.some(m => m.provider.toLowerCase() === lowerProvider) || providerEntry(lowerProvider)) {
+		if (
+			availableModels.some(m => m.provider.toLowerCase() === lowerProvider) ||
+			providerEntry(lowerProvider) ||
+			context.isKnownProvider?.(lowerProvider)
+		) {
 			return undefined;
 		}
 		// The prefix is not a known provider, so treat the slash as part of the
@@ -2169,8 +2189,11 @@ function resolveCliModelInScope(
 	options: CliModelOptions & { cliModel: string },
 	scope: CliModelScope,
 ): ResolveCliModelResult {
-	const { cliProvider, cliModel, settings } = options;
-	const preferences = mergeModelMatchPreferences(settings, options.preferences);
+	const { cliProvider, cliModel, settings, modelRegistry } = options;
+	const preferences: ModelMatchPreferences = {
+		...mergeModelMatchPreferences(settings, options.preferences),
+		isKnownProvider: id => modelRegistry.hasProvider?.(id) ?? false,
+	};
 	const { all: allModels, available: availableModels } = scope;
 	if (allModels.length === 0) {
 		return {

@@ -2644,6 +2644,31 @@ describe("provider routing selector (@upstream)", () => {
 		expect(parseModelPattern("ollama/llama3", [customOllamaId]).model).toBeUndefined();
 	});
 
+	test("a registry provider with no models yet still locks its prefix", () => {
+		const routedProxyId = buildModel({
+			id: "proxy/foo-latest",
+			name: "Foo",
+			api: "openai-completions",
+			provider: "custom-gateway",
+			baseUrl: "https://gateway.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		// `proxy` is a discovery provider whose cache is still empty: no model and no catalog entry name it.
+		const registry = {
+			getAll: () => [routedProxyId],
+			getAvailable: () => [routedProxyId],
+			hasProvider: (provider: string) => provider === "proxy",
+		};
+		expect(resolveCliModel({ cliModel: "proxy/foo", modelRegistry: registry }).model).toBeUndefined();
+		expect(resolveCliModel({ cliModel: "proxy/foo-latest", modelRegistry: registry }).model?.provider).toBe(
+			"custom-gateway",
+		);
+	});
+
 	test("ignores @slug on a non-aggregator model (no silent routing)", () => {
 		const result = parseModelPattern("gpt-4o@cerebras", allModels);
 		expect(result.model).toBeUndefined();
