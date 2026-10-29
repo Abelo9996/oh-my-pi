@@ -14,6 +14,8 @@
 
 ### Changed
 
+- OpenAI live steering (`providers.openaiLiveSteering`) is now off by default for GPT models; typed messages wait for the next tool boundary unless you enable it, avoiding `unsupported_native_inflight_message` errors
+
 - Sub-session collector now determines compression from filename extension instead of a boolean flag
 - HTML exports now match the `/stats` design, with a higher-contrast light theme, offline timeline drawer, full trace view, and sidebar navigation for nested subagents and advisors
 - `tui.autoGraph` defaults to the new `auto`: charts are refined by the judge whenever the judge role resolves to a native TypeSafe jev model, and drawn from the built-in guess otherwise
