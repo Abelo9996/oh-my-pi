@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Made Factory Droid's image models the last `image` role defaults, so `generate_image` works with only a Factory login; they run only after earlier candidates are unavailable or fail with an HTTP error, including behind an `image` role set without its own fallback chain
+- Made Factory Droid's image models the last `image` role defaults, so `generate_image` works with only a Factory login; they run only after earlier candidates are unavailable or fail with an HTTP error, including behind an `image` role set without its own fallback chain ([#17351](https://github.com/can1357/oh-my-pi/pull/17351) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
