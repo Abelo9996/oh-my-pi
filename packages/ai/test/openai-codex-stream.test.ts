@@ -782,7 +782,7 @@ describe("openai-codex streaming", () => {
 	}
 
 	/** Streams one Codex request over a websocket that answers it with `event`. */
-	async function runCodexWebSocketEvent(event: unknown) {
+	async function runCodexWebSocketEvent(event: Record<string, unknown>) {
 		class ReplyWebSocket extends MockWebSocket {
 			constructor(url: string, options?: WsOptions) {
 				super(url, options);
