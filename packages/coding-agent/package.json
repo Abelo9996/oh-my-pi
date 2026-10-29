@@ -43,7 +43,8 @@
 		"scripts",
 		"examples",
 		"README.md",
-		"CHANGELOG.md"
+		"CHANGELOG.md",
+		"THIRD-PARTY-NOTICES.txt"
 	],
 	"type": "module",
 	"main": "./src/index.ts",

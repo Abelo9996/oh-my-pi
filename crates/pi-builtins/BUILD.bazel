@@ -121,6 +121,7 @@ rust_library(
         "util.rg",
         "util.rm",
         "util.rmdir",
+        "util.rsync",
         "util.sed",
         "util.seq",
         "util.sha1sum",

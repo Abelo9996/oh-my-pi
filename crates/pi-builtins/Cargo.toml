@@ -145,9 +145,19 @@ features = [
   "update-control",
 ]
 
+[target."cfg(any(unix, windows))".dependencies]
 # `cp`'s copy-on-write clones (`pi_iso::cow`).
-[target."cfg(any(unix, windows))".dependencies.pi-iso]
-workspace = true
+pi-iso.workspace = true
+# `rsync`: strong checksums, daemon auth digests, token compression.
+base64.workspace = true
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+lz4_flex = "0.14"
+md-5 = "0.10"
+md4 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+xxhash-rust = { workspace = true, features = ["xxh3", "xxh64"] }
+zstd.workspace = true
 
 [target."cfg(any(unix, windows))".dependencies.tokio]
 version = "1.50.0"
@@ -368,6 +378,8 @@ base = [
 "util.rg" = ["util.grep"]
 "util.rm" = []
 "util.rmdir" = []
+# Needs processes and sockets: unix and windows targets.
+"util.rsync" = []
 "util.sed" = ["util.bre"]
 "util.seq" = []
 "util.sha1sum" = ["util.cksum"]
@@ -452,6 +464,7 @@ utils = [
   "util.rg",
   "util.rm",
   "util.rmdir",
+  "util.rsync",
   "util.sed",
   "util.seq",
   "util.sha1sum",

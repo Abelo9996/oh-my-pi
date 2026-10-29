@@ -72,6 +72,7 @@
       "import": "./native/index.js",
       "default": "./native/index.js"
     },
+    "./THIRD-PARTY-NOTICES.txt": "./THIRD-PARTY-NOTICES.txt",
     "./path": {
       "types": "./native/path.d.ts",
       "import": "./native/path.js",

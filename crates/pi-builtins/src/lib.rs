@@ -136,6 +136,7 @@ mod quoting_style;
 	feature = "util.date",
 	feature = "util.du",
 	feature = "util.ls",
+	feature = "util.rsync",
 	feature = "util.touch",
 	feature = "util.uptime"
 ))]
@@ -282,6 +283,8 @@ mod rg;
 mod rm;
 #[cfg(feature = "util.rmdir")]
 mod rmdir;
+#[cfg(all(feature = "util.rsync", any(unix, windows)))]
+mod rsync;
 #[cfg(feature = "util.sed")]
 mod sed;
 #[cfg(feature = "util.seq")]

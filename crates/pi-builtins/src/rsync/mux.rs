@@ -1,0 +1,2186 @@
+//! Buffered, multiplexed connection I/O.
+//!
+//! Once multiplexing starts, every write on a connection travels in frames: a
+//! 4-byte little-endian header `((MPLEX_BASE + code) << 24) | len` followed by
+//! `len` (at most 0xFFFFFF) payload bytes. Code `MSG_DATA` carries the data
+//! stream; every other code is an out-of-band message (logging, file status,
+//! error exit, …). Before that point the stream is raw bytes.
+//!
+//! The write half ([`MuxWriter`]) buffers data in a 64 KiB output buffer and
+//! frames everything pending as one MSG_DATA frame whenever a write does not
+//! fit or output is flushed, so frames end on write boundaries like
+//! upstream's. Messages go out at once, ahead of buffered data (upstream
+//! drains its message buffer before data).
+//!
+//! The read half ([`MuxReader`]) owns a background thread that drains the
+//! connection into memory, so blocked reads can honor `--timeout` and the
+//! cancellation flag even though the underlying stream blocks. Frames are
+//! decoded on the reading thread as reads need data: a message is passed to
+//! `on_msg` only once all data before it has been consumed (upstream's
+//! read-driven `read_a_msg`).
+
+use std::collections::VecDeque;
+use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::rsync::flists::lock;
+use crate::rsync::consts::{
+	BIGPATHBUFLEN, CF_INC_RECURSE, IO_BUFFER_SIZE, MAX_FRAME_LEN, MAX_MAP_SIZE, MPLEX_BASE,
+	MSG_BLOCK_STATS, MSG_CLIENT, MSG_DATA, MSG_DELETED, MSG_ERROR, MSG_ERROR_EXIT,
+	MSG_ERROR_SOCKET, MSG_ERROR_UTF8, MSG_ERROR_XFER, MSG_INFO, MSG_IO_ERROR, MSG_IO_TIMEOUT,
+	MSG_LOG, MSG_NO_SEND, MSG_NOOP, MSG_REDO, MSG_STATS, MSG_SUCCESS, MSG_WARNING,
+	MSK_ACTIVE_RECEIVER, MSK_ALLOW_FLUSH, msg_code_is_known,
+};
+use crate::rsync::exit::{RERR_SOCKETIO, RERR_STREAMIO, RERR_TIMEOUT, RsyncError};
+use crate::rsync::log::{Role, syserr_suffix};
+use crate::rsync::wire::{Proto, clone_io_error, is_retryable, put, wire_error};
+
+/// Upstream's longest poll interval between timeout checks, in seconds.
+const SELECT_TIMEOUT: u64 = 60;
+/// How often a blocked read looks at the cancellation flag.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
+/// Read-ahead bound of undecoded bytes.
+const RAW_CAP: usize = MAX_MAP_SIZE;
+/// Bound of decoded but unconsumed data bytes.
+const DATA_CAP: usize = MAX_MAP_SIZE;
+/// Frame header length.
+const HDR: usize = 4;
+/// Output buffer size (upstream `ROUND_UP_1024(IO_BUFFER_SIZE * 2)`), frame
+/// header slot included while multiplexed.
+const OUT_SIZE: usize = IO_BUFFER_SIZE * 2;
+/// Longest pause between retries of a would-block descriptor.
+const WOULD_BLOCK_MAX_WAIT: Duration = Duration::from_millis(20);
+
+/// The pause before retrying an operation that hit a non-blocking descriptor
+/// (upstream polls for readiness); `attempt` grows it up to 20 ms.
+fn would_block_pause(attempt: &mut u32) -> Duration {
+	let pause = Duration::from_micros(250u64 << (*attempt).min(7)).min(WOULD_BLOCK_MAX_WAIT);
+	*attempt = attempt.saturating_add(1);
+	pause
+}
+
+/// Milliseconds on a process-wide monotonic clock; never 0 (0 means "never").
+fn clock_ms() -> u64 {
+	static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+	u64::try_from(EPOCH.elapsed().as_millis()).unwrap_or(u64::MAX - 1) + 1
+}
+
+/// Whole seconds elapsed between two clock readings; a clock that never
+/// ticked (0) counts as idle forever (upstream's epoch-0 `time_t`).
+fn idle_secs(now: u64, since: u64) -> u64 {
+	if since == 0 { u64::MAX } else { now.saturating_sub(since) / 1000 }
+}
+
+fn who(role: Option<Role>) -> &'static str {
+	role.map_or("", Role::name)
+}
+
+fn timeout_error(role: Option<Role>, idle: u64) -> io::Error {
+	wire_error(
+		io::ErrorKind::TimedOut,
+		RERR_TIMEOUT,
+		format!("[{}] io timeout after {idle} seconds -- exiting", who(role)),
+		Some(("io.c", 266)),
+	)
+}
+
+/// Wraps an OS-level failure of the connection the way upstream reports it.
+fn socket_error(err: &io::Error, role: Option<Role>, what: &str, line: u32) -> io::Error {
+	if err.raw_os_error().is_none() {
+		return clone_io_error(err);
+	}
+	wire_error(
+		err.kind(),
+		RERR_SOCKETIO,
+		format!("rsync: [{}] {what} error: {}", who(role), syserr_suffix(err)),
+		Some(("io.c", line)),
+	)
+}
+
+fn frame_header(code: u8, len: usize) -> io::Result<[u8; HDR]> {
+	let tag = MPLEX_BASE.checked_add(code).ok_or_else(|| {
+		io::Error::new(io::ErrorKind::InvalidInput, format!("message code {code} out of range"))
+	})?;
+	if len > MAX_FRAME_LEN {
+		return Err(io::Error::new(
+			io::ErrorKind::InvalidInput,
+			format!("message of {len} bytes exceeds the {MAX_FRAME_LEN}-byte frame limit"),
+		));
+	}
+	Ok(((u32::from(tag) << 24) | len as u32).to_le_bytes())
+}
+
+/// `--timeout` derived intervals (upstream `set_io_timeout`).
+#[derive(Clone, Copy, Debug)]
+struct Timing {
+	/// The timeout itself, in seconds.
+	timeout: u64,
+	/// Keepalive interval: half the timeout, rounded up.
+	lull: u64,
+	/// Interval between timeout checks while blocked.
+	select: u64,
+}
+
+/// `--timeout` in whole seconds (0 = none).
+fn timeout_secs(timeout: Option<Duration>) -> u64 {
+	timeout.map_or(0, |d| d.as_secs())
+}
+
+impl Timing {
+	fn new(secs: u64) -> Option<Self> {
+		if secs == 0 {
+			return None;
+		}
+		let lull = (secs.saturating_add(1) / 2).min(i32::MAX as u64 / 5);
+		let select = if lull == 0 || lull > SELECT_TIMEOUT { SELECT_TIMEOUT } else { lull };
+		Some(Self { timeout: secs, lull, select })
+	}
+}
+
+/// Bytes read/written on one connection (for `--stats` and the summary line).
+///
+/// Counts are raw connection bytes, frame headers included (upstream
+/// `stats.total_read` / `stats.total_written`). The two activity clocks are
+/// shared by both halves of the connection for keepalive and timeout
+/// decisions.
+#[derive(Clone, Default)]
+pub(crate) struct IoCounters {
+	pub read: Arc<AtomicU64>,
+	pub written: Arc<AtomicU64>,
+	/// When bytes last arrived (internal monotonic milliseconds, 0 = never).
+	pub last_in: Arc<AtomicU64>,
+	/// When bytes were last written (internal monotonic milliseconds, 0 = never).
+	pub last_out: Arc<AtomicU64>,
+}
+
+impl IoCounters {
+	/// Bytes read so far.
+	pub(crate) fn total_read(&self) -> u64 {
+		self.read.load(Ordering::Relaxed)
+	}
+
+	/// Bytes written so far.
+	pub(crate) fn total_written(&self) -> u64 {
+		self.written.load(Ordering::Relaxed)
+	}
+}
+
+/// An out-of-band message from the peer (anything but MSG_DATA).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Msg {
+	pub code: u8,
+	pub payload: Vec<u8>,
+}
+
+/// Writer settings.
+#[derive(Clone, Default)]
+pub(crate) struct WriteConfig {
+	/// `--bwlimit` in KiB/s (0/None = unlimited).
+	pub bwlimit: Option<u64>,
+	/// `--timeout`; keepalives are sent when idle for half of it (upstream behavior).
+	pub timeout: Option<Duration>,
+	/// Cancellation flag observed while sleeping for `--bwlimit`.
+	pub cancel: Option<Arc<AtomicBool>>,
+}
+
+/// Upstream `sleep_for_bwlimit`: writes are cut to `writemax` bytes and the
+/// writer sleeps once the accumulated delay owed reaches a tenth of a second.
+struct BwLimit {
+	kib: i64,
+	writemax: usize,
+	owed: i64,
+	prior: Option<Instant>,
+}
+
+impl BwLimit {
+	const ONE_SEC: i64 = 1_000_000;
+	/// Microseconds per KiB at 1 KiB/s, truncated like upstream.
+	const PER_KIB: i64 = Self::ONE_SEC / 1024;
+
+	fn new(kib: u64) -> Option<Self> {
+		if kib == 0 {
+			return None;
+		}
+		let kib = i64::try_from(kib).unwrap_or(i64::MAX).min(i64::from(i32::MAX));
+		let writemax = usize::try_from(kib.saturating_mul(128)).unwrap_or(usize::MAX).max(512);
+		Some(Self { kib, writemax, owed: 0, prior: None })
+	}
+
+	fn micros(d: Duration) -> i64 {
+		i64::try_from(d.as_micros()).unwrap_or(i64::MAX)
+	}
+
+	/// Runs on the output thread; callers waiting on it observe cancellation.
+	fn after_write(&mut self, n: usize) {
+		self.owed = self.owed.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
+		let start = Instant::now();
+		if let Some(prior) = self.prior {
+			let elapsed = Self::micros(start.duration_since(prior));
+			self.owed = self.owed.saturating_sub(elapsed.saturating_mul(self.kib) / Self::PER_KIB).max(0);
+		}
+		let sleep_us = self.owed.saturating_mul(Self::PER_KIB) / self.kib;
+		if sleep_us < Self::ONE_SEC / 10 {
+			self.prior = Some(start);
+			return;
+		}
+		thread::sleep(Duration::from_micros(sleep_us.unsigned_abs()));
+		let end = Instant::now();
+		self.prior = Some(end);
+		let elapsed = Self::micros(end.duration_since(start));
+		self.owed = sleep_us.saturating_sub(elapsed).saturating_mul(self.kib) / Self::PER_KIB;
+	}
+}
+
+/// One unit of work for the output thread.
+enum OutJob {
+	/// `buf[start..]` goes to the connection; `count` adds it to `IoCounters::written`.
+	Data { buf: Vec<u8>, start: usize, count: bool },
+	/// Flush the underlying writer.
+	Flush,
+}
+
+struct OutState {
+	queue: VecDeque<OutJob>,
+	/// Bytes queued or being written.
+	queued: usize,
+	/// The thread is working on a job.
+	busy: bool,
+	/// The connection failed (raw error); nothing more is written.
+	failed: Option<io::Error>,
+	/// Every writer handle is gone: finish the queue, then exit.
+	closed: bool,
+	/// A spent data buffer for reuse.
+	spare: Option<Vec<u8>>,
+}
+
+/// Queue between writer handles and the thread that performs the writes, so
+/// a write blocked on the connection never blocks the caller beyond its own
+/// wait (which keeps serving incoming messages, like upstream's
+/// `perform_io`).
+struct OutPipe {
+	state: Mutex<OutState>,
+	cond: Condvar,
+}
+
+fn write_out(
+	inner: &mut dyn Write,
+	mut bytes: &[u8],
+	mut bw: Option<&mut BwLimit>,
+	counters: &IoCounters,
+	count: bool,
+) -> io::Result<()> {
+	let mut attempt = 0;
+	while !bytes.is_empty() {
+		let max = bw.as_ref().map_or(bytes.len(), |b| b.writemax.min(bytes.len()));
+		let n = match inner.write(&bytes[..max]) {
+			Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+			Ok(n) => n.min(max),
+			Err(e) if is_retryable(&e) => continue,
+			Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+				thread::sleep(would_block_pause(&mut attempt));
+				continue;
+			}
+			Err(e) => return Err(e),
+		};
+		attempt = 0;
+		if count {
+			counters.written.fetch_add(n as u64, Ordering::Relaxed);
+		}
+		counters.last_out.store(clock_ms(), Ordering::Relaxed);
+		bytes = &bytes[n..];
+		if let Some(bw) = bw.as_mut() {
+			bw.after_write(n);
+		}
+	}
+	Ok(())
+}
+
+fn flush_out(inner: &mut dyn Write) -> io::Result<()> {
+	let mut attempt = 0;
+	loop {
+		match inner.flush() {
+			Ok(()) => return Ok(()),
+			Err(e) if is_retryable(&e) => {}
+			Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+				thread::sleep(would_block_pause(&mut attempt));
+			}
+			Err(e) => return Err(e),
+		}
+	}
+}
+
+/// The output thread: performs queued jobs in order until closed or failed.
+fn out_loop(
+	pipe: &OutPipe,
+	mut inner: Box<dyn Write + Send>,
+	mut bw: Option<BwLimit>,
+	counters: &IoCounters,
+) {
+	loop {
+		let job = {
+			let mut o = lock(&pipe.state);
+			loop {
+				if let Some(job) = o.queue.pop_front() {
+					o.busy = true;
+					break job;
+				}
+				if o.closed {
+					return;
+				}
+				o = pipe.cond.wait(o).unwrap_or_else(PoisonError::into_inner);
+			}
+		};
+		let (res, done, spent) = match job {
+			OutJob::Data { buf, start, count } => {
+				let res = write_out(&mut *inner, &buf[start..], bw.as_mut(), counters, count);
+				(res, buf.len() - start, Some(buf))
+			}
+			OutJob::Flush => (flush_out(&mut *inner), 0, None),
+		};
+		let mut o = lock(&pipe.state);
+		o.busy = false;
+		o.queued = o.queued.saturating_sub(done);
+		if let Some(mut buf) = spent
+			&& o.spare.is_none()
+			&& buf.capacity() >= HDR + OUT_SIZE
+		{
+			buf.clear();
+			o.spare = Some(buf);
+		}
+		let failed = res.is_err();
+		if let Err(err) = res {
+			o.failed = Some(err);
+			o.queue.clear();
+			o.queued = 0;
+		}
+		pipe.cond.notify_all();
+		if failed {
+			return;
+		}
+	}
+}
+
+struct WState {
+	/// Frame header slot followed by pending data bytes.
+	buf: Vec<u8>,
+	multiplexed: bool,
+	batch: Option<Box<dyn Write + Send>>,
+	counting: bool,
+	role: Option<Role>,
+	/// The first connection failure; every later operation reports it again.
+	failed: Option<io::Error>,
+}
+
+struct WShared {
+	state: Mutex<WState>,
+	counters: IoCounters,
+	cancel: Option<Arc<AtomicBool>>,
+	/// `--timeout` in seconds (0 = none); read lock-free by a linked reader.
+	timeout: AtomicU64,
+	out: Arc<OutPipe>,
+	/// The linked reader, served while this writer waits on the connection.
+	peer: Mutex<Option<Arc<RShared>>>,
+}
+
+impl Drop for WShared {
+	fn drop(&mut self) {
+		lock(&self.out.state).closed = true;
+		self.out.cond.notify_all();
+	}
+}
+
+impl WState {
+	fn pending(&self) -> usize {
+		self.buf.len() - HDR
+	}
+
+	/// Data bytes the output buffer holds (the frame header slot is reserved
+	/// while multiplexed).
+	fn room(&self) -> usize {
+		if self.multiplexed { OUT_SIZE - HDR } else { OUT_SIZE }
+	}
+
+	/// Upstream `write_buf`: when `piece` does not fit beside the pending
+	/// bytes, everything pending goes out first as one frame.
+	fn buffer(&mut self, piece: &[u8], sh: &WShared) -> io::Result<()> {
+		if self.pending() + piece.len() > self.room() {
+			self.flush_data(sh)?;
+		}
+		self.buf.extend_from_slice(piece);
+		Ok(())
+	}
+
+	/// The sticky connection failure, mapped to upstream's diagnostic once.
+	fn check_failed(&mut self, sh: &WShared) -> io::Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(clone_io_error(err));
+		}
+		let mapped = match &lock(&sh.out.state).failed {
+			Some(raw) => socket_error(raw, self.role, "write", 967),
+			None => return Ok(()),
+		};
+		self.failed = Some(clone_io_error(&mapped));
+		Err(mapped)
+	}
+
+	/// Queues one job for the output thread (in order).
+	fn push(&mut self, sh: &WShared, job: OutJob, bytes: usize) -> io::Result<()> {
+		let mut o = lock(&sh.out.state);
+		if o.failed.is_some() {
+			drop(o);
+			return self.check_failed(sh);
+		}
+		o.queued += bytes;
+		o.queue.push_back(job);
+		sh.out.cond.notify_all();
+		Ok(())
+	}
+
+	/// Sends the pending data (one MSG_DATA frame when multiplexed).
+	fn flush_data(&mut self, sh: &WShared) -> io::Result<()> {
+		let len = self.pending();
+		if len == 0 {
+			return Ok(());
+		}
+		let header = frame_header(MSG_DATA, len)?;
+		let mut fresh = lock(&sh.out.state)
+			.spare
+			.take()
+			.unwrap_or_else(|| Vec::with_capacity(HDR + OUT_SIZE));
+		fresh.resize(HDR, 0);
+		let mut buf = std::mem::replace(&mut self.buf, fresh);
+		let start = if self.multiplexed {
+			buf[..HDR].copy_from_slice(&header);
+			0
+		} else {
+			HDR
+		};
+		let bytes = buf.len() - start;
+		self.push(sh, OutJob::Data { buf, start, count: self.counting }, bytes)
+	}
+
+	/// Asks the output thread to flush the underlying writer.
+	fn request_flush(&mut self, sh: &WShared) -> io::Result<()> {
+		self.push(sh, OutJob::Flush, 0)
+	}
+
+	/// Queues one complete frame.
+	fn send_frame(&mut self, code: u8, payload: &[u8], sh: &WShared) -> io::Result<()> {
+		let header = frame_header(code, payload.len())?;
+		let mut frame = Vec::with_capacity(HDR + payload.len());
+		frame.extend_from_slice(&header);
+		frame.extend_from_slice(payload);
+		let bytes = frame.len();
+		self.push(sh, OutJob::Data { buf: frame, start: 0, count: self.counting }, bytes)
+	}
+}
+
+/// Write half of a connection. Cheap to clone; all clones share one buffer and stream,
+/// so data and messages are ordered exactly as written. Raw until `start_multiplex`.
+///
+/// Byte counting is on from construction; upstream does not count the bytes of
+/// the version exchange or daemon greeting, so the session turns counting off
+/// for those (`set_counting`). Pending (unflushed) data is not sent on drop;
+/// everything already flushed is written out by the output thread, which
+/// exits once the last handle is gone and its queue is empty.
+///
+/// The connection is written by a dedicated output thread. A caller waiting
+/// on it (a flush, or a write when more than a buffer's worth is queued)
+/// meanwhile serves the linked reader's incoming messages as upstream's
+/// `perform_io` does, and returns early on cancellation or when a message
+/// handler fails (e.g. the peer's MSG_ERROR_EXIT).
+#[derive(Clone)]
+pub(crate) struct MuxWriter {
+	shared: Arc<WShared>,
+}
+
+impl MuxWriter {
+	/// A raw-mode writer over `inner`.
+	pub(crate) fn new(
+		inner: Box<dyn Write + Send>,
+		counters: IoCounters,
+		cfg: WriteConfig,
+	) -> Self {
+		let mut buf = Vec::with_capacity(HDR + OUT_SIZE);
+		buf.resize(HDR, 0);
+		let state = WState {
+			buf,
+			multiplexed: false,
+			batch: None,
+			counting: true,
+			role: None,
+			failed: None,
+		};
+		let out = Arc::new(OutPipe {
+			state: Mutex::new(OutState {
+				queue: VecDeque::new(),
+				queued: 0,
+				busy: false,
+				failed: None,
+				closed: false,
+				spare: None,
+			}),
+			cond: Condvar::new(),
+		});
+		let worker = Arc::clone(&out);
+		let worker_counters = counters.clone();
+		let bw = cfg.bwlimit.and_then(BwLimit::new);
+		let spawned = thread::Builder::new()
+			.name("rsync-io-write".into())
+			.spawn(move || out_loop(&worker, inner, bw, &worker_counters));
+		if let Err(err) = spawned {
+			lock(&out.state).failed = Some(err);
+		}
+		Self {
+			shared: Arc::new(WShared {
+				state: Mutex::new(state),
+				counters,
+				cancel: cfg.cancel,
+				timeout: AtomicU64::new(timeout_secs(cfg.timeout)),
+				out,
+				peer: Mutex::new(None),
+			}),
+		}
+	}
+
+	/// Waits for the output thread: until everything queued is written
+	/// (`drained`) or until at most one buffer's worth is queued. While
+	/// waiting it serves the linked reader's messages and checks
+	/// cancellation and `--timeout` (upstream `perform_io` for output).
+	fn settle(&self, drained: bool) -> io::Result<()> {
+		let sh = &*self.shared;
+		let mut next_check: Option<Instant> = None;
+		loop {
+			{
+				let deadline = Instant::now() + Duration::from_millis(10);
+				let mut o = lock(&sh.out.state);
+				loop {
+					if o.failed.is_some() {
+						drop(o);
+						return self.state().check_failed(sh);
+					}
+					let done = if drained {
+						o.queue.is_empty() && !o.busy
+					} else {
+						o.queued <= OUT_SIZE
+					};
+					if done {
+						return Ok(());
+					}
+					let now = Instant::now();
+					if now >= deadline {
+						break;
+					}
+					o = sh
+						.out
+						.cond
+						.wait_timeout(o, deadline - now)
+						.unwrap_or_else(PoisonError::into_inner)
+						.0;
+				}
+			}
+			if sh.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+				return Err(RsyncError::cancelled_io());
+			}
+			self.serve_peer()?;
+			if let Some(timing) = self.timing() {
+				let now = Instant::now();
+				let due = *next_check.get_or_insert(now + Duration::from_secs(timing.select));
+				if now >= due {
+					let role = self.state().role;
+					check_timeout(&sh.counters, Some(timing), role, None, 0, false)?;
+					next_check = Some(now + Duration::from_secs(timing.select));
+				}
+			}
+		}
+	}
+
+	/// Dispatches complete messages at the head of the linked reader's input
+	/// while this thread waits to write (upstream `perform_io` reads messages
+	/// while flushing output). Only on the thread that reads that reader, and
+	/// only when no unconsumed data precedes the message, so dispatch order
+	/// stays the reading order; data frames wait for the next `read`.
+	fn serve_peer(&self) -> io::Result<()> {
+		let Some(rs) = lock(&self.shared.peer).clone() else {
+			return Ok(());
+		};
+		let me = thread::current().id();
+		let mut st = rs.lock();
+		if st.closed || st.in_read || st.serving || st.last_reader != Some(me) {
+			return Ok(());
+		}
+		loop {
+			if let Some(err) = &st.fatal {
+				return Err(clone_io_error(err));
+			}
+			if st.mode != Mode::Mux || st.frame_left > 0 || !st.data.is_empty() || st.raw.len() < HDR
+			{
+				return Ok(());
+			}
+			let header = u32::from_le_bytes([st.raw[0], st.raw[1], st.raw[2], st.raw[3]]);
+			let len = (header & 0x00FF_FFFF) as usize;
+			let tag = i32::from(st.raw[3] as i8) - i32::from(MPLEX_BASE);
+			if tag == i32::from(MSG_DATA) {
+				return Ok(());
+			}
+			if let Err(err) = st.validate(tag, len) {
+				st.fatal = Some(clone_io_error(&err));
+				return Err(err);
+			}
+			if st.raw.len() < HDR + len {
+				return Ok(());
+			}
+			st.raw.drain(..HDR);
+			let payload: Vec<u8> = st.raw.drain(..len).collect();
+			rs.cond.notify_all();
+			let Some(mut on_msg) = st.on_msg.take() else {
+				continue;
+			};
+			st.serving = true;
+			drop(st);
+			let res = on_msg(Msg { code: tag as u8, payload });
+			st = rs.lock();
+			if st.on_msg.is_none() {
+				st.on_msg = Some(on_msg);
+			}
+			st.serving = false;
+			rs.cond.notify_all();
+			if let Err(err) = res {
+				st.fatal = Some(clone_io_error(&err));
+				return Err(err);
+			}
+		}
+	}
+
+	fn state(&self) -> MutexGuard<'_, WState> {
+		lock(&self.shared.state)
+	}
+
+	/// The local role (upstream `who_am_i`), for diagnostics and keepalive rules.
+	pub(crate) fn set_role(&self, role: Role) {
+		self.state().role = Some(role);
+	}
+
+	/// Replaces `--timeout` (e.g. after the daemon's MSG_IO_TIMEOUT); a linked
+	/// reader follows it too.
+	pub(crate) fn set_timeout(&self, timeout: Option<Duration>) {
+		self.shared.timeout.store(timeout_secs(timeout), Ordering::Relaxed);
+	}
+
+	/// The current `--timeout` intervals (lock-free).
+	fn timing(&self) -> Option<Timing> {
+		Timing::new(self.shared.timeout.load(Ordering::Relaxed))
+	}
+
+	/// Whether written bytes count toward `IoCounters::written`.
+	pub(crate) fn set_counting(&self, on: bool) {
+		self.state().counting = on;
+	}
+
+	/// Whether output is framed.
+	pub(crate) fn is_multiplexed(&self) -> bool {
+		self.state().multiplexed
+	}
+
+	/// Flushes pending raw data and frames everything from now on.
+	pub(crate) fn start_multiplex(&self) -> io::Result<()> {
+		let sh = &*self.shared;
+		{
+			let mut st = lock(&sh.state);
+			st.check_failed(sh)?;
+			st.flush_data(sh)?;
+			st.multiplexed = true;
+			st.request_flush(sh)?;
+		}
+		self.settle(true)
+	}
+
+	/// Flushes pending data as a frame and returns to raw output (upstream
+	/// `io_end_multiplex_out(MPLX_TO_BUFFERED)`, used for protocol-30
+	/// `--files-from` forwarding).
+	pub(crate) fn end_multiplex(&self) -> io::Result<()> {
+		let sh = &*self.shared;
+		{
+			let mut st = lock(&sh.state);
+			st.check_failed(sh)?;
+			st.flush_data(sh)?;
+			st.multiplexed = false;
+			st.request_flush(sh)?;
+		}
+		self.settle(true)
+	}
+
+	/// Sends one out-of-band message at once, ahead of any buffered data
+	/// (which stays buffered). Before multiplexing starts the message is
+	/// dropped (upstream behavior).
+	pub(crate) fn send_msg(&self, code: u8, payload: &[u8]) -> io::Result<()> {
+		self.try_send_msg(code, payload).map(drop)
+	}
+
+	/// Like `send_msg`, reporting whether the message went out (false while raw).
+	pub(crate) fn try_send_msg(&self, code: u8, payload: &[u8]) -> io::Result<bool> {
+		let sh = &*self.shared;
+		{
+			let mut st = lock(&sh.state);
+			st.check_failed(sh)?;
+			if !st.multiplexed {
+				return Ok(false);
+			}
+			st.send_frame(code, payload, sh)?;
+			st.request_flush(sh)?;
+		}
+		self.settle(true)?;
+		Ok(true)
+	}
+
+	/// Upstream `maybe_send_keepalive(now, flags)` (`MSK_*` flags) with this
+	/// writer's role. Every protocol 29–33 peer accepts the keepalive 3.5.1
+	/// sends: an empty MSG_DATA frame. It goes out only when multiplexed, this
+	/// side is the sender, generator, or (while receiving data) receiver, and
+	/// nothing was written for half the timeout; pending data is flushed
+	/// instead of sending an empty frame. There is no `--timeout` guard (a
+	/// protocol-30 MSG_NOOP makes the sender answer even without a timeout).
+	pub(crate) fn maybe_keepalive(&self, flags: u32) -> io::Result<()> {
+		let role = self.state().role;
+		self.keepalive_for(role, flags, clock_ms(), true)
+	}
+
+	/// Upstream `check_timeout(1, flags)` for a thread that waits on something
+	/// other than the connection (e.g. the generator): keepalive per this
+	/// writer's role, then the idle check. Call it at least once per second
+	/// while idle.
+	pub(crate) fn idle(&self, flags: u32) -> io::Result<()> {
+		let role = self.state().role;
+		check_timeout(&self.shared.counters, self.timing(), role, Some(self), flags, true)
+	}
+
+	/// Keepalive per upstream rules; `wait_for_lock` callers (not the read
+	/// path) also wait until it is written.
+	fn keepalive_for(
+		&self,
+		role: Option<Role>,
+		flags: u32,
+		now: u64,
+		wait_for_lock: bool,
+	) -> io::Result<()> {
+		let sh = &*self.shared;
+		if flags & MSK_ACTIVE_RECEIVER != 0 {
+			sh.counters.last_in.store(now, Ordering::Relaxed);
+		}
+		if !matches!(role, Some(Role::Sender | Role::Receiver | Role::Generator)) {
+			return Ok(());
+		}
+		let mut st = if wait_for_lock {
+			lock(&sh.state)
+		} else {
+			match sh.state.try_lock() {
+				Ok(guard) => guard,
+				Err(TryLockError::Poisoned(p)) => p.into_inner(),
+				// Another thread is writing: output is not idle.
+				Err(TryLockError::WouldBlock) => return Ok(()),
+			}
+		};
+		let (lull, timeout) = self.timing().map_or((0, 0), |t| (t.lull, t.timeout));
+		if idle_secs(now, sh.counters.last_out.load(Ordering::Relaxed)) < lull {
+			return Ok(());
+		}
+		if role == Some(Role::Receiver)
+			&& idle_secs(now, sh.counters.last_in.load(Ordering::Relaxed)) >= timeout
+		{
+			return Ok(());
+		}
+		st.check_failed(sh)?;
+		if st.pending() == 0 {
+			if !st.multiplexed {
+				return Ok(());
+			}
+			st.send_frame(MSG_DATA, &[], sh)?;
+		} else if flags & MSK_ALLOW_FLUSH != 0 {
+			st.flush_data(sh)?;
+		} else {
+			return Ok(());
+		}
+		st.request_flush(sh)?;
+		drop(st);
+		if wait_for_lock { self.settle(true) } else { Ok(()) }
+	}
+
+	/// Flushes unless another thread holds the writer (it is writing, so the
+	/// output is moving). Returns whether the flush happened.
+	fn try_flush(&self) -> io::Result<bool> {
+		let sh = &*self.shared;
+		let mut st = match sh.state.try_lock() {
+			Ok(guard) => guard,
+			Err(TryLockError::Poisoned(p)) => p.into_inner(),
+			Err(TryLockError::WouldBlock) => return Ok(false),
+		};
+		st.check_failed(sh)?;
+		st.flush_data(sh)?;
+		st.request_flush(sh)?;
+		Ok(true)
+	}
+
+	/// Tees every data byte written from now on into a batch file.
+	pub(crate) fn set_batch(&self, batch: Option<Box<dyn Write + Send>>) {
+		self.state().batch = batch;
+	}
+}
+
+impl Write for MuxWriter {
+	fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+		if data.is_empty() {
+			return Ok(0);
+		}
+		let sh = &*self.shared;
+		{
+			let mut st = lock(&sh.state);
+			st.check_failed(sh)?;
+			if let Some(batch) = st.batch.as_mut() {
+				put(batch, data)?;
+			}
+			let mut rest = data;
+			if rest.len() > st.room() {
+				// Upstream `write_bigbuf`: half-buffer pieces until the
+				// remainder is at most half a buffer plus 1 KiB.
+				let half = st.room() / 2;
+				while rest.len() > half + 1024 {
+					st.buffer(&rest[..half], sh)?;
+					rest = &rest[half..];
+				}
+			}
+			st.buffer(rest, sh)?;
+		}
+		self.settle(false)?;
+		Ok(data.len())
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		let sh = &*self.shared;
+		{
+			let mut st = lock(&sh.state);
+			st.check_failed(sh)?;
+			st.flush_data(sh)?;
+			st.request_flush(sh)?;
+		}
+		self.settle(true)
+	}
+}
+
+/// Upstream `check_timeout`: optional keepalive, then the idle check (the
+/// receiver never times out by itself).
+fn check_timeout(
+	counters: &IoCounters,
+	timing: Option<Timing>,
+	role: Option<Role>,
+	writer: Option<&MuxWriter>,
+	flags: u32,
+	wait_for_lock: bool,
+) -> io::Result<()> {
+	let Some(timing) = timing else {
+		return Ok(());
+	};
+	let now = clock_ms();
+	if let Some(writer) = writer {
+		writer.keepalive_for(role, flags, now, wait_for_lock)?;
+	}
+	let _ = counters.last_in.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
+	if role == Some(Role::Receiver) {
+		return Ok(());
+	}
+	// Output through the linked writer counts even if it was built with its
+	// own counters.
+	let last_out = writer
+		.map(|w| w.shared.counters.last_out.load(Ordering::Relaxed))
+		.unwrap_or(0)
+		.max(counters.last_out.load(Ordering::Relaxed));
+	let chk = counters.last_in.load(Ordering::Relaxed).max(last_out);
+	let idle = idle_secs(now, chk);
+	if idle >= timing.timeout { Err(timeout_error(role, idle)) } else { Ok(()) }
+}
+
+/// Reader settings.
+#[derive(Clone, Default)]
+pub(crate) struct ReadConfig {
+	pub timeout: Option<Duration>,
+}
+
+type OnMsg = Box<dyn FnMut(Msg) -> io::Result<()> + Send>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+	Raw,
+	Mux,
+}
+
+struct RState {
+	/// Bytes read from the connection, not yet consumed (raw) or decoded (mux).
+	raw: VecDeque<u8>,
+	/// Decoded MSG_DATA payload awaiting `read`.
+	data: VecDeque<u8>,
+	mode: Mode,
+	/// Payload bytes of the current MSG_DATA frame still in `raw`.
+	frame_left: usize,
+	/// Size (header included) of the current MSG_DATA frame until its first
+	/// byte is handed to `read`.
+	frame_uncounted: u64,
+	on_msg: Option<OnMsg>,
+	/// A `read` is in progress.
+	in_read: bool,
+	/// A waiting writer is running `on_msg` (see `MuxWriter::serve_peer`).
+	serving: bool,
+	/// The thread of the latest `read`; only it may serve messages while
+	/// waiting to write.
+	last_reader: Option<thread::ThreadId>,
+	eof: bool,
+	read_err: Option<io::Error>,
+	/// Malformed input or a failed `on_msg`; sticky.
+	fatal: Option<io::Error>,
+	counting: bool,
+	closed: bool,
+	batch: Option<Box<dyn Write + Send>>,
+	role: Option<Role>,
+	proto: Option<Proto>,
+	am_server: bool,
+	local_server: bool,
+	timing: Option<Timing>,
+}
+
+struct RShared {
+	state: Mutex<RState>,
+	cond: Condvar,
+	counters: IoCounters,
+	cancel: Arc<AtomicBool>,
+	/// See [`MuxReader::consumed_frame_bytes`].
+	consumed: AtomicU64,
+}
+
+impl RShared {
+	fn lock(&self) -> MutexGuard<'_, RState> {
+		lock(&self.state)
+	}
+
+	fn wait<'a>(&self, guard: MutexGuard<'a, RState>) -> MutexGuard<'a, RState> {
+		self.cond.wait(guard).unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Waits briefly for the reader to be closed (would-block retry pause).
+	fn pause(&self, attempt: &mut u32) -> bool {
+		let st = self.wait_for(self.lock(), would_block_pause(attempt));
+		!st.closed
+	}
+
+	fn wait_for<'a>(&self, guard: MutexGuard<'a, RState>, d: Duration) -> MutexGuard<'a, RState> {
+		self.cond.wait_timeout(guard, d).unwrap_or_else(PoisonError::into_inner).0
+	}
+}
+
+impl RState {
+	fn inc_suffix(&self) -> &'static str {
+		match self.proto {
+			Some(p) if p.version >= 30 && p.has(CF_INC_RECURSE) => "/inc",
+			_ => "",
+		}
+	}
+
+	/// Upstream `read_a_msg` acceptance rules for a frame header. Role-based
+	/// rules apply only once the role is known.
+	fn validate(&self, tag: i32, len: usize) -> io::Result<()> {
+		let who = who(self.role);
+		let inc = self.inc_suffix();
+		let error = |text: &str, line: u32| {
+			wire_error(
+				io::ErrorKind::InvalidData,
+				RERR_STREAMIO,
+				format!("{text} {tag}:{len} [{who}{inc}]"),
+				Some(("io.c", line)),
+			)
+		};
+		let invalid = || error("invalid multi-message", 1837);
+		let overflow = || error("multiplexing overflow", 1876);
+		let code = match u8::try_from(tag) {
+			Ok(code) if msg_code_is_known(code) => code,
+			_ => {
+				return Err(wire_error(
+					io::ErrorKind::InvalidData,
+					RERR_STREAMIO,
+					format!("unexpected tag {tag} [{who}{inc}]"),
+					Some(("io.c", 1934)),
+				));
+			}
+		};
+		let role_in = |roles: &[Role]| self.role.is_none_or(|r| roles.contains(&r));
+		let generator = role_in(&[Role::Generator]);
+		let bad = match code {
+			MSG_DATA => false,
+			MSG_STATS => len != 8 || !generator,
+			MSG_BLOCK_STATS => {
+				len != 8
+					|| self.proto.is_some_and(|p| p.version < 33)
+					|| !role_in(&[Role::Generator, Role::Sender])
+			}
+			MSG_REDO => len != 4 || !generator,
+			MSG_IO_ERROR | MSG_NO_SEND => len != 4,
+			MSG_IO_TIMEOUT => len != 4 || self.am_server || self.role == Some(Role::Generator),
+			MSG_NOOP => len != 0,
+			MSG_SUCCESS => len != if self.local_server { 4 + 8 + 8 } else { 4 },
+			MSG_ERROR_EXIT => len != 0 && len != 4,
+			MSG_DELETED | MSG_INFO | MSG_ERROR | MSG_ERROR_XFER | MSG_WARNING => {
+				if len >= BIGPATHBUFLEN {
+					return Err(overflow());
+				}
+				false
+			}
+			MSG_ERROR_SOCKET | MSG_ERROR_UTF8 | MSG_CLIENT | MSG_LOG => {
+				if !generator {
+					return Err(invalid());
+				}
+				if len >= BIGPATHBUFLEN {
+					return Err(overflow());
+				}
+				false
+			}
+			_ => false,
+		};
+		if bad { Err(invalid()) } else { Ok(()) }
+	}
+
+	/// Whether the decoder can make progress right now.
+	fn can_demux(&self) -> bool {
+		if self.mode != Mode::Mux || self.fatal.is_some() {
+			return false;
+		}
+		if self.frame_left > 0 {
+			return !self.raw.is_empty() && self.data.len() < DATA_CAP;
+		}
+		// The next header is looked at only once the data before it has been
+		// consumed, like upstream.
+		if self.raw.len() < HDR || !self.data.is_empty() {
+			return false;
+		}
+		let header = u32::from_le_bytes([self.raw[0], self.raw[1], self.raw[2], self.raw[3]]);
+		let len = (header & 0x00FF_FFFF) as usize;
+		// Data headers and malformed headers are handled at once; a message
+		// waits for its whole payload.
+		header >> 24 == u32::from(MPLEX_BASE + MSG_DATA) || self.raw.len() >= HDR + len || {
+			let tag = i32::from(self.raw[3] as i8) - i32::from(MPLEX_BASE);
+			self.validate(tag, len).is_err()
+		}
+	}
+
+	fn inner_done(&self) -> bool {
+		self.eof || self.read_err.is_some()
+	}
+
+	/// Whether `read` may still get bytes without new input.
+	fn more_possible(&self) -> bool {
+		match self.mode {
+			Mode::Raw => !self.raw.is_empty(),
+			Mode::Mux => !self.data.is_empty() || self.can_demux(),
+		}
+	}
+
+	/// The error for a read that can never be satisfied.
+	fn end_error(&self, counters: &IoCounters) -> io::Error {
+		match &self.read_err {
+			Some(err) => socket_error(err, self.role, "read", 925),
+			None => wire_error(
+				io::ErrorKind::UnexpectedEof,
+				RERR_STREAMIO,
+				format!(
+					"rsync: connection unexpectedly closed ({} bytes received so far) [{}]",
+					counters.total_read(),
+					who(self.role)
+				),
+				Some(("io.c", 303)),
+			),
+		}
+	}
+}
+
+/// Decodes frames until data is available (or nothing more can be decoded),
+/// on the reading thread; releases the lock while `on_msg` runs.
+fn demux<'a>(sh: &'a RShared, mut guard: MutexGuard<'a, RState>) -> MutexGuard<'a, RState> {
+	while guard.can_demux() {
+		let st = &mut *guard;
+		if st.frame_left > 0 {
+			let n = st.frame_left.min(st.raw.len()).min(DATA_CAP - st.data.len());
+			st.data.extend(st.raw.drain(..n));
+			st.frame_left -= n;
+			sh.cond.notify_all();
+			continue;
+		}
+		let header = u32::from_le_bytes([st.raw[0], st.raw[1], st.raw[2], st.raw[3]]);
+		let len = (header & 0x00FF_FFFF) as usize;
+		// The tag byte is sign-extended like upstream's `int` shift.
+		let tag = i32::from(st.raw[3] as i8) - i32::from(MPLEX_BASE);
+		if let Err(err) = st.validate(tag, len) {
+			st.fatal = Some(err);
+			sh.cond.notify_all();
+			break;
+		}
+		st.raw.drain(..HDR);
+		sh.cond.notify_all();
+		if tag == i32::from(MSG_DATA) {
+			st.frame_left = len;
+			st.frame_uncounted = if len > 0 { (HDR + len) as u64 } else { 0 };
+			continue;
+		}
+		let payload: Vec<u8> = st.raw.drain(..len).collect();
+		let Some(mut on_msg) = st.on_msg.take() else {
+			continue;
+		};
+		drop(guard);
+		let res = on_msg(Msg { code: tag as u8, payload });
+		guard = sh.lock();
+		if guard.on_msg.is_none() {
+			guard.on_msg = Some(on_msg);
+		}
+		if let Err(err) = res {
+			guard.fatal = Some(err);
+		}
+		sh.cond.notify_all();
+	}
+	guard
+}
+
+/// Drains the connection into `raw` until EOF, an error, or close.
+fn reader_loop(sh: &RShared, mut inner: Box<dyn Read + Send>) {
+	let mut buf = vec![0u8; IO_BUFFER_SIZE];
+	let mut attempt = 0;
+	loop {
+		{
+			let mut st = sh.lock();
+			while !st.closed && st.raw.len() >= RAW_CAP {
+				st = sh.wait(st);
+			}
+			if st.closed {
+				return;
+			}
+		}
+		let res = inner.read(&mut buf);
+		if res.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock) {
+			// A non-blocking descriptor: wait and retry (upstream polls).
+			if !sh.pause(&mut attempt) {
+				return;
+			}
+			continue;
+		}
+		attempt = 0;
+		let mut st = sh.lock();
+		match res {
+			Ok(0) => {
+				st.eof = true;
+				sh.cond.notify_all();
+				return;
+			}
+			Ok(n) => {
+				let n = n.min(buf.len());
+				st.raw.extend(&buf[..n]);
+				if st.counting {
+					sh.counters.read.fetch_add(n as u64, Ordering::Relaxed);
+				}
+				sh.counters.last_in.store(clock_ms(), Ordering::Relaxed);
+				sh.cond.notify_all();
+			}
+			Err(e) if is_retryable(&e) => {}
+			Err(e) => {
+				st.read_err = Some(e);
+				sh.cond.notify_all();
+				return;
+			}
+		}
+	}
+}
+
+/// Read half. Raw (synchronous, buffered) until `start_multiplex`; from then on
+/// `read` demultiplexes frames as it needs data: MSG_DATA payloads are returned,
+/// every other message is passed to `on_msg` on the reading thread once all data
+/// before it has been consumed.
+/// Before `read` blocks on an empty queue it flushes the linked writer (deadlock rule).
+/// `--timeout` with no incoming bytes surfaces as an io::Error carrying RERR_TIMEOUT
+/// (see `exit::RsyncError::from_io`). Cancellation makes a blocked read fail promptly.
+///
+/// A background thread reads the connection ahead (bounded) from the first
+/// read on; it exits at EOF or, after the reader is dropped, when its pending
+/// read returns. Cancellation is reported as [`RsyncError::cancelled_io`].
+pub(crate) struct MuxReader {
+	shared: Arc<RShared>,
+	inner: Option<Box<dyn Read + Send>>,
+	writer: Option<MuxWriter>,
+}
+
+impl MuxReader {
+	/// A raw-mode reader over `inner`.
+	pub(crate) fn new(
+		inner: Box<dyn Read + Send>,
+		counters: IoCounters,
+		cancel: Arc<AtomicBool>,
+		cfg: ReadConfig,
+	) -> Self {
+		let state = RState {
+			raw: VecDeque::new(),
+			data: VecDeque::new(),
+			mode: Mode::Raw,
+			frame_left: 0,
+			frame_uncounted: 0,
+			on_msg: None,
+			in_read: false,
+			serving: false,
+			last_reader: None,
+			eof: false,
+			read_err: None,
+			fatal: None,
+			counting: true,
+			closed: false,
+			batch: None,
+			role: None,
+			proto: None,
+			am_server: false,
+			local_server: false,
+			timing: Timing::new(timeout_secs(cfg.timeout)),
+		};
+		Self {
+			shared: Arc::new(RShared {
+				state: Mutex::new(state),
+				cond: Condvar::new(),
+				counters,
+				cancel,
+				consumed: AtomicU64::new(0),
+			}),
+			inner: Some(inner),
+			writer: None,
+		}
+	}
+
+	/// The writer flushed before a read blocks and used for keepalives. While
+	/// that writer waits on the connection from the thread that reads this
+	/// reader, it dispatches this reader's incoming messages.
+	pub(crate) fn link_writer(&mut self, writer: MuxWriter) {
+		*lock(&writer.shared.peer) = Some(Arc::clone(&self.shared));
+		self.writer = Some(writer);
+	}
+
+	/// The local role (upstream `who_am_i`): names diagnostics and selects the
+	/// message, keepalive, and timeout rules.
+	pub(crate) fn set_role(&self, role: Role) {
+		self.shared.lock().role = Some(role);
+		self.shared.cond.notify_all();
+	}
+
+	/// The negotiated protocol (MSG_BLOCK_STATS needs 33; inc-recursion is
+	/// named in diagnostics).
+	pub(crate) fn set_proto(&self, proto: Proto) {
+		self.shared.lock().proto = Some(proto);
+		self.shared.cond.notify_all();
+	}
+
+	/// Upstream `am_server` and `local_server` (MSG_IO_TIMEOUT and
+	/// MSG_SUCCESS acceptance).
+	pub(crate) fn set_server(&self, am_server: bool, local_server: bool) {
+		let mut st = self.shared.lock();
+		st.am_server = am_server;
+		st.local_server = local_server;
+	}
+
+	/// Whether bytes read count toward `IoCounters::read`. Turning counting on
+	/// also counts bytes already read ahead but not yet consumed, as upstream
+	/// would read them only once buffering starts.
+	pub(crate) fn set_counting(&self, on: bool) {
+		let mut st = self.shared.lock();
+		if on && !st.counting {
+			let unconsumed = (st.raw.len() + st.data.len()) as u64;
+			self.shared.counters.read.fetch_add(unconsumed, Ordering::Relaxed);
+		}
+		st.counting = on;
+	}
+
+	/// Bytes of the input stream handed to `read` so far, counted the way
+	/// upstream's whole-buffer reads count them: multiplexed, a MSG_DATA frame
+	/// adds its 4-byte header plus its full payload when its first byte is
+	/// handed out; raw, every byte handed out.
+	pub(crate) fn consumed_frame_bytes(&self) -> u64 {
+		self.shared.consumed.load(Ordering::Relaxed)
+	}
+
+	/// Non-blocking: whether a `read` would return (data, EOF, or an error)
+	/// without waiting for new input from the peer (upstream `perform_io`'s
+	/// zero-timeout poll). Undecoded buffered bytes count as ready, as the
+	/// descriptor would poll readable. Never flushes or dispatches messages.
+	pub(crate) fn data_ready(&mut self) -> io::Result<bool> {
+		if self.shared.cancel.load(Ordering::Relaxed) {
+			return Ok(true);
+		}
+		self.ensure_reader()?;
+		let st = self.shared.lock();
+		Ok(st.fatal.is_some()
+			|| st.inner_done()
+			|| !st.raw.is_empty()
+			|| (st.mode == Mode::Mux && !st.data.is_empty()))
+	}
+
+	fn ensure_reader(&mut self) -> io::Result<()> {
+		let Some(inner) = self.inner.take() else {
+			return Ok(());
+		};
+		let worker = Arc::clone(&self.shared);
+		let spawned = thread::Builder::new()
+			.name("rsync-io-read".into())
+			.spawn(move || reader_loop(&worker, inner));
+		if let Err(err) = spawned {
+			self.shared.lock().read_err = Some(clone_io_error(&err));
+			return Err(err);
+		}
+		Ok(())
+	}
+
+	/// Starts demultiplexing at the current stream position.
+	pub(crate) fn start_multiplex(
+		&mut self,
+		on_msg: Box<dyn FnMut(Msg) -> io::Result<()> + Send>,
+	) -> io::Result<()> {
+		self.ensure_reader()?;
+		let mut st = self.shared.lock();
+		st.on_msg = Some(on_msg);
+		if st.mode != Mode::Mux {
+			st.mode = Mode::Mux;
+			st.frame_left = 0;
+			st.frame_uncounted = 0;
+		}
+		self.shared.cond.notify_all();
+		Ok(())
+	}
+
+	/// Returns to raw input at the current position (upstream
+	/// `io_end_multiplex_in(MPLX_TO_BUFFERED)`); fails inside a data frame.
+	pub(crate) fn end_multiplex(&mut self) -> io::Result<()> {
+		let sh = &*self.shared;
+		let mut st = sh.lock();
+		if st.mode != Mode::Mux {
+			return Ok(());
+		}
+		if st.frame_left > 0 || !st.data.is_empty() {
+			return Err(wire_error(
+				io::ErrorKind::InvalidData,
+				RERR_STREAMIO,
+				format!(
+					"multiplexed input ended inside a data frame [{}{}]",
+					who(st.role),
+					st.inc_suffix()
+				),
+				None,
+			));
+		}
+		st.mode = Mode::Raw;
+		sh.cond.notify_all();
+		Ok(())
+	}
+
+	/// Tees every data byte read from now on into a batch file.
+	pub(crate) fn set_batch(&mut self, batch: Option<Box<dyn Write + Send>>) {
+		self.shared.lock().batch = batch;
+	}
+}
+
+impl Read for MuxReader {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		if buf.is_empty() {
+			return Ok(0);
+		}
+		{
+			let mut st = self.shared.lock();
+			while st.serving {
+				st = self.shared.wait_for(st, CANCEL_POLL);
+			}
+			st.in_read = true;
+			st.last_reader = Some(thread::current().id());
+		}
+		let res = self.read_data(buf);
+		self.shared.lock().in_read = false;
+		res
+	}
+}
+
+impl MuxReader {
+	fn read_data(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		let sh = Arc::clone(&self.shared);
+		if sh.cancel.load(Ordering::Relaxed) {
+			return Err(RsyncError::cancelled_io());
+		}
+		self.ensure_reader()?;
+		let mut st = sh.lock();
+		let mut flush_pending = self.writer.is_some();
+		let mut next_check: Option<Instant> = None;
+		loop {
+			if st.mode == Mode::Mux {
+				st = demux(&sh, st);
+			}
+			let n = match st.mode {
+				Mode::Raw => st.raw.read(buf)?,
+				Mode::Mux => st.data.read(buf)?,
+			};
+			if n > 0 {
+				let counted = match st.mode {
+					Mode::Raw => n as u64,
+					Mode::Mux => std::mem::take(&mut st.frame_uncounted),
+				};
+				sh.consumed.fetch_add(counted, Ordering::Relaxed);
+				if let Some(batch) = st.batch.as_mut() {
+					put(batch, &buf[..n])?;
+				}
+				sh.cond.notify_all();
+				return Ok(n);
+			}
+			if let Some(err) = &st.fatal {
+				return Err(clone_io_error(err));
+			}
+			if st.inner_done() && !st.more_possible() {
+				return Err(st.end_error(&sh.counters));
+			}
+			if sh.cancel.load(Ordering::Relaxed) {
+				return Err(RsyncError::cancelled_io());
+			}
+			if flush_pending && let Some(writer) = &self.writer {
+				drop(st);
+				let flushed = writer.try_flush();
+				st = sh.lock();
+				flush_pending = !flushed?;
+				continue;
+			}
+			let mut wait = CANCEL_POLL;
+			// A linked writer carries the connection's current --timeout
+			// (MSG_IO_TIMEOUT updates it there).
+			let timing = self.writer.as_ref().map_or(st.timing, MuxWriter::timing);
+			if let Some(timing) = timing {
+				let now = Instant::now();
+				let select = Duration::from_secs(timing.select);
+				let due = *next_check.get_or_insert(now + select);
+				if now >= due {
+					let role = st.role;
+					drop(st);
+					check_timeout(&sh.counters, Some(timing), role, self.writer.as_ref(), 0, false)?;
+					st = sh.lock();
+					next_check = Some(Instant::now() + select);
+					continue;
+				}
+				wait = wait.min(due - now);
+			}
+			if flush_pending {
+				// The writer was busy; retry the flush soon.
+				wait = wait.min(Duration::from_millis(10));
+			}
+			st = sh.wait_for(st, wait);
+		}
+	}
+}
+
+impl Drop for MuxReader {
+	fn drop(&mut self) {
+		self.shared.lock().closed = true;
+		self.shared.cond.notify_all();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::io::Cursor;
+	use std::sync::mpsc;
+
+	use super::*;
+	use crate::rsync::exit::RERR_SIGNAL;
+	use crate::rsync::wire::wire_detail;
+
+	const P33: Proto = Proto::new(33, 0);
+
+	/// A Write whose bytes (and individual write sizes) can be inspected.
+	#[derive(Clone, Default)]
+	struct Sink {
+		bytes: Arc<Mutex<Vec<u8>>>,
+		writes: Arc<Mutex<Vec<usize>>>,
+	}
+
+	impl Sink {
+		fn take(&self) -> Vec<u8> {
+			std::mem::take(&mut *lock(&self.bytes))
+		}
+	}
+
+	impl Write for Sink {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+			lock(&self.bytes).extend_from_slice(buf);
+			lock(&self.writes).push(buf.len());
+			Ok(buf.len())
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	/// A Read that blocks until bytes are sent (EOF once the sender is dropped).
+	struct Blocking(mpsc::Receiver<Vec<u8>>, Vec<u8>);
+
+	impl Read for Blocking {
+		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+			if self.1.is_empty() {
+				match self.0.recv() {
+					Ok(v) => self.1 = v,
+					Err(_) => return Ok(0),
+				}
+			}
+			let n = buf.len().min(self.1.len());
+			buf[..n].copy_from_slice(&self.1[..n]);
+			self.1.drain(..n);
+			Ok(n)
+		}
+	}
+
+	fn frame(code: u8, payload: &[u8]) -> Vec<u8> {
+		let mut v = frame_header(code, payload.len()).unwrap().to_vec();
+		v.extend_from_slice(payload);
+		v
+	}
+
+	fn writer(sink: &Sink, cfg: WriteConfig) -> MuxWriter {
+		MuxWriter::new(Box::new(sink.clone()), IoCounters::default(), cfg)
+	}
+
+	fn reader(bytes: Vec<u8>) -> MuxReader {
+		MuxReader::new(
+			Box::new(Cursor::new(bytes)),
+			IoCounters::default(),
+			Arc::new(AtomicBool::new(false)),
+			ReadConfig::default(),
+		)
+	}
+
+	fn recorder() -> (Arc<Mutex<Vec<Msg>>>, OnMsg) {
+		let seen = Arc::new(Mutex::new(Vec::new()));
+		let sink = Arc::clone(&seen);
+		(seen, Box::new(move |m| {
+			lock(&sink).push(m);
+			Ok(())
+		}))
+	}
+
+	fn detail(err: &io::Error) -> String {
+		wire_detail(err).map(|d| d.message.clone()).unwrap_or_default()
+	}
+
+	#[test]
+	fn header_layout_matches_captured_frames() {
+		// MSG_DATA of 41 bytes and MSG_BLOCK_STATS of 8 as sent by rsync 3.5.1.
+		assert_eq!(frame_header(MSG_DATA, 0x29).unwrap(), [0x29, 0, 0, 0x07]);
+		assert_eq!(frame_header(MSG_BLOCK_STATS, 8).unwrap(), [0x08, 0, 0, 0x12]);
+		assert_eq!(frame_header(MSG_INFO, 0xFF_FFFF).unwrap(), [0xff, 0xff, 0xff, 0x09]);
+		assert!(frame_header(MSG_INFO, 0x100_0000).is_err());
+		assert!(frame_header(249, 0).is_err());
+	}
+
+	#[test]
+	fn raw_until_multiplexed_then_framed_in_order() {
+		let sink = Sink::default();
+		let mut w = writer(&sink, WriteConfig::default());
+		w.write_all(&[0x21, 0, 0, 0]).unwrap();
+		assert!(!w.try_send_msg(MSG_INFO, b"dropped").unwrap());
+		w.start_multiplex().unwrap();
+		assert_eq!(sink.take(), [0x21, 0, 0, 0]);
+
+		w.write_all(b"hello").unwrap();
+		assert!(sink.take().is_empty(), "data stays buffered");
+		// A message overtakes buffered data (upstream drains iobuf.msg first).
+		w.send_msg(MSG_INFO, b"hi\n").unwrap();
+		assert_eq!(sink.take(), frame(MSG_INFO, b"hi\n"));
+		w.write_all(b"world").unwrap();
+		w.flush().unwrap();
+
+		let expect = frame(MSG_DATA, b"helloworld");
+		assert_eq!(sink.take(), expect);
+		let msg_len = frame(MSG_INFO, b"hi\n").len();
+		assert_eq!(w.shared.counters.total_written(), (4 + msg_len + expect.len()) as u64);
+	}
+
+	/// Splits framed output into (code, payload length) pairs and the joined
+	/// data payload.
+	fn frames_of(out: &[u8]) -> (Vec<(u8, usize)>, Vec<u8>) {
+		let mut r = out;
+		let mut frames = Vec::new();
+		let mut joined = Vec::new();
+		while !r.is_empty() {
+			let header = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
+			let len = (header & 0xFF_FFFF) as usize;
+			let code = (header >> 24) as u8 - MPLEX_BASE;
+			frames.push((code, len));
+			if code == MSG_DATA {
+				joined.extend_from_slice(&r[4..4 + len]);
+			}
+			r = &r[4 + len..];
+		}
+		(frames, joined)
+	}
+
+	#[test]
+	fn frames_end_on_write_boundaries_like_upstream_token_stream() {
+		// simple_send_token: a 4-byte length, then a 32 KiB literal chunk. The
+		// reference sender's frames are 32776, then 32772 (chunk + next length).
+		let sink = Sink::default();
+		let mut w = writer(&sink, WriteConfig::default());
+		w.start_multiplex().unwrap();
+		let chunk = vec![7u8; 32768];
+		for _ in 0..4 {
+			w.write_all(&32768i32.to_le_bytes()).unwrap();
+			w.write_all(&chunk).unwrap();
+		}
+		w.flush().unwrap();
+		let (frames, joined) = frames_of(&sink.take());
+		assert_eq!(frames, [(0, 32776), (0, 32772), (0, 32772), (0, 32768)]);
+		assert_eq!(joined.len(), 4 * (4 + 32768));
+	}
+
+	#[test]
+	fn oversized_write_is_split_like_write_bigbuf() {
+		let sink = Sink::default();
+		let mut w = writer(&sink, WriteConfig::default());
+		w.start_multiplex().unwrap();
+		let data: Vec<u8> = (0..100_000u32).map(|i| i as u8).collect();
+		w.write_all(&data).unwrap();
+		w.flush().unwrap();
+		let (frames, joined) = frames_of(&sink.take());
+		// Pieces 32766 ×3 + 1702; the buffer holds 65532 data bytes.
+		assert_eq!(frames, [(0, 65532), (0, 34468)]);
+		assert_eq!(joined, data);
+
+		// Raw output holds a full 64 KiB without splitting.
+		let sink = Sink::default();
+		let mut w = writer(&sink, WriteConfig::default());
+		w.write_all(&[1u8; 65536]).unwrap();
+		assert!(sink.take().is_empty());
+		w.write_all(&[2u8]).unwrap();
+		w.flush().unwrap();
+		assert_eq!(*lock(&sink.writes), [65536, 1]);
+	}
+
+	#[test]
+	fn blocked_write_serves_peer_messages_and_fails_with_peer_exit() {
+		/// A connection whose peer never reads: writes block until released.
+		struct Stuck(Arc<AtomicBool>);
+		impl Write for Stuck {
+			fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+				while !self.0.load(Ordering::Relaxed) {
+					thread::sleep(Duration::from_millis(5));
+				}
+				Ok(buf.len())
+			}
+			fn flush(&mut self) -> io::Result<()> {
+				Ok(())
+			}
+		}
+		let release = Arc::new(AtomicBool::new(false));
+		let mut w = MuxWriter::new(
+			Box::new(Stuck(Arc::clone(&release))),
+			IoCounters::default(),
+			WriteConfig::default(),
+		);
+		// Nothing is queued yet, so this completes even though writes block.
+		w.start_multiplex().unwrap();
+		let (mut r, tx, _) = blocking_reader(None);
+		r.link_writer(w.clone());
+		r.start_multiplex(Box::new(|m| {
+			if m.code == MSG_ERROR_EXIT {
+				Err(wire_error(io::ErrorKind::Other, 12, "peer exit", None))
+			} else {
+				Ok(())
+			}
+		}))
+		.unwrap();
+		// This thread reads the reader (so it may serve it while writing).
+		tx.send(frame(MSG_DATA, b"a")).unwrap();
+		r.read_exact(&mut [0u8; 1]).unwrap();
+		let sender = thread::spawn(move || {
+			thread::sleep(Duration::from_millis(150));
+			tx.send(frame(MSG_ERROR_EXIT, &12i32.to_le_bytes())).unwrap();
+			tx
+		});
+		let start = Instant::now();
+		let err = w.write_all(&vec![0u8; 200_000]).unwrap_err();
+		assert_eq!(wire_detail(&err).unwrap().code, 12);
+		assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+		release.store(true, Ordering::Relaxed);
+		drop(sender.join().unwrap());
+	}
+
+	#[test]
+	fn would_block_writes_and_reads_wait_instead_of_failing() {
+		struct Flaky {
+			fails: u32,
+			out: Arc<Mutex<Vec<u8>>>,
+		}
+		impl Write for Flaky {
+			fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+				if self.fails > 0 {
+					self.fails -= 1;
+					return Err(io::ErrorKind::WouldBlock.into());
+				}
+				lock(&self.out).extend_from_slice(buf);
+				Ok(buf.len())
+			}
+			fn flush(&mut self) -> io::Result<()> {
+				Ok(())
+			}
+		}
+		let out = Arc::new(Mutex::new(Vec::new()));
+		let flaky = Flaky { fails: 3, out: Arc::clone(&out) };
+		let mut w = MuxWriter::new(Box::new(flaky), IoCounters::default(), WriteConfig::default());
+		w.write_all(b"abc").unwrap();
+		w.flush().unwrap();
+		assert_eq!(*lock(&out), b"abc");
+
+		struct SlowRead(u32, &'static [u8]);
+		impl Read for SlowRead {
+			fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+				if self.0 > 0 {
+					self.0 -= 1;
+					return Err(io::ErrorKind::WouldBlock.into());
+				}
+				let n = buf.len().min(self.1.len());
+				buf[..n].copy_from_slice(&self.1[..n]);
+				self.1 = &self.1[n..];
+				Ok(n)
+			}
+		}
+		let mut r = MuxReader::new(
+			Box::new(SlowRead(3, b"xyz")),
+			IoCounters::default(),
+			Arc::new(AtomicBool::new(false)),
+			ReadConfig::default(),
+		);
+		let mut got = [0u8; 3];
+		r.read_exact(&mut got).unwrap();
+		assert_eq!(&got, b"xyz");
+	}
+
+	#[test]
+	fn oversized_message_is_refused() {
+		let sink = Sink::default();
+		let w = writer(&sink, WriteConfig::default());
+		w.start_multiplex().unwrap();
+		let err = w.send_msg(MSG_INFO, &vec![0u8; MAX_FRAME_LEN + 1]).unwrap_err();
+		assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+		assert!(sink.take().is_empty());
+	}
+
+	#[test]
+	fn batch_tee_gets_data_bytes_only() {
+		let sink = Sink::default();
+		let batch = Sink::default();
+		let mut w = writer(&sink, WriteConfig::default());
+		w.start_multiplex().unwrap();
+		w.set_batch(Some(Box::new(batch.clone())));
+		w.write_all(b"abc").unwrap();
+		w.send_msg(MSG_INFO, b"note").unwrap();
+		w.write_all(b"def").unwrap();
+		w.flush().unwrap();
+		assert_eq!(batch.take(), b"abcdef");
+	}
+
+	#[test]
+	fn reader_demuxes_data_and_dispatches_messages_in_order() {
+		let mut stream = vec![b'R', b'A', b'W', b'!'];
+		stream.extend(frame(MSG_DATA, b"abc"));
+		stream.extend(frame(MSG_INFO, b"first\n"));
+		stream.extend(frame(MSG_DATA, b""));
+		stream.extend(frame(MSG_DATA, b"def"));
+		stream.extend(frame(MSG_ERROR_XFER, b"second\n"));
+		stream.extend(frame(MSG_IO_ERROR, &1i32.to_le_bytes()));
+		let total = stream.len();
+		let mut r = reader(stream);
+		let mut head = [0u8; 4];
+		r.read_exact(&mut head).unwrap();
+		assert_eq!(&head, b"RAW!");
+		let (seen, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		let mut data = [0u8; 6];
+		r.read_exact(&mut data).unwrap();
+		assert_eq!(&data, b"abcdef");
+		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+		assert_eq!(
+			detail(&err),
+			format!("rsync: connection unexpectedly closed ({total} bytes received so far) []")
+		);
+		let seen = lock(&seen).clone();
+		assert_eq!(
+			seen,
+			[
+				Msg { code: MSG_INFO, payload: b"first\n".to_vec() },
+				Msg { code: MSG_ERROR_XFER, payload: b"second\n".to_vec() },
+				Msg { code: MSG_IO_ERROR, payload: vec![1, 0, 0, 0] },
+			]
+		);
+	}
+
+	#[test]
+	fn messages_dispatch_when_reading_reaches_them_and_input_can_end() {
+		let mut stream = frame(MSG_DATA, b"ab");
+		stream.extend(frame(MSG_WARNING, b"w\n"));
+		stream.extend(frame(MSG_DATA, b"cd"));
+		stream.extend_from_slice(b"raw\n");
+		let mut r = reader(stream);
+		let events = Arc::new(Mutex::new(Vec::<String>::new()));
+		let log = Arc::clone(&events);
+		r.start_multiplex(Box::new(move |m| {
+			lock(&log).push(format!("msg {}", m.code));
+			Ok(())
+		}))
+		.unwrap();
+		for _ in 0..4 {
+			let mut b = [0u8; 1];
+			r.read_exact(&mut b).unwrap();
+			lock(&events).push(format!("data {}", b[0] as char));
+		}
+		assert_eq!(*lock(&events), ["data a", "data b", "msg 4", "data c", "data d"]);
+		r.end_multiplex().unwrap();
+		let mut tail = [0u8; 4];
+		r.read_exact(&mut tail).unwrap();
+		assert_eq!(&tail, b"raw\n");
+	}
+
+	#[test]
+	fn message_after_unconsumed_data_waits_for_the_reader() {
+		let mut stream = frame(MSG_DATA, b"xy");
+		stream.extend(frame(MSG_INFO, b"later\n"));
+		let mut r = reader(stream);
+		let (seen, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		r.read_exact(&mut [0u8; 1]).unwrap();
+		// Give the read-ahead thread time to buffer the message frame too.
+		thread::sleep(Duration::from_millis(50));
+		assert!(lock(&seen).is_empty());
+		assert_eq!(r.end_multiplex().unwrap_err().kind(), io::ErrorKind::InvalidData);
+		r.read_exact(&mut [0u8; 1]).unwrap();
+		assert!(lock(&seen).is_empty());
+		assert_eq!(r.read(&mut [0u8; 1]).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+		assert_eq!(lock(&seen).len(), 1);
+	}
+
+	#[test]
+	fn consumed_frame_bytes_count_whole_data_frames() {
+		let mut stream = b"RAW!".to_vec();
+		stream.extend(frame(MSG_DATA, b"abc"));
+		stream.extend(frame(MSG_INFO, b"i\n"));
+		stream.extend(frame(MSG_DATA, b""));
+		stream.extend(frame(MSG_DATA, b"de"));
+		let mut r = reader(stream);
+		r.read_exact(&mut [0u8; 4]).unwrap();
+		assert_eq!(r.consumed_frame_bytes(), 4);
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		r.read_exact(&mut [0u8; 1]).unwrap();
+		assert_eq!(r.consumed_frame_bytes(), 4 + 7);
+		r.read_exact(&mut [0u8; 2]).unwrap();
+		assert_eq!(r.consumed_frame_bytes(), 4 + 7);
+		r.read_exact(&mut [0u8; 2]).unwrap();
+		// Message and empty frames are not counted; "de" adds 4 + 2.
+		assert_eq!(r.consumed_frame_bytes(), 4 + 7 + 6);
+	}
+
+	#[test]
+	fn data_ready_reports_buffered_input_without_dispatching() {
+		let (mut r, tx, _) = blocking_reader(None);
+		let (seen, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		assert!(!r.data_ready().unwrap());
+		tx.send(frame(MSG_INFO, b"m\n")).unwrap();
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !r.data_ready().unwrap() && Instant::now() < deadline {
+			thread::sleep(Duration::from_millis(5));
+		}
+		assert!(r.data_ready().unwrap());
+		assert!(lock(&seen).is_empty());
+		drop(tx);
+		assert!(r.read(&mut [0u8; 1]).is_err());
+		assert_eq!(lock(&seen).len(), 1);
+	}
+
+	fn first_error(stream: Vec<u8>, role: Option<Role>) -> io::Error {
+		let mut r = reader(stream);
+		if let Some(role) = role {
+			r.set_role(role);
+		}
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		let mut sink = Vec::new();
+		loop {
+			let mut b = [0u8; 64];
+			match r.read(&mut b) {
+				Ok(n) => sink.extend_from_slice(&b[..n]),
+				Err(e) => return e,
+			}
+		}
+	}
+
+	#[test]
+	fn invalid_frames_use_upstream_diagnostics() {
+		// Unknown tag 50.
+		let err = first_error(vec![0, 0, 0, 7 + 50], None);
+		assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+		assert_eq!(detail(&err), "unexpected tag 50 []");
+		// Tag byte below MPLEX_BASE.
+		assert_eq!(detail(&first_error(vec![0, 0, 0, 0], None)), "unexpected tag -7 []");
+		// High tag byte is sign-extended.
+		assert_eq!(detail(&first_error(vec![0, 0, 0, 0xff], None)), "unexpected tag -8 []");
+		// MSG_NOOP must be empty.
+		let mut s = frame(MSG_DATA, b"ok");
+		s.extend(frame(MSG_NOOP, b"x"));
+		assert_eq!(detail(&first_error(s, None)), "invalid multi-message 42:1 []");
+		// A log message must fit upstream's buffer.
+		let err = first_error(frame(MSG_INFO, &vec![b'a'; BIGPATHBUFLEN]), None);
+		assert_eq!(detail(&err), format!("multiplexing overflow 2:{BIGPATHBUFLEN} []"));
+		// Generator-only messages from a peer are rejected once the role is known.
+		let err = first_error(frame(MSG_REDO, &[0; 4]), Some(Role::Receiver));
+		assert!(detail(&err).starts_with("invalid multi-message 9:4 ["), "{}", detail(&err));
+		let detail_site = wire_detail(&err).unwrap();
+		assert_eq!(detail_site.code, RERR_STREAMIO);
+		assert_eq!(detail_site.site, Some(("io.c", 1837)));
+	}
+
+	#[test]
+	fn block_stats_need_protocol_33() {
+		let mut r = reader(frame(MSG_BLOCK_STATS, &[0; 8]));
+		r.set_proto(Proto::new(32, 0));
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		assert_eq!(detail(&err), "invalid multi-message 11:8 []");
+
+		let mut r = reader(frame(MSG_BLOCK_STATS, &[3, 0, 0, 0, 0, 0, 0, 0]));
+		r.set_proto(P33);
+		let (seen, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		assert_eq!(r.read(&mut [0u8; 1]).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+		assert_eq!(lock(&seen).len(), 1);
+	}
+
+	#[test]
+	fn on_msg_failure_surfaces_on_read() {
+		let mut r = reader(frame(MSG_ERROR_EXIT, &12i32.to_le_bytes()));
+		r.start_multiplex(Box::new(|m| {
+			Err(wire_error(io::ErrorKind::Other, 12, format!("exit {}", m.payload[0]), None))
+		}))
+		.unwrap();
+		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		assert_eq!(detail(&err), "exit 12");
+	}
+
+	#[test]
+	fn raw_eof_reports_bytes_received() {
+		let mut r = reader(b"AB".to_vec());
+		let mut b = [0u8; 2];
+		r.read_exact(&mut b).unwrap();
+		let err = r.read_exact(&mut b).unwrap_err();
+		assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+		assert_eq!(detail(&err), "rsync: connection unexpectedly closed (2 bytes received so far) []");
+		assert_eq!(wire_detail(&err).unwrap().site, Some(("io.c", 303)));
+	}
+
+	#[test]
+	fn uncounted_handshake_bytes_are_excluded() {
+		let mut stream = vec![0x21, 0, 0, 0];
+		stream.extend(frame(MSG_DATA, b"x"));
+		let mut r = reader(stream);
+		r.set_counting(false);
+		let mut v = [0u8; 4];
+		r.read_exact(&mut v).unwrap();
+		r.set_counting(true);
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		r.read_exact(&mut [0u8; 1]).unwrap();
+		assert_eq!(r.shared.counters.total_read(), 5);
+	}
+
+	#[test]
+	fn reader_tees_consumed_data_to_batch() {
+		let mut stream = frame(MSG_DATA, b"abc");
+		stream.extend(frame(MSG_INFO, b"i\n"));
+		stream.extend(frame(MSG_DATA, b"de"));
+		let mut r = reader(stream);
+		let batch = Sink::default();
+		r.set_batch(Some(Box::new(batch.clone())));
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		r.read_exact(&mut [0u8; 5]).unwrap();
+		assert_eq!(batch.take(), b"abcde");
+	}
+
+	fn blocking_reader(timeout: Option<Duration>) -> (MuxReader, mpsc::Sender<Vec<u8>>, Arc<AtomicBool>) {
+		let (tx, rx) = mpsc::channel();
+		let cancel = Arc::new(AtomicBool::new(false));
+		let r = MuxReader::new(
+			Box::new(Blocking(rx, Vec::new())),
+			IoCounters::default(),
+			Arc::clone(&cancel),
+			ReadConfig { timeout },
+		);
+		(r, tx, cancel)
+	}
+
+	#[test]
+	fn idle_input_times_out() {
+		let (mut r, _tx, _) = blocking_reader(Some(Duration::from_secs(1)));
+		let start = Instant::now();
+		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+		assert_eq!(detail(&err), "[] io timeout after 1 seconds -- exiting");
+		assert_eq!(wire_detail(&err).unwrap().code, RERR_TIMEOUT);
+		assert!(start.elapsed() < Duration::from_secs(5));
+	}
+
+	#[test]
+	fn cancellation_interrupts_a_blocked_read() {
+		let (mut r, _tx, cancel) = blocking_reader(None);
+		let flag = Arc::clone(&cancel);
+		let t = thread::spawn(move || {
+			thread::sleep(Duration::from_millis(150));
+			flag.store(true, Ordering::Relaxed);
+		});
+		let start = Instant::now();
+		let err = r.read_exact(&mut [0u8; 1]).unwrap_err();
+		t.join().unwrap();
+		assert_eq!(err.kind(), io::ErrorKind::Other);
+		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL);
+		assert!(start.elapsed() < Duration::from_secs(2));
+	}
+
+	#[test]
+	fn blocked_read_flushes_the_linked_writer() {
+		let (mut r, tx, _) = blocking_reader(None);
+		let sink = Sink::default();
+		let mut w = writer(&sink, WriteConfig::default());
+		w.write_all(b"request").unwrap();
+		assert!(sink.take().is_empty());
+		r.link_writer(w.clone());
+		let probe = sink.clone();
+		let t = thread::spawn(move || {
+			// The answer is sent only once the request has been flushed out.
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while lock(&probe.bytes).is_empty() && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(5));
+			}
+			let got = probe.take();
+			tx.send(b"answer".to_vec()).unwrap();
+			got
+		});
+		let mut answer = [0u8; 6];
+		r.read_exact(&mut answer).unwrap();
+		assert_eq!(&answer, b"answer");
+		assert_eq!(t.join().unwrap(), b"request");
+	}
+
+	#[test]
+	fn keepalive_rules() {
+		let sink = Sink::default();
+		let cfg = WriteConfig { timeout: Some(Duration::from_secs(4)), ..WriteConfig::default() };
+		let mut w = writer(&sink, cfg);
+		w.set_role(Role::Sender);
+		// Raw output never carries keepalives.
+		w.maybe_keepalive(MSK_ALLOW_FLUSH).unwrap();
+		assert!(sink.take().is_empty());
+		w.start_multiplex().unwrap();
+		w.maybe_keepalive(MSK_ALLOW_FLUSH).unwrap();
+		assert_eq!(sink.take(), [0, 0, 0, 7]);
+		// Output just happened: within the lull nothing is sent.
+		w.maybe_keepalive(MSK_ALLOW_FLUSH).unwrap();
+		assert!(sink.take().is_empty());
+		// Pending data is flushed instead of sending an empty frame.
+		w.shared.counters.last_out.store(0, Ordering::Relaxed);
+		w.write_all(b"z").unwrap();
+		w.maybe_keepalive(MSK_ALLOW_FLUSH).unwrap();
+		assert_eq!(sink.take(), frame(MSG_DATA, b"z"));
+
+		// An early (pre-role) process never sends keepalives.
+		let sink = Sink::default();
+		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(4)), ..WriteConfig::default() });
+		w.start_multiplex().unwrap();
+		w.set_role(Role::Client);
+		w.maybe_keepalive(MSK_ALLOW_FLUSH).unwrap();
+		assert!(sink.take().is_empty());
+
+		// Without --timeout (lull 0) a sender answers every call (MSG_NOOP).
+		let sink = Sink::default();
+		let w = writer(&sink, WriteConfig::default());
+		w.start_multiplex().unwrap();
+		w.set_role(Role::Sender);
+		w.maybe_keepalive(MSK_ALLOW_FLUSH).unwrap();
+		w.maybe_keepalive(MSK_ALLOW_FLUSH).unwrap();
+		assert_eq!(sink.take(), [0, 0, 0, 7, 0, 0, 0, 7]);
+	}
+
+	#[test]
+	fn reader_follows_timeout_set_on_linked_writer() {
+		let (mut r, _tx, _) = blocking_reader(None);
+		let sink = Sink::default();
+		let w = writer(&sink, WriteConfig::default());
+		w.set_timeout(Some(Duration::from_secs(1)));
+		r.link_writer(w);
+		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+	}
+
+	#[test]
+	fn blocked_sender_sends_keepalives_instead_of_timing_out() {
+		let (mut r, _tx, cancel) = blocking_reader(Some(Duration::from_secs(1)));
+		let sink = Sink::default();
+		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(1)), ..WriteConfig::default() });
+		w.start_multiplex().unwrap();
+		r.set_role(Role::Sender);
+		r.link_writer(w);
+		let flag = Arc::clone(&cancel);
+		let t = thread::spawn(move || {
+			thread::sleep(Duration::from_millis(2300));
+			flag.store(true, Ordering::Relaxed);
+		});
+		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		t.join().unwrap();
+		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL);
+		let out = sink.take();
+		assert!(out.len() >= 8 && out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
+	}
+
+	#[test]
+	fn bwlimit_caps_write_size_and_sleeps() {
+		let sink = Sink::default();
+		let mut w = writer(&sink, WriteConfig { bwlimit: Some(10), ..WriteConfig::default() });
+		let start = Instant::now();
+		w.write_all(&[1u8; 4096]).unwrap();
+		w.flush().unwrap();
+		// 10 KiB/s: writes of at most 1280 bytes, ~0.37 s of sleeping.
+		assert!(start.elapsed() >= Duration::from_millis(300), "{:?}", start.elapsed());
+		assert!(lock(&sink.writes).iter().all(|&n| n <= 1280));
+		assert_eq!(sink.take().len(), 4096);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn write_failure_is_sticky() {
+		struct Broken;
+		impl Write for Broken {
+			fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+				Err(io::Error::from_raw_os_error(32))
+			}
+			fn flush(&mut self) -> io::Result<()> {
+				Ok(())
+			}
+		}
+		let mut w = MuxWriter::new(Box::new(Broken), IoCounters::default(), WriteConfig::default());
+		w.set_role(Role::Sender);
+		w.write_all(b"x").unwrap();
+		let err = w.flush().unwrap_err();
+		let d = wire_detail(&err).unwrap();
+		assert_eq!(d.code, RERR_SOCKETIO);
+		assert!(d.message.starts_with("rsync: ["), "{}", d.message);
+		assert!(d.message.ends_with("] write error: Broken pipe (32)"), "{}", d.message);
+		assert_eq!(w.write(b"y").unwrap_err().kind(), err.kind());
+	}
+}

@@ -5515,6 +5515,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "mach2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5578,6 +5587,15 @@ checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
 dependencies = [
  "cfg-if",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "md4"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da5ac363534dce5fabf69949225e174fbf111a498bf0ff794c8ea1fba9f3dda"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -6864,6 +6882,7 @@ dependencies = [
  "ansi-width",
  "anyhow",
  "argmax",
+ "base64 0.23.1",
  "bigdecimal",
  "binary-heap-plus",
  "brush-core",
@@ -6878,6 +6897,7 @@ dependencies = [
  "dns-lookup",
  "fancy-regex 0.17.0",
  "filetime",
+ "flate2",
  "flume",
  "foldhash 0.2.0",
  "futures",
@@ -6905,6 +6925,9 @@ dependencies = [
  "jiff",
  "libc",
  "lscolors",
+ "lz4_flex",
+ "md-5 0.10.6",
+ "md4",
  "memchr",
  "nix 0.31.3",
  "nom 8.0.0",
@@ -6929,6 +6952,8 @@ dependencies = [
  "rustix 1.1.5",
  "self_cell",
  "serde_json",
+ "sha1",
+ "sha2 0.10.9",
  "similar 3.2.0",
  "smallvec",
  "strum",
@@ -6942,7 +6967,9 @@ dependencies = [
  "uutils_term_grid",
  "windows-sys 0.61.2",
  "xutf",
+ "xxhash-rust",
  "yansi",
+ "zstd",
 ]
 
 [[package]]
@@ -9458,6 +9485,12 @@ dependencies = [
  "tokio-util",
  "webrtc-util",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "type-map"

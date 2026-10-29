@@ -914,7 +914,7 @@ async fn create_session_for_run(
 	// implementations that run without spawning a process and resolve paths
 	// against the shell working directory. The whole set can be disabled
 	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
-	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`) additionally honors
+	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`, `rsync`) additionally honors
 	// PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
 	if !env_flag(config, "PI_DISABLE_UUTILS_BUILTINS") {
 		let destructive_disabled = env_flag(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
@@ -924,9 +924,10 @@ async fn create_session_for_run(
 			let disabled = match name {
 				"rm" => rm_disabled,
 				"mv" => mv_disabled,
-				// cp and dd (`of=`) overwrite existing files, ln can clobber them
-				// via -f; gate them with the destructive set.
-				"cp" | "ln" | "dd" => destructive_disabled,
+				// cp, dd (`of=`), and rsync overwrite existing files (rsync also
+				// deletes with --delete), ln can clobber them via -f; gate them
+				// with the destructive set.
+				"cp" | "ln" | "dd" | "rsync" => destructive_disabled,
 				_ => false,
 			};
 			if !disabled {
@@ -4745,6 +4746,7 @@ mod tests {
 			"rg",
 			"rm",
 			"rmdir",
+			"rsync",
 			"sed",
 			"seq",
 			"sha1sum",

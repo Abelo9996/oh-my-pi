@@ -286,6 +286,8 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	m.push(("rm", rm::rm_builtin::<SE>()));
 	#[cfg(feature = "util.rmdir")]
 	m.push(("rmdir", rmdir::rmdir_builtin::<SE>()));
+	#[cfg(all(feature = "util.rsync", any(unix, windows)))]
+	m.push(("rsync", rsync::rsync_builtin::<SE>()));
 	#[cfg(feature = "util.sed")]
 	m.push(("sed", sed::sed_builtin::<SE>()));
 	#[cfg(feature = "util.seq")]

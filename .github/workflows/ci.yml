@@ -21,7 +21,6 @@ on:
          - "deny.toml"
          - "about.toml"
          - "LICENSE"
-         - "THIRD-PARTY-NOTICES.txt"
          - "rust-toolchain.toml"
          - "rustfmt.toml"
          # A root dependency change (lockfile/catalog/patches) affects every
@@ -52,7 +51,6 @@ on:
          - "deny.toml"
          - "about.toml"
          - "LICENSE"
-         - "THIRD-PARTY-NOTICES.txt"
          - "rust-toolchain.toml"
          - "rustfmt.toml"
          - "bun.lock"
@@ -1122,8 +1120,7 @@ jobs:
               bun run ci:release:checksums SHA256SUMS.txt \
                 packages/coding-agent/binaries/omp-* \
                 packages/browser-relay/dist/omp-browser-relay-extension.zip \
-                LICENSE \
-                THIRD-PARTY-NOTICES.txt
+                LICENSE
          - name: Create GitHub Release
            uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
            with:
@@ -1133,7 +1130,6 @@ jobs:
                  packages/coding-agent/binaries/omp-*
                  packages/browser-relay/dist/omp-browser-relay-extension.zip
                  LICENSE
-                 THIRD-PARTY-NOTICES.txt
                  SHA256SUMS.txt
               body_path: release-notes.md
               generate_release_notes: true

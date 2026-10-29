@@ -16,6 +16,20 @@ const htmlExportAssetPattern =
 // Native / optional / platform-specific deps are loaded from installed files.
 const ALWAYS_EXTERNAL = ["@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
 
+/**
+ * Embeds `@oh-my-pi/pi-natives/THIRD-PARTY-NOTICES.txt` even though the natives package is external. An external
+ * text import would be hoisted to a top-level import of `dist/cli.js`, reading the installed addon's notices on every
+ * launch instead of only for `omp --license`.
+ */
+const inlineNativeNoticesPlugin: Bun.BunPlugin = {
+	name: "inline-native-notices",
+	setup(build) {
+		build.onResolve({ filter: /^@oh-my-pi\/pi-natives\/THIRD-PARTY-NOTICES\.txt$/ }, () => ({
+			path: path.join(packageDir, "../natives/THIRD-PARTY-NOTICES.txt"),
+		}));
+	},
+};
+
 // Heavy, lazily-used third-party leaf deps. Each is a declared `dependency`, so the
 // published package resolves it from node_modules at runtime; bundling only embeds a
 // redundant copy that bloats dist/cli.js. NEVER add a patched dependency here — the
@@ -95,7 +109,7 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 			entrypoints: [path.join(packageDir, "src/cli.ts")],
 			outdir: outDir,
 			target: "bun",
-			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin()],
+			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin(), inlineNativeNoticesPlugin],
 			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
 			define: {
 				"process.env.PI_BUNDLED": JSON.stringify("true"),

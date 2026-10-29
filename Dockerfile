@@ -163,8 +163,8 @@ COPY --from=natives-builder /out/pi_natives.linux-*.node /opt/bun/bin/
 COPY --from=wheel-builder /out/*.whl /tmp/wheels/
 RUN pip install /tmp/wheels/omp_rpc-*.whl && rm -rf /tmp/wheels
 
-# Legal payload for the reusable SDKs and the OMP product installed in this image.
-COPY LICENSE  THIRD-PARTY-NOTICES.txt /usr/share/doc/omp/
+# Legal payload for the OMP license and the native addon installed above.
+COPY LICENSE packages/natives/THIRD-PARTY-NOTICES.txt /usr/share/doc/omp/
 
 # `omp` shim — runs the coding-agent CLI against $PI_ROOT via Bun. Derived
 # images override PI_ROOT to point at wherever their pi source lives.
