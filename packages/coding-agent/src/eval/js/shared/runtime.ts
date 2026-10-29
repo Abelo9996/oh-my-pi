@@ -107,6 +107,7 @@ const PRELUDE_GLOBAL_KEYS = [
 	"console",
 	"print",
 	"tool",
+	"batchTools",
 	"completion",
 	"output",
 	"agent",

@@ -301,6 +301,7 @@ describe("eval tool description await markers", () => {
 						output: () => output("probe"),
 						wait: () => wait([]),
 						"tool.<name>": () => tool.read({ path: dir + "/in.txt" }),
+						batchTools: () => batchTools([]),
 					};
 					const probe = name => {
 						if (!(name in probes)) return "no probe for " + name;
@@ -346,6 +347,7 @@ describe("eval tool description await markers", () => {
 					'    "output": lambda: output("probe"),',
 					'    "wait": lambda: wait([]),',
 					'    "tool.<name>": lambda: tool.read({"path": os.path.join(dir, "in.txt")}),',
+					'    "batch_tools": lambda: batch_tools([]),',
 					"}",
 					"def probe(name):",
 					"    if name not in probes:",
