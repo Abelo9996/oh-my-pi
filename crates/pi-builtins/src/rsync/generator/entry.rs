@@ -713,7 +713,7 @@ impl Gen<'_> {
 		// --partial-dir basis.
 		let mut partial: Option<(Loc, pi_vfs::Metadata)> = None;
 		if let Some(ploc) = self.partial_loc(fname) {
-			if let Ok(st) = ploc.tree.lstat(&ploc.rel)
+			if let Ok(st) = self.stat_loc(&ploc.tree, &ploc.rel, false)
 				&& st.is_file()
 			{
 				partial = Some((ploc, st));

@@ -864,10 +864,10 @@ impl<'a> Gen<'a> {
 	fn refill(&mut self) -> Result<(), RsyncError> {
 		let ready = !self.sib.is_empty();
 		self.out.output_pass(ready).map_err(RsyncError::from_stream)?;
-		// Output keeps going out while this pass waits for input; what is still
-		// unwritten when input arrives waits for the next pass, as upstream's.
-		let _grant = self.out.grant();
 		self.pull_input();
+		// Output keeps going out while later passes wait for input; what is still
+		// unwritten when input arrives waits for the next pass, as upstream's.
+		let _grant = self.inbox.is_empty().then(|| self.out.grant());
 		let mut last_idle = Instant::now();
 		while self.inbox.is_empty() {
 			self.check_cancel()?;

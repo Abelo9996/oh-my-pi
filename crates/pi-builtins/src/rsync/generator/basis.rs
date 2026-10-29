@@ -47,7 +47,7 @@ impl Gen<'_> {
 			let Ok(alt) = self.alt_loc(j, name) else {
 				continue;
 			};
-			let Ok(st) = alt.tree.lstat(&alt.rel) else {
+			let Ok(st) = self.stat_loc(&alt.tree, &alt.rel, false) else {
 				continue;
 			};
 			if ftype_of(st.mode()) != ftype {
@@ -74,7 +74,7 @@ impl Gen<'_> {
 			return Some((j, level, alt, sx));
 		}
 		let alt = self.alt_loc(j, name).ok()?;
-		let st = alt.tree.lstat(&alt.rel).ok()?;
+		let st = self.stat_loc(&alt.tree, &alt.rel, false).ok()?;
 		let sx = Sx::of(st, &alt.tree, &alt.rel);
 		Some((j, level, alt, sx))
 	}
@@ -341,7 +341,7 @@ impl Gen<'_> {
 					None => continue,
 				}
 			};
-			let list = rel_path(&dn).ok().and_then(|rel| read_dirlist(&tree, &rel));
+			let list = rel_path(&dn).ok().and_then(|rel| self.read_dirlist(&tree, &rel));
 			self.fuzzy_dirlist[i] = list.filter(|l| !l.is_empty());
 		}
 	}
@@ -496,7 +496,7 @@ impl Gen<'_> {
 		let Some((tree, rel)) = backup::backup_path(self.ctx, self.trees, fname)? else {
 			return Ok(Backup::Skip);
 		};
-		let Ok(st) = loc.tree.lstat(&loc.rel) else {
+		let Ok(st) = self.stat_loc(&loc.tree, &loc.rel, false) else {
 			return Ok(Backup::Missing);
 		};
 		let entry = entry_from_stat(fname, &st);
@@ -533,7 +533,7 @@ impl Gen<'_> {
 		let Some((tree, rel)) = backup::backup_path(self.ctx, self.trees, fname)? else {
 			return Ok(Backup::Skip);
 		};
-		let Ok(st) = loc.tree.lstat(&loc.rel) else {
+		let Ok(st) = self.stat_loc(&loc.tree, &loc.rel, false) else {
 			return Ok(Backup::Missing);
 		};
 		let entry = entry_from_stat(fname, &st);
@@ -620,8 +620,19 @@ fn copy_stream(input: &mut dyn Read, out: &mut dyn Write) -> io::Result<()> {
 	out.flush()
 }
 
-/// get_dirlist without filters: every entry's name, type, size, and mtime, sorted.
-fn read_dirlist(tree: &Tree, dir: &Path) -> Option<Vec<FuzzyCand>> {
+impl Gen<'_> {
+	/// get_dirlist without filters: every entry's name, type, size, and mtime, sorted
+	/// (statted like upstream's make_file, fake-super record included).
+	fn read_dirlist(&self, tree: &Tree, dir: &Path) -> Option<Vec<FuzzyCand>> {
+		read_dirlist_with(tree, dir, &|rel| self.stat_loc(tree, rel, false))
+	}
+}
+
+fn read_dirlist_with(
+	tree: &Tree,
+	dir: &Path,
+	stat: &dyn Fn(&Path) -> io::Result<pi_vfs::Metadata>,
+) -> Option<Vec<FuzzyCand>> {
 	let names = tree.read_dir(dir).ok()?;
 	let mut out = Vec::with_capacity(names.len());
 	for name in names {
@@ -629,7 +640,7 @@ fn read_dirlist(tree: &Tree, dir: &Path) -> Option<Vec<FuzzyCand>> {
 			continue;
 		};
 		let rel = dir.join(&name);
-		let Ok(st) = tree.lstat(&rel) else {
+		let Ok(st) = stat(&rel) else {
 			continue;
 		};
 		out.push(FuzzyCand {

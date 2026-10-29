@@ -947,3 +947,53 @@ fn inplace_backup_case(whole_file: i32) {
 	assert!(text.contains(&want), "{text}");
 	assert!(ctx.logger.got_xfer_error());
 }
+
+/// devices-fake: under --fake-super a --link-dest special is stored as a regular
+/// placeholder carrying its real type in the stat xattr; the alt-dest lookup must see
+/// it through that record and hard-link it (reference `-aii --specials --fake-super
+/// --link-dest=…`: `hS          fifo`, same inode) instead of creating a new one.
+#[cfg(unix)]
+#[test]
+fn fake_super_link_dest_links_special_placeholders() {
+	use std::os::unix::fs::MetadataExt;
+	let tmp = tempfile::tempdir().unwrap();
+	let alt = tmp.path().join("ld");
+	let dest = tmp.path().join("o1");
+	std::fs::create_dir_all(&alt).unwrap();
+	std::fs::create_dir_all(&dest).unwrap();
+	write_file(&alt.join("fifo"), b"", T);
+	let alt_tree = open_tree(&alt);
+	let record = alt_tree.set_xattr(
+		Path::new("fifo"),
+		std::ffi::OsStr::new(crate::rsync::meta::XSTAT_ATTR),
+		b"10644 0,0 0:0",
+		false,
+	);
+	if record.is_err() {
+		// No xattr support on this temp filesystem: fake-super cannot work here.
+		return;
+	}
+
+	let mut opts = base_opts();
+	opts.am_root = -1;
+	opts.preserve_specials = true;
+	opts.stdout_format_has_i = 3;
+	opts.itemize_changes = 2;
+	opts.alt_dest_type = LINK_DEST;
+	let log = Buf::default();
+	let mut ctx = make_ctx(opts, &dest, &log);
+	ctx.meta.fake_super = true;
+	let flists = publish(vec![entry("fifo", 0o010644, 0, T)], &ctx.logger);
+	let mut trees = trees_for(&dest);
+	trees.alt_dirs.push(alt_tree);
+	let (reqs, _) = parse(&generate(&ctx, &trees, &flists));
+
+	assert_eq!(
+		std::fs::metadata(alt.join("fifo")).unwrap().ino(),
+		std::fs::metadata(dest.join("fifo")).unwrap().ino()
+	);
+	assert_eq!(reqs.len(), 1);
+	let e = flists.entry(reqs[0].ndx).unwrap();
+	let ictx = ItemizeCtx { local_server: true, preserve_mtimes: true, receiver_symlink_times: true };
+	assert_eq!(&itemize(reqs[0].iflags, e.mode, "recv", ictx), b"hS         ");
+}

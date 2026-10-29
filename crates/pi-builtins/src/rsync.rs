@@ -89,6 +89,9 @@ pub(crate) struct Rsync {
 impl Utility for Rsync {
 	const NAME: &'static str = "rsync";
 	const USAGE_ERROR: u8 = 1;
+	/// rsync catches SIGINT/SIGTERM/SIGHUP: a cancelled run ends with code 20
+	/// and its `received SIGINT, SIGTERM, or SIGHUP` trailer.
+	const OWNS_CANCELLATION: bool = true;
 
 	/// Puts every word after `--`, so clap never interprets one (rsync itself
 	/// gives `--` its meaning).

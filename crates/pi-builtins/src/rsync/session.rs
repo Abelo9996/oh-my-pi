@@ -654,8 +654,9 @@ struct Shared {
 	io_timeout: AtomicI32,
 	/// The side's counters (the sender stores the peer's MSG_BLOCK_STATS here).
 	stats: Arc<Mutex<Stats>>,
-	/// A socket error from the MSG_ERROR_EXIT echo, reported by the exit tail.
-	tail_error: Mutex<Option<String>>,
+	/// The host's cancellation: failures it causes are not reported (the run
+	/// ends with the signal trailer alone, as upstream's sig_int exit).
+	host_cancel: Arc<AtomicBool>,
 }
 
 impl Shared {
@@ -670,7 +671,9 @@ impl Shared {
 		let code = err.code;
 		let mut first = lock(&self.first);
 		if first.is_none() {
-			report(&self.logger.with_role(role), &err);
+			if !self.host_cancel.load(Ordering::Relaxed) {
+				report(&self.logger.with_role(role), &err);
+			}
 			*first = Some(Failure { err, role, from_peer: false });
 		}
 		drop(first);
@@ -776,19 +779,21 @@ impl Shared {
 			&& self.proto.version >= 31
 			&& let Some(w) = self.writer()
 		{
+			// A failure to deliver the echo goes unreported: upstream only queues
+			// it and exits without flushing after a peer's MSG_ERROR_EXIT.
 			let echo: &[u8] = if self.am_sender { &[] } else { &payload[..4] };
 			let mut w = w;
-			let sent = w.send_msg(MSG_ERROR_EXIT, echo).and_then(|()| w.flush());
-			if let Err(e) = sent {
-				let mut slot = lock(&self.tail_error);
-				if slot.is_none() {
-					*slot = socket_error_text(&e, self.logger.role(), "write error");
-				}
-			}
+			let _ = w.send_msg(MSG_ERROR_EXIT, echo).and_then(|()| w.flush());
 		}
 		{
+			// The peer's exit also explains a connection failure this side ran
+			// into first (its writes meeting the closing peer): upstream reads
+			// the message while it writes and never reports that failure.
 			let mut first = lock(&self.first);
-			if first.is_none() {
+			let superseded = first
+				.as_ref()
+				.is_none_or(|f| !f.from_peer && matches!(f.err.code, RERR_STREAMIO | RERR_SOCKETIO));
+			if superseded {
 				*first = Some(Failure { err: RsyncError::bare(val), role: self.logger.role(), from_peer: true });
 			}
 		}
@@ -1242,20 +1247,38 @@ impl PeerKind {
 		}
 	}
 
+	/// Waits for the in-process server half to end and returns its status;
+	/// None for other peers or when it was already collected.
+	fn join_local(&mut self) -> Option<i32> {
+		match self {
+			Self::Local { handle, .. } => {
+				handle.take().map(|h| h.join().unwrap_or(crate::rsync::exit::RERR_CRASHED))
+			}
+			_ => None,
+		}
+	}
+
 	/// Stops a peer that is still running (upstream kill_all(SIGUSR1)) and
-	/// reaps it.
-	fn stop(self) {
+	/// reaps it. Idempotent; also runs on drop, so no exit path leaves the
+	/// in-process half waiting to be stopped.
+	fn stop(&mut self) {
 		match self {
 			Self::Local { handle, kill } => {
 				kill.store(true, Ordering::Relaxed);
-				if let Some(h) = handle {
+				if let Some(h) = handle.take() {
 					let _ = h.join();
 				}
 			}
 			// Dropping the guard kills and reaps a child that still runs.
-			Self::Child(conn) => drop(conn),
+			Self::Child(conn) => drop(conn.take()),
 			Self::None => {}
 		}
+	}
+}
+
+impl Drop for PeerKind {
+	fn drop(&mut self) {
+		self.stop();
 	}
 }
 
@@ -1298,9 +1321,12 @@ fn client_start(
 	// Stops the in-process server half of a local copy.
 	let kill = Arc::new(AtomicBool::new(false));
 	let shared_slot: Arc<Mutex<Option<Arc<Shared>>>> = Arc::default();
+	// Cancellation stops this side; the server half of a local copy is stopped
+	// by the client afterwards (PeerKind::stop), as upstream's parent signals
+	// its child once it has reported its own exit.
 	let _watch = Watch::start(
 		Arc::clone(&io.cancel),
-		vec![Arc::clone(&abort), Arc::clone(&kill)],
+		vec![Arc::clone(&abort)],
 		opts.stop_at_utime,
 		Arc::clone(&shared_slot),
 	);
@@ -1553,10 +1579,18 @@ struct ClientRun<'a> {
 }
 
 /// A client failure before the transfer started: the diagnostic and trailer,
-/// then the peer is stopped (upstream exit_cleanup with kill_all).
-fn setup_failed(logger: &Logger, err: &RsyncError, streams: Streams, mut peer: PeerKind) -> i32 {
-	report(logger, err);
+/// then the peer is stopped (upstream exit_cleanup with kill_all). When the
+/// host cancelled the run, whatever the cancellation broke (a read failing, a
+/// killed remote shell's EOF) ends as upstream's signal exit instead.
+fn setup_failed(logger: &Logger, err: &RsyncError, streams: Streams, mut peer: PeerKind, cancelled: bool) -> i32 {
 	drop(streams);
+	if cancelled {
+		peer.stop();
+		let err = RsyncError::cancelled();
+		logger.finish(err.code, err.site, &Stats::default(), false);
+		return err.code;
+	}
+	report(logger, err);
 	let code = err.code.max(peer.status(true));
 	logger.finish(code, err.site, &Stats::default(), false);
 	peer.stop();
@@ -1598,7 +1632,10 @@ impl ClientRun<'_> {
 		};
 		let neg = match neg {
 			Ok(neg) => neg,
-			Err(err) => return setup_failed(&logger, &err, streams, peer),
+			Err(err) => {
+				let cancelled = self.io.host_cancel.load(Ordering::Relaxed);
+				return setup_failed(&logger, &err, streams, peer, cancelled);
+			}
 		};
 		logger.set_protocol(neg.proto.version);
 		logger.set_checksums(neg.xfer_sum, neg.file_sum);
@@ -1642,7 +1679,8 @@ impl ClientRun<'_> {
 			_ => None,
 		};
 		if let Some(err) = setup_err {
-			return setup_failed(&logger, &err, streams, peer);
+			let cancelled = self.io.host_cancel.load(Ordering::Relaxed);
+			return setup_failed(&logger, &err, streams, peer, cancelled);
 		}
 
 		let batch_shared = self.batch_writer.as_ref().map(|(data, _)| Arc::clone(data));
@@ -1668,7 +1706,7 @@ impl ClientRun<'_> {
 			iconv,
 			io_timeout: AtomicI32::new(opts.io_timeout),
 			stats: Arc::clone(&ctx.stats),
-			tail_error: Mutex::new(None),
+			host_cancel: Arc::clone(&self.io.host_cancel),
 		});
 		*lock(&self.shared_slot) = Some(Arc::clone(&shared));
 
@@ -1686,6 +1724,41 @@ impl ClientRun<'_> {
 		};
 		let mut outcome = side.run(streams);
 		*lock(&self.shared_slot) = None;
+		// A connection failure against the in-process server half: read what
+		// the half still sent, which may be its MSG_ERROR_EXIT (upstream's
+		// perform_io reads while its writes fail). The half closes its end
+		// when it exits, so this ends at EOF.
+		let connection_failure = || {
+			lock(&shared.first).as_ref().is_some_and(|f| !f.from_peer && matches!(f.err.code, RERR_STREAMIO | RERR_SOCKETIO))
+		};
+		if connection_failure()
+			&& matches!(peer, PeerKind::Local { .. })
+			&& !self.io.host_cancel.load(Ordering::Relaxed)
+		{
+			if let Some(reader) = outcome.reader.as_mut() {
+				shared.abort.store(false, Ordering::Relaxed);
+				let mut buf = [0u8; 1024];
+				while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
+			}
+			// Wherever the failure surfaced (a write blocked behind a full pipe,
+			// the file list, a flush), the half that broke the connection is
+			// what ended the run: its exit status stands and it has already
+			// reported why (upstream's client exits on the child's
+			// MSG_ERROR_EXIT without a trailer of its own). Its input is gone
+			// now, so it cannot be blocked on us.
+			drop(lock(&shared.writer).take());
+			drop(outcome.reader.take());
+			if connection_failure()
+				&& let Some(status) = peer.join_local()
+				&& status != 0
+			{
+				*lock(&shared.first) = Some(Failure {
+					err: RsyncError::bare(status),
+					role: outcome.role,
+					from_peer: true,
+				});
+			}
+		}
 		let writer = lock(&shared.writer).take();
 
 		if let Some(err) = logger.take_fatal() {
@@ -1763,7 +1836,7 @@ struct Tail {
 /// (noop_io_until_death). An OS-level failure of that I/O is reported once as
 /// upstream's `write error` / `read error` line; the exit code stays.
 fn exit_tail(shared: &Shared, tail: Tail, code: i32, role: Role, from_peer: bool) {
-	let mut error = lock(&shared.tail_error).take();
+	let mut error = None;
 	let quiet = code == 0 || matches!(code, RERR_SOCKETIO | RERR_STREAMIO | RERR_SIGNAL1 | RERR_TIMEOUT);
 	let applies = !quiet
 		&& !shared.shutting_down.load(Ordering::Relaxed)
@@ -1941,7 +2014,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 			while !io.cancel.load(Ordering::Relaxed) {
 				thread::sleep(Duration::from_millis(10));
 			}
-			return killed_exit(io, &logger, logger.role(), &Stats::default());
+			return killed_exit(&logger, logger.role(), &Stats::default());
 		}
 		Err(err) => {
 			report(&logger, &err);
@@ -2045,7 +2118,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		iconv,
 		io_timeout: AtomicI32::new(opts.io_timeout),
 		stats: Arc::clone(&ctx.stats),
-		tail_error: Mutex::new(None),
+		host_cancel: Arc::clone(&io.host_cancel),
 	});
 	*lock(&shared_slot) = Some(Arc::clone(&shared));
 	let files_from: Option<Box<dyn Read + Send>> = match opts.filesfrom_fd {
@@ -2100,9 +2173,20 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let end_role = failure.as_ref().map_or_else(|| outcome.as_ref().map_or(role, |o| o.role), |f| f.role);
 	let writer = lock(&shared.writer).take();
-	let code = if local_server && io.cancel.load(Ordering::Relaxed) && !io.host_cancel.load(Ordering::Relaxed) {
+	// A cancelled local copy: the client prints its signal trailer first, then
+	// stops this half (upstream's parent SIGUSR1s its child, whose generator
+	// reports `received SIGUSR1`). Wait for that stop so the order is upstream's.
+	if local_server && io.host_cancel.load(Ordering::Relaxed) {
+		let deadline = Instant::now() + Duration::from_secs(10);
+		while !io.cancel.load(Ordering::Relaxed) && Instant::now() < deadline {
+			thread::sleep(Duration::from_millis(5));
+		}
+	}
+	let code = if local_server && io.cancel.load(Ordering::Relaxed) {
 		*lock(&sink_writer) = None;
-		killed_exit(io, &logger, end_role, &stats)
+		// The process upstream signals is the half's generator (its "Receiver"
+		// before the split); the receiver child exits quietly.
+		killed_exit(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats)
 	} else if io.host_cancel.load(Ordering::Relaxed) {
 		let err = RsyncError::cancelled();
 		logger.with_role(end_role).finish(err.code, err.site, &stats, false);
@@ -2146,12 +2230,7 @@ fn live_totals(mut stats: Stats, counters: &IoCounters) -> Stats {
 /// The local server half after its client stopped it (upstream's SIGUSR1 to
 /// the local child): `rsync error: received SIGUSR1 (code 19) at main.c(1687)`.
 /// The connection is gone, so the trailer goes to stderr.
-fn killed_exit(io: &HostIo, logger: &Logger, role: Role, stats: &Stats) -> i32 {
-	if io.host_cancel.load(Ordering::Relaxed) {
-		let err = RsyncError::cancelled();
-		logger.with_role(role).finish(err.code, err.site, stats, false);
-		return err.code;
-	}
+fn killed_exit(logger: &Logger, role: Role, stats: &Stats) -> i32 {
 	let err = RsyncError::bare(RERR_SIGNAL1).at("main.c", 1687);
 	logger.with_role(role).finish(err.code, err.site, stats, false);
 	err.code

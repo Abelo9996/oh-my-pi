@@ -199,7 +199,7 @@ impl Gen<'_> {
 			self.hlink_debug(ndx, &file, gnum, &tail);
 		}
 
-		let prev_st = match prev_loc.tree.lstat(&prev_loc.rel) {
+		let prev_st = match self.stat_loc(&prev_loc.tree, &prev_loc.rel, false) {
 			Ok(st) => Some(st),
 			Err(err) => {
 				if !self.dry_run || err.kind() != io::ErrorKind::NotFound {
@@ -220,7 +220,7 @@ impl Gen<'_> {
 				let Ok(alt) = self.alt_loc(j, fname) else {
 					continue;
 				};
-				let Ok(st) = alt.tree.lstat(&alt.rel) else {
+				let Ok(st) = self.stat_loc(&alt.tree, &alt.rel, false) else {
 					continue;
 				};
 				let mut alt_sx = Sx::of(st, &alt.tree, &alt.rel);
@@ -344,7 +344,7 @@ impl Gen<'_> {
 		let loc = self.dest_loc(fname).ok();
 		let mut st = stp;
 		if st.is_none() && prev_ndx >= 0 {
-			match loc.as_ref().map(|l| l.tree.lstat(&l.rel)) {
+			match loc.as_ref().map(|l| self.stat_loc(&l.tree, &l.rel, false)) {
 				Some(Ok(meta)) => st = Some(meta),
 				Some(Err(err)) if !self.dry_run => {
 					let text = [&b"stat "[..], &self.full(fname), b" failed"].concat();

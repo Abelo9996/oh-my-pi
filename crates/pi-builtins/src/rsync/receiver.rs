@@ -971,11 +971,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		let (target_loc, out_file) = if opts.inplace || one_inplace {
 			let target = if one_inplace { partialptr.clone().unwrap_or_else(|| fname_loc.clone()) } else { fname_loc.clone() };
 			// The in-place partial output resolves through the ownership walk.
-			let opened = if one_inplace {
-				self.partial_target(&target).and_then(|owned| self.open_inplace(&owned).map(|f| (owned, f)))
-			} else {
-				self.open_inplace(&target).map(|f| (target.clone(), f))
-			};
+			let opened = self.open_inplace(&target, one_inplace);
 			match opened {
 				Ok(opened) => opened,
 				Err(err) => {
@@ -1216,11 +1212,24 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		}
 	}
 
+	/// Where one in-place open attempt goes. The in-place partial-dir output
+	/// (`owner_walk`, upstream `one_inplace`) is resolved again by path through
+	/// the trusted-owner walk for every attempt, as upstream's secure_recv_open
+	/// does, so a partial dir swapped for a foreign symlink between attempts is
+	/// refused, not reached through a handle held from before.
+	fn inplace_attempt(&self, target: &Loc, owner_walk: bool) -> io::Result<Loc> {
+		if owner_walk { self.partial_target(target) } else { Ok(target.clone()) }
+	}
+
 	/// The in-place output open (with upstream's read-only-file recovery).
-	fn open_inplace(&self, target: &Loc) -> io::Result<File> {
-		let first = target.tree.open_write(&target.rel, true, false);
+	/// Returns the location actually opened.
+	fn open_inplace(&self, target: &Loc, owner_walk: bool) -> io::Result<(Loc, File)> {
+		let loc = self.inplace_attempt(target, owner_walk)?;
+		let first = loc.tree.open_write(&loc.rel, true, false);
+		#[cfg(test)]
+		let first = tests::hooks::after_inplace_open(first);
 		let err = match first {
-			Ok(f) => return Ok(f),
+			Ok(f) => return Ok((loc, f)),
 			Err(err) => err,
 		};
 		if !is_eacces(&err) {
@@ -1228,28 +1237,33 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		}
 		// Linux protected_regular refuses O_CREAT on some existing files.
 		#[cfg(any(target_os = "linux", target_os = "android"))]
-		let err = match target.tree.open_write(&target.rel, false, false) {
-			Ok(f) => return Ok(f),
-			Err(err) => err,
+		let err = {
+			let loc = self.inplace_attempt(target, owner_walk)?;
+			match loc.tree.open_write(&loc.rel, false, false) {
+				Ok(f) => return Ok((loc, f)),
+				Err(err) => err,
+			}
 		};
 		if !is_eacces(&err) {
 			return Err(err);
 		}
-		self.open_readonly_inplace(target)
+		self.open_readonly_inplace(target, owner_walk)
 	}
 
 	/// open_readonly_inplace: briefly grants owner-write to open a read-only file.
-	fn open_readonly_inplace(&self, target: &Loc) -> io::Result<File> {
-		// The confined lookup's own failure (ELOOP for a refused symlink, …) stands;
-		// only "not a read-only regular file" is reported as EACCES.
-		let meta = target.tree.lstat(&target.rel)?;
+	fn open_readonly_inplace(&self, target: &Loc, owner_walk: bool) -> io::Result<(Loc, File)> {
+		// The lookup's own failure (ELOOP for a refused symlink, …) stands; only
+		// "not a read-only regular file" is reported as EACCES.
+		let probe = self.inplace_attempt(target, owner_walk)?;
+		let meta = probe.tree.lstat(&probe.rel)?;
 		let prior = meta.mode() & 0o7777;
 		if !meta.is_file() || prior & 0o200 != 0 {
 			return Err(eacces());
 		}
-		target.tree.chmod(&target.rel, prior | 0o200)?;
-		let opened = target.tree.open_write(&target.rel, false, false);
-		if let Err(err) = target.tree.chmod(&target.rel, prior) {
+		probe.tree.chmod(&probe.rel, prior | 0o200)?;
+		let opened =
+			self.inplace_attempt(target, owner_walk).and_then(|loc| loc.tree.open_write(&loc.rel, false, false).map(|f| (loc, f)));
+		if let Err(err) = probe.tree.chmod(&probe.rel, prior) {
 			drop(opened);
 			return Err(err);
 		}

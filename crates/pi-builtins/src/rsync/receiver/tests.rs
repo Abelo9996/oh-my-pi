@@ -611,6 +611,111 @@ fn partial_dir_basis_is_consumed_and_removed() {
 	assert_eq!(dir_names(fx.dir.path()), ["f"]);
 }
 
+/// Test-only interposition points of the receiver (like the upstream suite's dyld hooks).
+pub(crate) mod hooks {
+	use std::{cell::RefCell, io};
+
+	use pi_vfs::File;
+
+	thread_local! {
+		static AFTER_INPLACE_OPEN: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+	}
+
+	/// Makes the next in-place output open fail with EACCES after running `f`.
+	#[cfg(unix)]
+	pub(crate) fn fail_next_inplace_open(f: impl FnOnce() + 'static) {
+		AFTER_INPLACE_OPEN.with(|hook| *hook.borrow_mut() = Some(Box::new(f)));
+	}
+
+	/// Called by `open_inplace` with the first open's result.
+	pub(crate) fn after_inplace_open(result: io::Result<File>) -> io::Result<File> {
+		match AFTER_INPLACE_OPEN.with(|hook| hook.borrow_mut().take()) {
+			Some(f) => {
+				drop(result);
+				f();
+				Err(super::super::eacces())
+			}
+			None => result,
+		}
+	}
+}
+
+/// Upstream partial-protected-regular-retry-policy: the in-place partial-dir open
+/// fails with EACCES, then `pdir` is swapped for a symlink. Every retry resolves
+/// the partial dir by path again, so the symlink is refused (here it leads out of
+/// `--confine-root`; ELOOP) instead of the retry reusing the old directory and
+/// reporting "Permission denied". Nothing outside is written.
+#[cfg(unix)]
+#[test]
+fn inplace_partial_retry_resolves_the_partial_dir_again() {
+	let outside = tempfile::tempdir().unwrap();
+	std::fs::create_dir(outside.path().join("secret")).unwrap();
+	std::fs::write(outside.path().join("secret/f"), b"OTHER-SECRET!!!").unwrap();
+	let mut o = opts();
+	o.keep_partial = true;
+	o.partial_dir = Some("pdir".into());
+	let proto = Proto { version: 33, compat: CF_INPLACE_PARTIAL_DIR };
+	let dir = tempfile::tempdir().unwrap();
+	o.confine_root = Some(std::fs::canonicalize(dir.path()).unwrap().into_os_string());
+	let mut fx = Fixture::new(o, proto, SEED);
+	fx.dir = dir;
+	std::fs::create_dir(fx.path("pdir")).unwrap();
+	std::fs::write(fx.path("pdir/f"), b"0123456789").unwrap();
+	let (pdir, held, secret) = (fx.path("pdir"), fx.path(".pdir-held"), outside.path().join("secret"));
+	hooks::fail_next_inplace_open(move || {
+		std::fs::rename(&pdir, &held).unwrap();
+		std::os::unix::fs::symlink(&secret, &pdir).unwrap();
+	});
+	let flists = flists_of(vec![entry("f", 15, 0o100_644, 1_400_000_000)]);
+	let trees = fx.trees();
+	let (result, _) = fx.run(&trees, &flists, partial_basis_stream(proto));
+	result.unwrap();
+	let messages = fx.messages();
+	let shown = format!("open \"{}\" failed: Too many levels of symbolic links", fx.path("pdir/f").display());
+	assert!(messages.contains(&shown), "{messages}");
+	assert!(!messages.contains("Permission denied"), "{messages}");
+	assert!(fx.ctx.logger.got_xfer_error());
+	assert_eq!(std::fs::read(outside.path().join("secret/f")).unwrap(), b"OTHER-SECRET!!!");
+	assert_eq!(std::fs::read(fx.path(".pdir-held/f")).unwrap(), b"0123456789");
+	assert!(!fx.path("f").exists());
+}
+
+/// The same race with the real ownership rule (root only): the swapped-in
+/// symlink belongs to another user, so the retry prints upstream's notice.
+#[cfg(unix)]
+#[test]
+fn inplace_partial_retry_refuses_a_foreign_symlink_swapped_in() {
+	// SAFETY: geteuid has no preconditions.
+	if unsafe { libc::geteuid() } != 0 {
+		return;
+	}
+	let mut o = opts();
+	o.keep_partial = true;
+	o.partial_dir = Some("pdir".into());
+	let proto = Proto { version: 33, compat: CF_INPLACE_PARTIAL_DIR };
+	let fx = Fixture::new(o, proto, SEED);
+	std::fs::create_dir(fx.path("pdir")).unwrap();
+	std::fs::write(fx.path("pdir/f"), b"0123456789").unwrap();
+	std::fs::create_dir(fx.path("secret")).unwrap();
+	std::fs::write(fx.path("secret/f"), b"OTHER-SECRET!!!").unwrap();
+	let (pdir, held) = (fx.path("pdir"), fx.path(".pdir-held"));
+	hooks::fail_next_inplace_open(move || {
+		std::fs::rename(&pdir, &held).unwrap();
+		std::os::unix::fs::symlink("secret", &pdir).unwrap();
+		std::os::unix::fs::lchown(&pdir, Some(65534), Some(65534)).unwrap();
+	});
+	let flists = flists_of(vec![entry("f", 15, 0o100_644, 1_400_000_000)]);
+	let trees = fx.trees();
+	let (result, _) = fx.run(&trees, &flists, partial_basis_stream(proto));
+	result.unwrap();
+	let messages = fx.messages();
+	assert!(messages.contains(crate::rsync::paths::UNTRUSTED_SYMLINK_NOTICE), "{messages}");
+	let shown = format!("open \"{}\" failed: Too many levels of symbolic links", fx.path("pdir/f").display());
+	assert!(messages.contains(&shown), "{messages}");
+	assert_eq!(std::fs::read(fx.path("secret/f")).unwrap(), b"OTHER-SECRET!!!");
+	assert!(!fx.path("f").exists());
+}
+
 /// A one-file stream whose basis is the partial-dir file (10 bytes of block 0 + "abcde").
 #[cfg(unix)]
 fn partial_basis_stream(proto: Proto) -> Vec<u8> {

@@ -49,7 +49,7 @@ use crate::rsync::flist::FileEntry;
 use crate::rsync::flists::Flists;
 use crate::rsync::log::{Debug as DebugFlag, Info, LogCode, LogItem, big_num};
 use crate::rsync::matcher::{self, MatchStats, Sums};
-use crate::rsync::mux::{Msg, MuxReader, MuxWriter};
+use crate::rsync::mux::{IdleWork, Msg, MuxReader, MuxWriter};
 use crate::rsync::paths;
 use crate::rsync::scan::Scanner;
 use crate::rsync::session::Ctx;
@@ -64,11 +64,61 @@ const MAX_FILECNT_LOOKAHEAD: usize = 10000;
 pub(crate) trait Input: Read {
 	/// Whether a read would return without waiting for the peer (data, EOF, or error).
 	fn data_ready(&mut self) -> io::Result<bool>;
+
+	/// A read that, instead of waiting for the peer, runs `idle` (one unit of
+	/// side work) for as long as it asks to be called again (see
+	/// [`MuxReader::read_idle`]).
+	fn read_idle(&mut self, buf: &mut [u8], idle: IdleWork<'_>) -> io::Result<usize> {
+		while !self.data_ready()? && idle()? {}
+		self.read(buf)
+	}
 }
 
 impl Input for MuxReader {
 	fn data_ready(&mut self) -> io::Result<bool> {
 		MuxReader::data_ready(self)
+	}
+
+	fn read_idle(&mut self, buf: &mut [u8], idle: IdleWork<'_>) -> io::Result<usize> {
+		MuxReader::read_idle(self, buf, idle)
+	}
+}
+
+/// The request stream as read inside upstream's read_ndx_and_attrs: while
+/// `extra_flist_sending_enabled` holds, every wait for the generator sends one
+/// more inc-recursion file-list segment instead (io.c's zero-timeout poll),
+/// until the list is complete or MAX_FILECNT_LOOKAHEAD files are queued.
+struct Feed<'a> {
+	input: &'a mut dyn Input,
+	src: &'a mut dyn Source,
+	out: &'a MuxWriter,
+	flists: &'a Flists,
+	/// Upstream file_old_total.
+	old_total: usize,
+	/// Upstream extra_flist_sending_enabled.
+	enabled: bool,
+}
+
+impl Read for Feed<'_> {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		if !self.enabled {
+			return self.input.read(buf);
+		}
+		let Self { input, src, out, flists, old_total, enabled } = self;
+		let (out, flists, old_total) = (*out, *flists, *old_total);
+		let mut send_one = || -> io::Result<bool> {
+			if flists.is_eof() || flists.file_total().saturating_sub(old_total) >= MAX_FILECNT_LOOKAHEAD {
+				*enabled = false;
+				return Ok(false);
+			}
+			src.set_old_total(old_total);
+			// The list's own writes wait normally (upstream clears the flag
+			// around send_extra_file_list).
+			src.send_extra_at_least(out, flists, -1).map_err(io::Error::other)?;
+			*enabled = !flists.is_eof();
+			Ok(*enabled)
+		};
+		input.read_idle(buf, &mut send_one)
 	}
 }
 
@@ -429,45 +479,28 @@ impl Sender<'_> {
 		(first, last)
 	}
 
-	/// io.c's `extra_flist_sending_enabled` poll: while no request is pending, send one
-	/// more inc-recursion segment at a time until MAX_FILECNT_LOOKAHEAD files are queued
-	/// or the list is complete. Each segment is flushed so the generator can use it.
-	fn lookahead(&mut self, src: &mut dyn Source, input: &mut dyn Input) -> Result<(), RsyncError> {
-		if !self.ctx.inc_recurse {
-			return Ok(());
-		}
-		loop {
-			self.ctx.check_cancel()?;
-			let queued = self.flists.file_total().saturating_sub(self.old_total);
-			if self.flists.is_eof() || queued >= MAX_FILECNT_LOOKAHEAD {
-				return Ok(());
-			}
-			if input.data_ready().map_err(RsyncError::from_stream)? {
-				return Ok(());
-			}
-			let before = (self.flists.len(), self.flists.is_eof());
-			src.set_old_total(self.old_total);
-			src.send_extra_at_least(&self.out, self.flists, -1)?;
-			if (self.flists.len(), self.flists.is_eof()) == before {
-				return Ok(());
-			}
-			self.out.flush().map_err(RsyncError::from_stream)?;
-		}
-	}
-
-	/// read_ndx_and_attrs for the sender: None at NDX_DONE.
+	/// read_ndx_and_attrs for the sender: None at NDX_DONE. Its waits send extra
+	/// file-list segments (see [`Feed`]).
 	fn read_request(&mut self, src: &mut dyn Source, input: &mut dyn Input) -> Result<Option<Request>, RsyncError> {
 		let ctx = self.ctx;
+		let out = self.out.clone();
+		let mut input = Feed {
+			input,
+			src,
+			out: &out,
+			flists: self.flists,
+			old_total: self.old_total,
+			enabled: ctx.inc_recurse && !self.flists.is_eof(),
+		};
 		loop {
-			self.lookahead(src, input)?;
-			let wire = self.codec_in.read(input).map_err(RsyncError::from_stream)?;
+			let wire = self.codec_in.read(&mut input).map_err(RsyncError::from_stream)?;
 			if wire == NDX_DONE {
 				return Ok(None);
 			}
 			if wire == NDX_DEL_STATS {
-				self.read_del_stats(input)?;
+				self.read_del_stats(&mut input)?;
 				if ctx.am_sender && ctx.am_server {
-					self.write_del_stats(src)?;
+					self.write_del_stats(&mut *input.src)?;
 				}
 				continue;
 			}
@@ -496,6 +529,7 @@ impl Sender<'_> {
 				self.cur_seg = Some(seg);
 				self.old_total =
 					(self.first_live..=seg).map(|s| self.flists.segment_len(s).unwrap_or(0)).sum();
+				input.old_total = self.old_total;
 			}
 
 			let fnamecmp_type =
@@ -646,7 +680,12 @@ impl Sender<'_> {
 		let fname = entry.name();
 		let dir_prefix = src.pathname(entry_ndx, self.flists);
 		if self.debug_send >= 1 {
-			self.info(format!("send_files({}, {})\n", req.ndx, String::from_utf8_lossy(&fname)));
+			// "%s%s%s": F_PATHNAME, then "/" whenever the entry has one.
+			let (path, slash) = match dir_prefix.as_deref() {
+				Some(path) => (String::from_utf8_lossy(path), "/"),
+				None => (String::from_utf8_lossy(b""), ""),
+			};
+			self.info(format!("send_files({}, {path}{slash}{})\n", req.ndx, String::from_utf8_lossy(&fname)));
 		}
 
 		// The generator's request for abbreviated xattr values comes first.

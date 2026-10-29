@@ -49,6 +49,9 @@ use crate::rsync::wire::{Proto, clone_io_error, is_retryable, put, wire_error};
 const SELECT_TIMEOUT: u64 = 60;
 /// How often a blocked read looks at the cancellation flag.
 const CANCEL_POLL: Duration = Duration::from_millis(100);
+/// How long an idle pass watches pending output for progress before it counts
+/// the connection as not writable (upstream's zero-timeout poll).
+const IDLE_POLL: Duration = Duration::from_millis(1);
 /// Frame header length.
 const HDR: usize = 4;
 /// Output buffer size (upstream `ROUND_UP_1024(IO_BUFFER_SIZE * 2)`), frame
@@ -259,12 +262,35 @@ struct OutState {
 	spare: Option<Vec<u8>>,
 	/// Live [`OutputGrant`]s: the role thread is inside an output pass.
 	grants: usize,
+	/// Write calls (and flush jobs) completed so far: an output pass waits for
+	/// one more, as upstream's `perform_io` pass performs one `write()`.
+	attempts: u64,
+	/// During such a one-write pass: no write call starts once `attempts`
+	/// reaches this value.
+	pass_limit: Option<u64>,
+	/// The output thread is inside a write call (one that does not return is
+	/// a connection that is not writable).
+	writing: bool,
+	/// Write calls that wrote something.
+	moved: u64,
+}
+
+/// What [`MuxWriter::settle`] waits for.
+#[derive(Clone, Copy)]
+enum Until {
+	/// Everything queued is written.
+	Drained,
+	/// At most this many bytes are still queued.
+	Room(usize),
+	/// One write attempt after the given [`OutState::attempts`] value, or nothing
+	/// left to write.
+	Attempt(u64),
 }
 
 impl OutState {
 	/// Whether the output thread may write now.
 	fn may_write(&self) -> bool {
-		self.grants > 0 || self.closed
+		(self.grants > 0 && self.pass_limit.is_none_or(|limit| self.attempts < limit)) || self.closed
 	}
 }
 
@@ -293,12 +319,17 @@ impl OutPipe {
 /// an output pass (a flush, a wait for output room, or a wait for input).
 pub(crate) struct OutputGrant {
 	out: Arc<OutPipe>,
+	/// This grant set [`OutState::pass_limit`] (a one-write pass).
+	limited: bool,
 }
 
 impl Drop for OutputGrant {
 	fn drop(&mut self) {
 		let mut o = lock(&self.out.state);
 		o.grants = o.grants.saturating_sub(1);
+		if self.limited {
+			o.pass_limit = None;
+		}
 		drop(o);
 		self.out.cond.notify_all();
 	}
@@ -317,11 +348,17 @@ fn write_out(
 		// What the connection did not take waits for the writer's next pass.
 		pipe.wait_permission();
 		let max = bw.as_ref().map_or(bytes.len(), |b| b.writemax.min(bytes.len()));
-		let n = match inner.write(&bytes[..max]) {
+		lock(&pipe.state).writing = true;
+		let res = inner.write(&bytes[..max]);
+		lock(&pipe.state).writing = false;
+		let n = match res {
 			Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
 			Ok(n) => n.min(max),
 			Err(e) if is_retryable(&e) => continue,
 			Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+				// Not writable: this pass is over without a write.
+				lock(&pipe.state).attempts += 1;
+				pipe.cond.notify_all();
 				thread::sleep(would_block_pause(&mut attempt));
 				continue;
 			}
@@ -333,6 +370,12 @@ fn write_out(
 		}
 		counters.last_out.store(clock_ms(), Ordering::Relaxed);
 		bytes = &bytes[n..];
+		{
+			let mut o = lock(&pipe.state);
+			o.attempts += 1;
+			o.moved += 1;
+		}
+		pipe.cond.notify_all();
 		if let Some(bw) = bw.as_mut() {
 			bw.after_write(n);
 		}
@@ -386,6 +429,7 @@ fn out_loop(
 		};
 		let mut o = lock(&pipe.state);
 		o.busy = false;
+		o.attempts += 1;
 		o.queued = o.queued.saturating_sub(done);
 		if let Some(mut buf) = spent
 			&& o.spare.is_none()
@@ -576,6 +620,10 @@ impl MuxWriter {
 				closed: false,
 				spare: None,
 				grants: 0,
+				attempts: 0,
+				pass_limit: None,
+				writing: false,
+				moved: 0,
 			}),
 			cond: Condvar::new(),
 		});
@@ -613,13 +661,42 @@ impl MuxWriter {
 		self.shared.msgs_written.load(Ordering::Relaxed) || self.data_pending()
 	}
 
+	/// Whether output is pending and the output thread completes a write call
+	/// within `window` (upstream's poll reporting the connection writable).
+	fn output_moving(&self, window: Duration) -> bool {
+		let out = &self.shared.out;
+		let mut o = lock(&out.state);
+		if o.queue.is_empty() && !o.busy {
+			return false;
+		}
+		let before = o.moved;
+		let deadline = Instant::now() + window;
+		while o.moved == before {
+			let now = Instant::now();
+			if now >= deadline {
+				return false;
+			}
+			o = out.cond.wait_timeout(o, deadline - now).unwrap_or_else(PoisonError::into_inner).0;
+		}
+		true
+	}
+
+	/// Hands the buffered data to the output thread without waiting: the passes
+	/// that follow write it.
+	fn queue_pending(&self) -> io::Result<()> {
+		let sh = &*self.shared;
+		let mut st = lock(&sh.state);
+		st.check_failed(sh)?;
+		st.flush_data(sh)
+	}
+
 	/// Lets the output thread write until the grant is dropped: the caller is in
 	/// an output pass (upstream's `perform_io`), e.g. waiting for input.
 	pub(crate) fn grant(&self) -> OutputGrant {
 		let out = Arc::clone(&self.shared.out);
 		lock(&out.state).grants += 1;
 		out.cond.notify_all();
-		OutputGrant { out }
+		OutputGrant { out, limited: false }
 	}
 
 	/// The first output pass of a `perform_io` that needs input (see
@@ -633,17 +710,24 @@ impl MuxWriter {
 	/// The output side of upstream `perform_io` when the linked reader must read
 	/// more input: the pass writes the messages sent since the last pass or, when
 	/// there were none, the buffered data; with messages written and input already
-	/// waiting, the data stays buffered. Never waits for the write to finish.
+	/// waiting, the data stays buffered. Like upstream's pass it performs one write
+	/// call (whatever the connection takes of the frame in flight) before
+	/// returning; the rest goes out in later passes.
 	fn refill_flush(&self, input_ready: bool) -> io::Result<()> {
 		let sh = &*self.shared;
-		let mut st = lock(&sh.state);
-		st.check_failed(sh)?;
-		let had_msgs = sh.msgs_written.swap(false, Ordering::Relaxed);
-		if had_msgs && input_ready {
-			return Ok(());
-		}
-		st.flush_data(sh)?;
-		st.request_flush(sh)
+		let before = {
+			let mut st = lock(&sh.state);
+			st.check_failed(sh)?;
+			let had_msgs = sh.msgs_written.swap(false, Ordering::Relaxed);
+			if had_msgs && input_ready {
+				return Ok(());
+			}
+			let before = lock(&sh.out.state).attempts;
+			st.flush_data(sh)?;
+			st.request_flush(sh)?;
+			before
+		};
+		self.settle(Until::Attempt(before))
 	}
 
 	/// The receiving side's receiver is busy on file data (upstream
@@ -660,15 +744,16 @@ impl MuxWriter {
 		self.serve_peer(512)
 	}
 
-	/// Waits for the output thread: until everything queued is written (None)
-	/// or until at most `max_queued` bytes are still queued. While waiting it
-	/// lets the output thread write, serves the linked reader's input and
-	/// messages, and checks cancellation and `--timeout` (upstream `perform_io`
-	/// for output). Returns at once, writing nothing, when no wait is needed.
-	fn settle(&self, max_queued: Option<usize>) -> io::Result<()> {
+	/// Waits for the output thread until `until` holds. While waiting it lets
+	/// the output thread write, serves the linked reader's input and messages,
+	/// and checks cancellation and `--timeout` (upstream `perform_io` for
+	/// output). Returns at once, writing nothing, when no wait is needed.
+	fn settle(&self, until: Until) -> io::Result<()> {
 		let sh = &*self.shared;
 		let mut grant: Option<OutputGrant> = None;
 		let mut next_check: Option<Instant> = None;
+		// Since when the output thread has been inside one write call.
+		let mut stuck_since: Option<Instant> = None;
 		loop {
 			{
 				// Short slices: input that arrives while output waits is read about
@@ -680,16 +765,34 @@ impl MuxWriter {
 						drop(o);
 						return self.state().check_failed(sh);
 					}
-					let done = match max_queued {
-						None => o.queue.is_empty() && !o.busy,
-						Some(max) => o.queued <= max,
+					let drained = o.queue.is_empty() && !o.busy;
+					if !o.writing {
+						stuck_since = None;
+					}
+					let done = match until {
+						Until::Drained => drained,
+						Until::Room(max) => o.queued <= max,
+						// A write call that does not return is a connection that is
+						// not writable: the pass ends without writing.
+						Until::Attempt(before) => {
+							drained
+								|| o.attempts > before
+								|| (o.writing && stuck_since.get_or_insert_with(Instant::now).elapsed() >= IDLE_POLL)
+						}
 					};
 					if done {
 						return Ok(());
 					}
 					if grant.is_none() {
 						o.grants += 1;
-						grant = Some(OutputGrant { out: Arc::clone(&sh.out) });
+						let limited = match until {
+							Until::Attempt(before) => {
+								o.pass_limit = Some(before + 1);
+								true
+							}
+							Until::Drained | Until::Room(_) => false,
+						};
+						grant = Some(OutputGrant { out: Arc::clone(&sh.out), limited });
 						sh.out.cond.notify_all();
 					}
 					let now = Instant::now();
@@ -826,7 +929,7 @@ impl MuxWriter {
 			st.multiplexed = true;
 			st.request_flush(sh)?;
 		}
-		self.settle(None)
+		self.settle(Until::Drained)
 	}
 
 	/// Flushes pending data as a frame and returns to raw output (upstream
@@ -841,7 +944,7 @@ impl MuxWriter {
 			st.multiplexed = false;
 			st.request_flush(sh)?;
 		}
-		self.settle(None)
+		self.settle(Until::Drained)
 	}
 
 	/// Sends one out-of-band message at once, ahead of any buffered data
@@ -864,7 +967,7 @@ impl MuxWriter {
 			st.request_flush(sh)?;
 			sh.msgs_written.store(true, Ordering::Relaxed);
 		}
-		self.settle(None)?;
+		self.settle(Until::Drained)?;
 		Ok(true)
 	}
 
@@ -934,7 +1037,7 @@ impl MuxWriter {
 		}
 		st.request_flush(sh)?;
 		drop(st);
-		if wait_for_lock { self.settle(None) } else { Ok(()) }
+		if wait_for_lock { self.settle(Until::Drained) } else { Ok(()) }
 	}
 
 	/// Tees every data byte written from now on into a batch file.
@@ -974,7 +1077,7 @@ impl Write for MuxWriter {
 			if output_pass {
 				self.after_output_pass()?;
 			}
-			self.settle(Some(room))?;
+			self.settle(Until::Room(room))?;
 		}
 		Ok(data.len())
 	}
@@ -997,7 +1100,7 @@ impl Write for MuxWriter {
 			st.request_flush(sh)?;
 		}
 		self.after_output_pass()?;
-		self.settle(None)
+		self.settle(Until::Drained)
 	}
 }
 
@@ -1065,6 +1168,10 @@ struct RState {
 	/// Size (header included) of the current MSG_DATA frame until its first
 	/// byte is handed to `read`.
 	frame_uncounted: u64,
+	/// Messages dispatched so far: a read that dispatched some while waiting runs
+	/// another output pass (what their handlers queued goes out, as in upstream's
+	/// next `perform_io` iteration).
+	msgs_seen: u64,
 	on_msg: Option<OnMsg>,
 	/// A `read` is in progress.
 	in_read: bool,
@@ -1328,6 +1435,7 @@ fn demux<'a>(sh: &'a RShared, mut guard: MutexGuard<'a, RState>) -> MutexGuard<'
 		}
 		let payload: Vec<u8> = st.raw.drain(..len).collect();
 		st.consume(len);
+		st.msgs_seen += 1;
 		let Some(mut on_msg) = st.on_msg.take() else {
 			continue;
 		};
@@ -1454,6 +1562,7 @@ impl MuxReader {
 			mode: Mode::Raw,
 			frame_left: 0,
 			frame_uncounted: 0,
+			msgs_seen: 0,
 			on_msg: None,
 			in_read: false,
 			serving: false,
@@ -1628,6 +1737,26 @@ impl MuxReader {
 
 impl Read for MuxReader {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		self.read_with(buf, None)
+	}
+}
+
+/// Called by [`MuxReader::read_idle`] whenever the read would otherwise wait:
+/// does one unit of side work (sends one more file-list segment) and returns
+/// whether it wants to be called again.
+pub(crate) type IdleWork<'a> = &'a mut dyn FnMut() -> io::Result<bool>;
+
+impl MuxReader {
+	/// [`Read::read`] for the sender's request stream while upstream's
+	/// `extra_flist_sending_enabled` is set: every pass of the wait that finds
+	/// no input waiting and no output moving (io.c's zero-timeout poll
+	/// returning nothing) runs `idle` once, and its output goes out in the
+	/// following passes. Once `idle` returns false the read waits normally.
+	pub(crate) fn read_idle(&mut self, buf: &mut [u8], idle: IdleWork<'_>) -> io::Result<usize> {
+		self.read_with(buf, Some(idle))
+	}
+
+	fn read_with(&mut self, buf: &mut [u8], idle: Option<IdleWork<'_>>) -> io::Result<usize> {
 		if buf.is_empty() {
 			return Ok(0);
 		}
@@ -1639,25 +1768,42 @@ impl Read for MuxReader {
 			st.in_read = true;
 			st.last_reader = Some(thread::current().id());
 		}
-		let res = self.read_data(buf);
+		let res = self.read_data(buf, idle);
 		self.shared.lock().in_read = false;
 		res
 	}
-}
 
-impl MuxReader {
-	fn read_data(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+	/// One idle pass (see [`Self::read_idle`]): output the connection is
+	/// taking goes first, as upstream's poll reports the socket writable;
+	/// otherwise `idle` runs and what it buffered is queued for the next
+	/// passes. Returns whether `idle` wants to run again.
+	fn idle_pass(&self, idle: &mut dyn FnMut() -> io::Result<bool>) -> io::Result<bool> {
+		if let Some(w) = &self.writer
+			&& w.output_moving(IDLE_POLL)
+		{
+			return Ok(true);
+		}
+		let more = idle()?;
+		if let Some(w) = &self.writer {
+			w.queue_pending()?;
+		}
+		Ok(more)
+	}
+
+	fn read_data(&mut self, buf: &mut [u8], mut idle: Option<IdleWork<'_>>) -> io::Result<usize> {
 		let sh = Arc::clone(&self.shared);
 		if sh.cancel.load(Ordering::Relaxed) {
 			return Err(RsyncError::cancelled_io());
 		}
-		// Held from the refill on: our own output keeps going out while this read
-		// waits for input (upstream's perform_io writes in every pass).
+		// Taken once this read must wait: our own output keeps going out while it
+		// waits for input (upstream's later perform_io passes write too).
 		let mut _grant: Option<OutputGrant> = None;
 		let mut st = sh.lock();
 		let mut refilled = false;
 		// Whether this call already ran an output pass that held nothing back.
 		let mut drained = false;
+		// `msgs_seen` as of the last output pass.
+		let mut passed_msgs = st.msgs_seen;
 		let mut next_check: Option<Instant> = None;
 		loop {
 			if st.mode == Mode::Mux {
@@ -1687,13 +1833,11 @@ impl MuxReader {
 				// perform_io: one output pass, then the input that is waiting.
 				let ready = st.input_waiting() || st.inner_done();
 				drop(st);
-				if self.refill_hook.is_none() {
-					_grant = self.writer.as_ref().map(MuxWriter::grant);
-				}
 				self.run_refill(ready)?;
 				st = sh.lock();
 				refilled = true;
 				drained = !ready;
+				passed_msgs = st.msgs_seen;
 				st = sh.read_now(st);
 				continue;
 			}
@@ -1703,11 +1847,14 @@ impl MuxReader {
 			if sh.cancel.load(Ordering::Relaxed) {
 				return Err(RsyncError::cancelled_io());
 			}
-			if !drained {
+			if !drained || st.msgs_seen != passed_msgs {
 				// About to block: like upstream's later perform_io passes, write all
 				// output still pending (data a message pass held back; raw mode's
-				// buffered output) so the peer — or the generator, for a hooked
-				// receiver — is never left waiting on us.
+				// buffered output; what the messages dispatched while waiting
+				// queued, e.g. a MSG_NO_SEND the receiver forwards) so the peer —
+				// or the generator, for a hooked receiver — is never left waiting
+				// on us.
+				passed_msgs = st.msgs_seen;
 				drop(st);
 				self.run_refill(false)?;
 				st = sh.lock();
@@ -1715,6 +1862,23 @@ impl MuxReader {
 				continue;
 			}
 			// Block for input: one read of whatever arrives first.
+			if _grant.is_none() && self.refill_hook.is_none() {
+				_grant = self.writer.as_ref().map(MuxWriter::grant);
+			}
+			// upstream's zero-timeout polls while extra file lists may be sent
+			// (IN_MULTIPLEXED_AND_READY): side work instead of a blocking wait.
+			if st.mode == Mode::Mux
+				&& let Some(work) = idle.as_deref_mut()
+			{
+				drop(st);
+				let more = self.idle_pass(work)?;
+				st = sh.lock();
+				if !more {
+					idle = None;
+				}
+				st = sh.read_now(st);
+				continue;
+			}
 			if st.request_read() {
 				sh.cond.notify_all();
 			}
@@ -2444,6 +2608,103 @@ mod tests {
 		assert_eq!(frames, [(MSG_DATA, 1), (MSG_DATA, 1), (MSG_INFO, 1), (MSG_DATA, 2)]);
 	}
 
+	/// A connection that takes at most `max` bytes per write call.
+	struct Chunked {
+		sink: Sink,
+		max: usize,
+	}
+
+	impl Write for Chunked {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+			let n = buf.len().min(self.max);
+			self.sink.write(&buf[..n])
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	/// An output pass performs exactly one write call before returning; outside
+	/// passes the output thread writes nothing, so a frame the connection took
+	/// only partly waits for the next pass.
+	#[test]
+	fn output_passes_write_once_and_partial_frames_wait() {
+		let sink = Sink::default();
+		let chunked = Chunked { sink: sink.clone(), max: 10 };
+		let mut w = MuxWriter::new(Box::new(chunked), IoCounters::default(), WriteConfig::default());
+		w.start_multiplex().unwrap();
+		w.write_all(&[5u8; 26]).unwrap();
+		thread::sleep(Duration::from_millis(30));
+		assert!(sink.take().is_empty(), "buffered data is not written outside a pass");
+		w.output_pass(true).unwrap();
+		thread::sleep(Duration::from_millis(30));
+		assert_eq!(sink.take().len(), 10);
+		w.output_pass(true).unwrap();
+		thread::sleep(Duration::from_millis(30));
+		assert_eq!(sink.take().len(), 10);
+		w.flush().unwrap();
+		assert_eq!(sink.take().len(), 10);
+	}
+
+	/// upstream's extra_flist_sending_enabled waits: a sender whose output sits on a
+	/// connection the peer does not read (never writable) and whose input is empty
+	/// still runs the side work (one more file-list segment) once per pass until it
+	/// says it is done, and each piece is queued for output; then the read waits
+	/// for input as usual.
+	#[test]
+	fn idle_read_sends_segments_while_output_is_blocked() {
+		/// A connection whose peer never reads: writes block until released.
+		struct Stuck(Arc<AtomicBool>);
+		impl Write for Stuck {
+			fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+				while !self.0.load(Ordering::Relaxed) {
+					thread::sleep(Duration::from_millis(5));
+				}
+				Ok(buf.len())
+			}
+			fn flush(&mut self) -> io::Result<()> {
+				Ok(())
+			}
+		}
+		let release = Arc::new(AtomicBool::new(false));
+		let mut w = MuxWriter::new(
+			Box::new(Stuck(Arc::clone(&release))),
+			IoCounters::default(),
+			WriteConfig::default(),
+		);
+		w.start_multiplex().unwrap();
+		let (mut r, tx, _) = blocking_reader(None);
+		r.link_writer(w.clone());
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		// Output the peer never takes: the read's first pass cannot write it.
+		w.write_all(b"pending").unwrap();
+		let feeder = thread::spawn(move || {
+			thread::sleep(Duration::from_millis(300));
+			tx.send(frame(MSG_DATA, b"z")).unwrap();
+			tx
+		});
+		let mut segments = 0;
+		let mut out = w.clone();
+		let mut send_one = || -> io::Result<bool> {
+			segments += 1;
+			out.write_all(b"segment")?;
+			Ok(segments < 3)
+		};
+		let mut byte = [0u8; 1];
+		let start = Instant::now();
+		assert_eq!(r.read_idle(&mut byte, &mut send_one).unwrap(), 1);
+		assert_eq!(byte, *b"z");
+		assert!(start.elapsed() < Duration::from_secs(5));
+		assert_eq!(segments, 3, "one segment per idle pass until done");
+		// The segments were handed to the output thread, behind the stuck frame.
+		assert!(lock(&w.shared.out.state).queued >= 3 * (HDR + 7) + HDR + 7);
+		release.store(true, Ordering::Relaxed);
+		w.flush().unwrap();
+		drop(feeder.join().unwrap());
+	}
+
 	/// G1: with a refill hook (the receiving side's receiver), refills never touch the
 	/// linked writer; the hook learns whether input was already waiting.
 	#[test]
@@ -2468,6 +2729,39 @@ mod tests {
 		let calls = lock(&calls).clone();
 		assert!(calls.len() >= 2, "{calls:?}");
 		assert!(calls.iter().any(|&ready| ready), "a refill found input read ahead: {calls:?}");
+	}
+
+	/// A message dispatched while a hooked reader waits gets one more output pass
+	/// before the reader blocks again, so what its handler queued for the
+	/// generator (a forwarded MSG_NO_SEND) is delivered without further input.
+	#[test]
+	fn messages_while_waiting_rerun_the_refill_hook() {
+		let (mut r, tx, _) = blocking_reader(None);
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		let seen = Arc::clone(&calls);
+		r.set_refill_hook(Some(Box::new(move |ready| lock(&seen).push(ready))));
+		let (msgs, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		let probe = Arc::clone(&calls);
+		let feeder = thread::spawn(move || {
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while lock(&probe).is_empty() && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(5));
+			}
+			tx.send(frame(MSG_NO_SEND, &7i32.to_le_bytes())).unwrap();
+			// The data arrives only once the message's pass has run.
+			while lock(&probe).len() < 2 && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(5));
+			}
+			tx.send(frame(MSG_DATA, b"q")).unwrap();
+			tx
+		});
+		let mut byte = [0u8; 1];
+		r.read_exact(&mut byte).unwrap();
+		assert_eq!(byte, *b"q");
+		assert_eq!(*lock(&calls), [false, false]);
+		assert_eq!(lock(&msgs).len(), 1);
+		drop(feeder.join().unwrap());
 	}
 
 	/// Deadlock rule: before a read blocks, every output pass it ran must have

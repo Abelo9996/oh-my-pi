@@ -113,6 +113,39 @@ fn too_old_protocol_is_a_mismatch() {
 	);
 }
 
+/// Captured from rsync 3.5.1: when the server half of a local copy fails while
+/// setting up, the client exits with its code and prints nothing of its own.
+#[test]
+fn local_server_setup_failure_is_reported_once() {
+	let tmp = tempfile::tempdir().unwrap();
+	let dir = fs::canonicalize(tmp.path()).unwrap();
+	fs::create_dir_all(dir.join("src")).unwrap();
+	fs::write(dir.join("src/a"), b"a\n").unwrap();
+	// A file list far larger than the in-process pipe, so the client is still
+	// writing it when the server half gives up.
+	for i in 0..600 {
+		let name = format!("{i:04}-a-rather-long-file-name-to-make-the-file-list-big.txt");
+		fs::write(dir.join("src").join(name), b"x").unwrap();
+	}
+	let (code, _, err) = run(&["-ai", "src/", "dst/new/deeper/"], &dir);
+	assert_eq!(code, 11, "{err}");
+	assert_eq!(
+		err,
+		format!(
+			"rsync: [Receiver] mkdir \"{}/dst/new/deeper\" failed: No such file or directory (2)\n\
+			 rsync error: error in file IO (code 11) at main.c(821) [Receiver=3.5.1]\n",
+			dir.display()
+		)
+	);
+	let (code, _, err) = run(&["-ai", "--temp-dir=../nope", "src/", "dst2/"], &dir);
+	assert_eq!(code, 1, "{err}");
+	assert_eq!(
+		err,
+		"The temp-dir does not exist: ../nope\n\
+		 rsync error: syntax or usage error (code 1) at main.c(1069) [Receiver=3.5.1]\n"
+	);
+}
+
 /// Captured from rsync 3.5.1: `rsync --protocol=40 -a src/ d/`.
 #[test]
 fn too_new_protocol_option_on_a_local_copy() {
@@ -357,6 +390,66 @@ fn shared_writer_retries_would_block() {
 	assert_eq!(RsyncError::from_io(&err, 0).code, RERR_SIGNAL);
 }
 
+/// Cancelling while the client waits on its peer (a remote shell that never
+/// answers) ends the run promptly with upstream's signal exit: code 20 and the
+/// `received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874)` trailer.
+#[cfg(unix)]
+#[test]
+fn cancel_mid_connection_exits_20_with_trailer() {
+	use std::os::unix::fs::PermissionsExt;
+
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let rsh = dir.path().join("stuckrsh");
+	fs::write(&rsh, "#!/bin/sh\nexec sleep 30\n").unwrap();
+	fs::set_permissions(&rsh, fs::Permissions::from_mode(0o755)).unwrap();
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(300));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	let rsh_arg = rsh.to_str().unwrap().to_string();
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "-e", &rsh_arg, "src/", "h:dst/"]).unwrap();
+	let started = Instant::now();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	canceller.join().unwrap();
+	assert_eq!(code, RERR_SIGNAL);
+	assert!(started.elapsed() < Duration::from_secs(10), "cancellation was not prompt");
+	assert_eq!(cap.err(), "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n");
+}
+
+/// Cancelling a local copy mid-transfer: the client reports the signal, then
+/// stops its server half, whose generator reports SIGUSR1. Captured from
+/// rsync 3.5.1 (`rsync -a bigsrc/ dst/`, SIGTERM to the client), three runs:
+/// exactly these two lines, exit 20.
+#[test]
+fn cancel_local_copy_reports_like_upstream() {
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	fs::create_dir_all(dir.path().join("bigsrc")).unwrap();
+	fs::write(dir.path().join("bigsrc/f"), vec![0u8; 8 << 20]).unwrap();
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(500));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	// --bwlimit keeps the copy running well past the cancellation.
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "--bwlimit=500", "bigsrc/", "dst/"]).unwrap();
+	let started = Instant::now();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	canceller.join().unwrap();
+	assert_eq!(code, RERR_SIGNAL);
+	assert!(started.elapsed() < Duration::from_secs(10), "cancellation was not prompt");
+	assert_eq!(
+		cap.err(),
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
+		 rsync error: received SIGUSR1 (code 19) at main.c(1687) [generator=3.5.1]\n"
+	);
+}
+
 /// A cancelled run ends with upstream's signal exit (code 20).
 #[test]
 fn cancelled_run_exits_20() {
@@ -517,6 +610,77 @@ fn remote_shell_push_and_pull_against_reference_server() {
 	let (code, _, err) = run(&["-a", "--protocol=29", "-e", rsh, &rpath, "src/", &dest], dir.path());
 	assert_eq!((code, err.as_str()), (0, ""));
 	assert_same_tree(&src, &old);
+}
+
+/// A tree whose only file is unreadable (`m/file`, mode 000); false when running
+/// as root, where the file stays readable.
+#[cfg(unix)]
+fn unreadable_only_file(dir: &Path) -> bool {
+	use std::os::unix::fs::PermissionsExt;
+	let file = dir.join("m/file");
+	fs::create_dir_all(dir.join("m")).unwrap();
+	fs::write(&file, b"payload\n").unwrap();
+	fs::set_permissions(&file, fs::Permissions::from_mode(0)).unwrap();
+	fs::File::open(&file).is_err()
+}
+
+/// Runs `argv` in `cwd` on its own thread; panics when it does not finish.
+#[cfg(unix)]
+fn run_bounded(argv: Vec<String>, cwd: &Path, what: &str) -> (i32, String, String) {
+	let cwd = cwd.to_path_buf();
+	let (tx, rx) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+		let _ = tx.send(run(&argv, &cwd));
+	});
+	rx.recv_timeout(std::time::Duration::from_secs(60)).unwrap_or_else(|_| panic!("{what} hung"))
+}
+
+/// Under inc-recursion the sender's MSG_NO_SEND for the only file reaches the
+/// receiving side while its receiver already waits for input; the receiver
+/// forwards it to the generator in its next output pass, which completes the
+/// segment, so the run ends with code 23 instead of hanging (rsync 3.5.1).
+#[cfg(unix)]
+#[test]
+fn unreadable_only_file_is_a_partial_transfer() {
+	let dir = tempfile::tempdir().unwrap();
+	if !unreadable_only_file(dir.path()) {
+		return;
+	}
+	let argv = vec!["-r".to_owned(), "m/file".to_owned(), "d1/".to_owned()];
+	let (code, out, err) = run_bounded(argv, dir.path(), "local copy of an unreadable file");
+	assert_eq!(code, 23, "{out}{err}");
+	assert!(err.starts_with("rsync: [sender] send_files failed to open \""), "{err}");
+	assert!(err.contains("m/file\": Permission denied (13)\n"), "{err}");
+	assert!(
+		err.ends_with(
+			"rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1412) [sender=3.5.1]\n"
+		),
+		"{err}"
+	);
+	assert!(!dir.path().join("d1/file").exists());
+
+	// The same from a reference `--server --sender`: our receiver forwards its
+	// MSG_NO_SEND.
+	let Some(rsync) = reference() else { return };
+	let rsh = fake_rsh(dir.path());
+	let argv = vec![
+		"-r".to_owned(),
+		"-e".to_owned(),
+		rsh.to_str().unwrap().to_owned(),
+		format!("--rsync-path={}", rsync.display()),
+		format!("h:{}/m/file", dir.path().display()),
+		"d2/".to_owned(),
+	];
+	let (code, out, err) = run_bounded(argv, dir.path(), "pull of an unreadable file");
+	assert_eq!(code, 23, "{out}{err}");
+	assert!(err.contains("send_files failed to open"), "{err}");
+	assert!(
+		err.ends_with(
+			"rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1983) [generator=3.5.1]\n"
+		),
+		"{err}"
+	);
 }
 
 #[cfg(unix)]
