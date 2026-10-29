@@ -1879,7 +1879,7 @@ describe("Coding Agent Tools", () => {
 
 		it("re-reads an archive rewritten in place within one timestamp granule", async () => {
 			const archivePath = path.join(testDir, "granule.zip");
-			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			await Bun.write(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
 			// A coarse-timestamp filesystem: the same-size rewrite below lands in this
 			// write's granule, so it leaves the archive's whole stat unchanged.
 			const granuleStat = await Bun.file(archivePath).stat();
@@ -1891,7 +1891,7 @@ describe("Coding Agent Tools", () => {
 					getTextOutput(await readTool.execute("test-call-zip-granule-before", { path: archivePath })),
 				).toContain("alpha.txt");
 
-				fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+				await Bun.write(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
 				const output = getTextOutput(await readTool.execute("test-call-zip-granule-after", { path: archivePath }));
 				expect(output).toContain("bravo.txt");
 				expect(output).not.toContain("alpha.txt");
