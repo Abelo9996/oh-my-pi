@@ -17,7 +17,7 @@
 - `PI_INTENT_PROMPT` replaces the system-prompt guidance for the `i` intent field; `PI_INTENT_DESC` replaces its tool-schema description
 - Eval shows printed JSON text (`print(json.dumps(…))`, `console.log(JSON.stringify(…))`) as a collapsible JSON tree, like printed dicts and objects
 - The warning that a saved Codex or Claude rate-limit reset is about to expire now shows once per reset across all conversations and omp windows, and only in its final 6 hours instead of from 24 hours out; the status line keeps counting it down meanwhile
-- With `bash.gitGuard` on, `git checkout`, `switch`, `restore`, `reset` and `stash` run in a linked worktree instead of being refused; uncommitted changes they discard are saved first (`git stash apply --index <id>` brings them back), and `git stash pop`, `apply` and `drop` refuse an entry another branch saved. A repository's main checkout keeps every refusal
+- With `bash.gitGuard` on, `git checkout`, `switch`, `restore`, `reset` and `stash` run in a linked worktree instead of being refused; uncommitted changes they discard are saved first (`git stash apply --index <id>` brings them back), and `git stash pop`, `apply` and `drop` refuse an entry another branch saved. A repository's main checkout keeps every refusal ([#17349](https://github.com/can1357/oh-my-pi/pull/17349) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
