@@ -665,14 +665,15 @@ return { filled, cleared: await tab.evaluate(() => window.model) };`,
 		}
 	}, 40_000);
 
-	test("an empty fill deletes a contenteditable's non-text content and nothing outside it", async () => {
+	test("an empty fill deletes every content of an editing host and nothing outside an element inside one", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const tabName = `editable-clear-${crypto.randomUUID()}`;
 		// The blank span holds only an empty text node: its selected contents show nothing, so a Backspace there
 		// would delete the "p" before it.
 		const clearHtml = `<!doctype html><div id="pictured" contenteditable><img alt="pic" width="20" height="20"
-src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div><div id="host" contenteditable>keep<span id="blank"></span>this</div>
+src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div><div id="hidden" contenteditable><span style="display:none">old</span></div>
+<div id="host" contenteditable>keep<span id="blank"></span>this</div>
 <script>document.querySelector("#blank").append("");</script>`;
 		const context = { session, toolCallId: "browser-editable-clear" };
 		await prelude.invoke(
@@ -685,13 +686,57 @@ src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div><div id="host" contentedi
 					action: "run",
 					name: tabName,
 					code: `await tab.fill("#pictured", "");
+await tab.fill("#hidden", "");
 await tab.fill("#blank", "");
-return { images: await tab.count("#pictured img"), host: await tab.text("#host") };`,
+return {
+	images: await tab.count("#pictured img"),
+	hidden: await tab.evaluate(() => document.querySelector("#hidden").textContent),
+	host: await tab.text("#host"),
+};`,
 					timeout: 25,
 				},
 				context,
 			);
-			expect(valueFrom<{ images: number; host: string }>(result)).toEqual({ images: 0, host: "keepthis" });
+			expect(valueFrom<{ images: number; hidden: string; host: string }>(result)).toEqual({
+				images: 0,
+				hidden: "",
+				host: "keepthis",
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
+	test("a multi-line fill of a contenteditable inserts its line breaks without pressing Enter", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-lines-${crypto.randomUUID()}`;
+		// Like a chat composer, Enter sends what the editor holds.
+		const linesHtml = `<!doctype html><div id="composer" contenteditable style="white-space: pre-wrap">draft</div>
+<script>
+window.sent = [];
+const composer = document.querySelector("#composer");
+composer.addEventListener("keydown", event => {
+  if (event.key === "Enter") sent.push(composer.innerText);
+});
+</script>`;
+		const context = { session, toolCallId: "browser-editable-lines" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(linesHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#composer", "line one\\nline two");
+return { text: await tab.text("#composer"), sent: await tab.evaluate(() => window.sent) };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<{ text: string; sent: string[] }>(result)).toEqual({ text: "line one\nline two", sent: [] });
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}

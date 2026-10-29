@@ -531,7 +531,7 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					value?: string;
 					focus?: () => void;
 					isContentEditable?: boolean;
-					innerText?: string;
+					parentElement: { isContentEditable: boolean } | null;
 					getAttribute(name: string): string | null;
 					namespaceURI: string | null;
 					ownerDocument: {
@@ -540,6 +540,7 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 							tag: "input",
 						): { value: string; setAttribute(name: string, value: string): void };
 						createRange(): {
+							readonly collapsed: boolean;
 							selectNodeContents(node: unknown): void;
 							getClientRects(): ArrayLike<{ width: number; height: number }>;
 						};
@@ -639,10 +640,13 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					const selection = node.ownerDocument.getSelection();
 					selection?.removeAllRanges();
 					selection?.addRange(range);
-					// Backspace over a selection that shows nothing deletes the character before it, outside the
-					// element, so an empty fill deletes only a selection that draws something (text, an image).
-					const shown = Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0);
-					return { target: "editable" as const, shown };
+					// The browser keeps a deletion inside the editing host, so a host with any contents is cleared.
+					// Inside a host, Backspace over contents that draw nothing deletes the character before them, so
+					// an element there is cleared only when its contents draw something (text, an image).
+					const deletable = node.parentElement?.isContentEditable
+						? Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0)
+						: !range.collapsed;
+					return { target: "editable" as const, deletable };
 				}
 				const before = node.value;
 				if ("value" in node) write("");
@@ -665,7 +669,7 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 			}
 			return;
 		case "editable":
-			if (!value && !prepared.shown) return;
+			if (!value && !prepared.deletable) return;
 			throwIfAborted(signal);
 			try {
 				// One `Input.insertText` replaces the selection the way a paste does; the editor's own
