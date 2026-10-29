@@ -5712,7 +5712,7 @@ describe("lsp regressions", () => {
 				});
 				progress(server, "third", "begin");
 				progress(server, "third", "end");
-				await Promise.race([waiting, Bun.sleep(1_000)]);
+				await waiting;
 				expect(loaded).toBe(true);
 			} finally {
 				vi.useRealTimers();
