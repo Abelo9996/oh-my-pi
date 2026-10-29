@@ -1814,14 +1814,24 @@ export class InputController {
 	 * must not restore its messages into a subagent's composer.
 	 */
 	#popLastQueuedMessage(): RestoredQueuedMessage | undefined {
-		const fromQueue = this.ctx.viewSession.popLastQueuedMessage();
-		if (fromQueue) return fromQueue;
-		if (this.ctx.focusedAgentId) return undefined;
+		const yieldCompaction = this.ctx.focusedAgentId ? undefined : this.ctx.yieldCompaction;
+		// Behind a yield compaction, the newest entries are the follow-ups it holds, then the request itself.
+		if (!yieldCompaction) {
+			const fromQueue = this.ctx.viewSession.popLastQueuedMessage();
+			if (fromQueue) return fromQueue;
+			if (this.ctx.focusedAgentId) return undefined;
+		}
 		const compaction = this.ctx.compactionQueuedMessages;
-		if (compaction.length === 0) return undefined;
-		const last = compaction[compaction.length - 1];
-		this.ctx.compactionQueuedMessages = compaction.slice(0, -1);
-		return { text: last.text, images: last.images };
+		if (compaction.length > 0) {
+			const last = compaction[compaction.length - 1];
+			this.ctx.compactionQueuedMessages = compaction.slice(0, -1);
+			return { text: last.text, images: last.images };
+		}
+		if (yieldCompaction) {
+			this.ctx.yieldCompaction = undefined;
+			return { text: yieldCompaction.text };
+		}
+		return undefined;
 	}
 
 	/**
@@ -1948,7 +1958,7 @@ export class InputController {
 				: undefined;
 		if (options.detachedText === undefined) this.ctx.editor.clearDraft(options.historyText);
 
-		if (this.ctx.session.isCompacting) {
+		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
 			for (let index = 0; index < messages.length; index++) {
 				this.ctx.compactionQueuedMessages.push({
 					text: messages[index] ?? "",
@@ -2082,7 +2092,9 @@ export class InputController {
 		// queued text into a user-attributed skill invocation before delivery.
 		// Side commands answer now instead: the queue would deliver them as a
 		// main-turn prompt. Builtins keep precedence, as in the dispatch below.
-		if (this.ctx.session.isCompacting) {
+		// A compaction queued for the next yield holds later follow-ups the same
+		// way, so they run after it.
+		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
 			if (
 				text &&
 				!this.#matchesBuiltinSlashCommand(text) &&
@@ -2098,7 +2110,12 @@ export class InputController {
 			try {
 				const input =
 					(images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
-				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached: true });
+				const slashResult = await executeBuiltinSlashCommand(text, {
+					ctx: this.ctx,
+					input,
+					draftDetached: true,
+					followUp: true,
+				});
 				if (slashResult === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
@@ -2173,10 +2190,13 @@ export class InputController {
 		// advertises; otherwise a skill/text queued during compaction is stranded.
 		const compactionQueued = this.ctx.compactionQueuedMessages;
 		this.ctx.compactionQueuedMessages = [];
+		const yieldCompaction = this.ctx.yieldCompaction;
+		this.ctx.yieldCompaction = undefined;
 		const allQueued = [
 			...steering,
 			...compactionQueued.filter(e => e.mode === "steer").map(e => ({ text: e.text, images: e.images })),
 			...followUp,
+			...(yieldCompaction ? [{ text: yieldCompaction.text }] : []),
 			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
 		];
 		const restored = this.#restoreEntriesToEditor(allQueued, options?.currentText);

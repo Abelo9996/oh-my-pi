@@ -361,6 +361,7 @@ import type {
 	ShowStatusOptions,
 	SelectOnlyModelSelectorOptions,
 	SubmittedUserInput,
+	YieldCompaction,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
@@ -1464,6 +1465,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	proseOnlyThinking = true;
 	expandThinkingBlocks = false;
 	compactionQueuedMessages: CompactionQueuedMessage[] = [];
+	yieldCompaction: YieldCompaction | undefined = undefined;
 	pendingTools = new Map<string, ToolExecutionHandle>();
 	transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 	pendingBashComponents: BashExecutionComponent[] = [];
@@ -1949,6 +1951,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
 		this.compactionQueuedMessages = [];
+		this.yieldCompaction = undefined;
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.lastAssistantUsage = undefined;
@@ -8643,6 +8646,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
 		return this.#uiHelpers.flushCompactionQueue(options);
+	}
+
+	runYieldCompaction(): Promise<void> {
+		return this.#commandController.runYieldCompaction();
 	}
 
 	flushPendingBashComponents(): void {

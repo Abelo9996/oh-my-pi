@@ -747,6 +747,69 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.locallySubmittedUserSignatures.has("queued during stream\u00000")).toBe(false);
 	});
 
+	function withCompactionQueue(ctx: InteractiveModeContext) {
+		const handleCompactCommand = vi.fn(async () => "ok" as const);
+		const queueCompactionMessage = vi.fn((text: string, mode: "steer" | "followUp") => {
+			ctx.compactionQueuedMessages.push({ text, mode });
+		});
+		Object.assign(ctx, {
+			compactionQueuedMessages: [],
+			yieldCompaction: undefined,
+			handleCompactCommand,
+			queueCompactionMessage,
+		});
+		return { handleCompactCommand, queueCompactionMessage };
+	}
+
+	it("queues a follow-up /compact for the next yield instead of interrupting the run", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const { handleCompactCommand, queueCompactionMessage } = withCompactionQueue(ctx);
+		const session = ctx.session as unknown as {
+			isStreaming: boolean;
+			popLastQueuedMessage: () => undefined;
+		};
+		session.isStreaming = true;
+		session.popLastQueuedMessage = () => undefined;
+		const controller = new InputController(ctx);
+
+		editor.setText("/compact keep the API notes");
+		await controller.handleFollowUp();
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(ctx.yieldCompaction).toEqual({
+			text: "/compact keep the API notes",
+			instructions: "keep the API notes",
+			mode: undefined,
+		});
+
+		// A follow-up sent after the queued compaction waits for it.
+		editor.setText("now continue");
+		await controller.handleFollowUp();
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(queueCompactionMessage).toHaveBeenCalledWith("now continue", "followUp", undefined, {
+			preserveDraft: true,
+		});
+
+		// Dequeue walks back newest-first: the held follow-up, then the compaction request.
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("now continue");
+		expect(ctx.yieldCompaction).toBeDefined();
+		editor.setText("");
+		controller.handleDequeue();
+		expect(editor.getText()).toBe("/compact keep the API notes");
+		expect(ctx.yieldCompaction).toBeUndefined();
+	});
+
+	it("still compacts at once for a follow-up /compact while idle", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const { handleCompactCommand } = withCompactionQueue(ctx);
+		editor.setText("/compact");
+
+		await new InputController(ctx).handleFollowUp();
+
+		expect(handleCompactCommand).toHaveBeenCalledWith(undefined, undefined);
+		expect(ctx.yieldCompaction).toBeUndefined();
+	});
+
 	it("continue shortcuts submit a resume instead of a prompt", async () => {
 		for (const shortcut of [".", "c"]) {
 			const { InputController, ctx, editor } = await createContext();

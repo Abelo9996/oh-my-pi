@@ -69,6 +69,14 @@ export type CompactionQueuedMessage = {
 	images?: ImageContent[];
 };
 
+/** `/compact` sent with the follow-up key during a run: it runs once the run settles. */
+export type YieldCompaction = {
+	/** The submitted command, restored to the editor when the request is dequeued. */
+	text: string;
+	instructions?: string;
+	mode?: CompactMode;
+};
+
 export type SubmittedUserInput = {
 	text: string;
 	images?: ImageContent[];
@@ -284,6 +292,8 @@ export interface InteractiveModeContext {
 	proseOnlyThinking: boolean;
 	expandThinkingBlocks: boolean;
 	compactionQueuedMessages: CompactionQueuedMessage[];
+	/** Compaction queued for the next yield; follow-ups sent after it wait in `compactionQueuedMessages`. */
+	yieldCompaction: YieldCompaction | undefined;
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;
 	pendingTools: Map<string, ToolExecutionHandle>;
@@ -399,6 +409,8 @@ export interface InteractiveModeContext {
 		options?: { preserveDraft?: boolean },
 	): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
+	/** Run the compaction queued for the next yield, once the session is idle. */
+	runYieldCompaction(): Promise<void>;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
 	/** No argument restores the default; a function label is re-read on every spinner tick. */

@@ -2072,6 +2072,28 @@ export class CommandController {
 	}
 
 	/**
+	 * Run the `/compact` queued for the next yield. Called when a run settles; the
+	 * session may still be unwinding, so wait for idle. A run started meanwhile keeps
+	 * the request for its own settle. Follow-ups queued behind it are in
+	 * `compactionQueuedMessages`, which compaction flushes when it finishes.
+	 */
+	async runYieldCompaction(): Promise<void> {
+		const request = this.ctx.yieldCompaction;
+		if (!request) return;
+		const session = this.ctx.session;
+		await session.waitForIdle();
+		if (this.ctx.yieldCompaction !== request || this.ctx.session !== session || session.isStreaming) return;
+		this.ctx.yieldCompaction = undefined;
+		this.ctx.updatePendingMessagesDisplay();
+		if (session.isCompacting) {
+			// Another pass already compacts; it flushes the follow-ups queued behind this request.
+			this.ctx.showStatus("Skipped queued compaction: context is already compacting");
+			return;
+		}
+		await this.handleCompactCommand(request.instructions, request.mode);
+	}
+
+	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content,
 	 * `images` strips image blocks, and `thinking` drops all thinking blocks.
 	 * Rebuilds the chat and reports counts.

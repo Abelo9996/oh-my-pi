@@ -275,7 +275,14 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showWarning(parsed.error);
 				return;
 			}
-			await runtime.ctx.handleCompactCommand(parsed.instructions, parsed.mode);
+			const { ctx } = runtime;
+			if (runtime.followUp && ctx.session.isStreaming) {
+				ctx.yieldCompaction = { text: command.text, instructions: parsed.instructions, mode: parsed.mode };
+				ctx.updatePendingMessagesDisplay();
+				ctx.showStatus("Queued compaction for when the agent yields");
+				return;
+			}
+			await ctx.handleCompactCommand(parsed.instructions, parsed.mode);
 		},
 	},
 	{

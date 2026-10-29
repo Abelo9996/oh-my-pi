@@ -155,6 +155,8 @@ export interface TuiSlashCommandRuntime {
 	input?: Pick<SubmittedUserInput, "images" | "imageLinks">;
 	/** The editor snapshot was cleared before asynchronous input hooks ran. */
 	draftDetached?: boolean;
+	/** Submitted with the follow-up key: queue behind the active run rather than interrupt it. */
+	followUp?: boolean;
 }
 
 /** Unified slash-command spec consumed by both TUI and ACP dispatchers. */
