@@ -21,6 +21,8 @@
 
 ### Changed
 
+- Session startup overlaps credential-usage reads with tool/context loading and refreshes repository context, context files, and rules concurrently; `PI_TIMING` now separates credential validation from other first-prompt preparation
+- Non-browser launches no longer load cmux/Tern browser evaluators or their accessibility bundles; each backend loads on first use
 - The source-checkout launcher skips recreating its isolated Bun startup directory when it already exists.
 - OpenAI live steering (`providers.openaiLiveSteering`) is now off by default for GPT models; typed messages wait for the next tool boundary unless you enable it, avoiding `unsupported_native_inflight_message` errors
 
