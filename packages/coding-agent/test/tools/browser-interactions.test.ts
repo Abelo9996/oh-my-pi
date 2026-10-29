@@ -577,6 +577,59 @@ return { value: await tab.value("#q"), reported: await tab.evaluate(() => window
 		}
 	}, 40_000);
 
+	test("fills and clears a rich-text editor that keeps its own model", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `rich-editor-${crypto.randomUUID()}`;
+		// Like Slate and Lexical, the editor applies input to its own model through beforeinput, renders
+		// from that model, and undoes any DOM write it did not make itself.
+		const editorHtml = `<!doctype html><div id="editor" contenteditable></div>
+<script>
+const editor = document.querySelector("#editor");
+window.model = "old query";
+const observer = new MutationObserver(() => render());
+function render(caret) {
+  observer.disconnect();
+  editor.textContent = model;
+  if (caret !== undefined && editor.firstChild) getSelection().collapse(editor.firstChild, caret);
+  observer.observe(editor, { childList: true, characterData: true, subtree: true });
+}
+const offset = (node, at) => (node === editor ? (at === 0 ? 0 : model.length) : at);
+editor.addEventListener("beforeinput", event => {
+  event.preventDefault();
+  const [range] = event.getTargetRanges();
+  const start = offset(range.startContainer, range.startOffset);
+  const end = offset(range.endContainer, range.endOffset);
+  const inserted = event.inputType === "insertText" ? event.data : "";
+  model = model.slice(0, start) + inserted + model.slice(end);
+  render(start + inserted.length);
+});
+render();
+</script>`;
+		const context = { session, toolCallId: "browser-rich-editor" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(editorHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#editor", "new query");
+const filled = await tab.evaluate(() => window.model);
+await tab.fill("#editor", "");
+return { filled, cleared: await tab.evaluate(() => window.model) };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<{ filled: string; cleared: string }>(result)).toEqual({ filled: "new query", cleared: "" });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
 	test("fills colour, date, time and range inputs with their value instead of typing into them", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);

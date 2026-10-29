@@ -508,7 +508,9 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
 
 /**
  * Focus a field that can take text, clear any existing value, then retype. A colour, date, time or
- * range input gets its value set the way its picker would, and refuses one it rejects.
+ * range input gets its value set the way its picker would, and refuses one it rejects. A
+ * contenteditable element has its contents selected and replaced by one text insertion (or deleted
+ * by Backspace for an empty value), as a paste would.
  *
  * Every step is a DOM evaluation or an input dispatch, so this works on tabs
  * that produce no animation frames — unlike Puppeteer's `Locator.fill`, whose
@@ -518,7 +520,7 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
  */
 export async function fillViaHandle(handle: ElementHandle, value: string, signal?: AbortSignal): Promise<void> {
 	await focusTextEntryTarget(handle, "fill", signal);
-	const picker = await untilAborted(signal, () =>
+	const prepared = await untilAborted(signal, () =>
 		handle.evaluate(
 			(el, wanted, pickerTypes) => {
 				const node = el as unknown as {
@@ -535,6 +537,8 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 							namespace: string | null,
 							tag: "input",
 						): { value: string; setAttribute(name: string, value: string): void };
+						createRange(): { selectNodeContents(node: unknown): void };
+						getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
 					};
 					dispatchEvent(event: unknown): boolean;
 				};
@@ -620,27 +624,48 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 						write(wanted);
 						report();
 					}
-					return { kind, refused };
+					return { target: "picker" as const, kind, refused };
 				}
-				const before = node.isContentEditable ? node.innerText : node.value;
-				if (node.isContentEditable) node.innerText = "";
-				else if ("value" in node) write("");
+				if (node.isContentEditable) {
+					// Rich-text editors (Slate, Lexical) keep their own document and either undo a direct DOM write
+					// or stop tracking the element, so the old text is selected for the input that replaces it.
+					const range = node.ownerDocument.createRange();
+					range.selectNodeContents(node);
+					const selection = node.ownerDocument.getSelection();
+					selection?.removeAllRanges();
+					selection?.addRange(range);
+					return { target: "editable" as const, hasText: Boolean(node.innerText) };
+				}
+				const before = node.value;
+				if ("value" in node) write("");
 				// Typing a value fires its own input events; an empty value types nothing,
 				// so report the clear itself when there was something to clear.
 				if (wanted === "" && before) report();
-				return null;
+				return { target: "field" as const };
 			},
 			value,
 			PICKER_INPUT_TYPES,
 		),
 	);
-	if (picker?.refused) {
-		throw new ToolError(
-			`<input type=${picker.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[picker.kind]}`,
-		);
+	const page = handle.frame.page();
+	switch (prepared.target) {
+		case "picker":
+			if (prepared.refused) {
+				throw new ToolError(
+					`<input type=${prepared.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[prepared.kind]}`,
+				);
+			}
+			return;
+		case "editable":
+			// One `Input.insertText` replaces the selection the way a paste does; the editor's own
+			// beforeinput handling applies it to its model. Backspace is a real deletion of the selection.
+			throwIfAborted(signal);
+			if (value) await untilAborted(signal, () => page.keyboard.sendCharacter(value));
+			else if (prepared.hasText) await untilAborted(signal, () => page.keyboard.press("Backspace"));
+			return;
+		case "field":
+			await typeKeys(page, value, signal);
 	}
-	if (picker) return;
-	await typeKeys(handle.frame.page(), value, signal);
 }
 
 interface QueryCandidate {
