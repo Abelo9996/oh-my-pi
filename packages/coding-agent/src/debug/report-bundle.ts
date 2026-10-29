@@ -20,6 +20,7 @@ const MAX_LOG_LINES = 5000;
 
 /** Maximum bytes to read from the tail of a log file (2 MB). */
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
+
 /** The last `n` lines of `text`, dropping its first line when that line is cut. */
 function lastLines(text: string, startsMidLine: boolean, n: number): string {
 	const lines = text.split("\n");
