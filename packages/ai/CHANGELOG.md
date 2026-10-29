@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Preserved retry timing from Codex WebSocket and SSE errors so capacity retries honor the provider wait.
+- Preserved retry timing from Codex WebSocket and SSE errors so capacity retries honor the provider wait ([#17362](https://github.com/can1357/oh-my-pi/pull/17362) by [@iFwu](https://github.com/iFwu)).
 
 ## [18.13.3] - 2026-10-28
 
