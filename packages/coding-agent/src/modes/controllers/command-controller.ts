@@ -2091,6 +2091,8 @@ export class CommandController {
 			return;
 		}
 		await this.handleCompactCommand(request.instructions, request.mode);
+		// "Nothing to compact" returns before compaction flushes its queue; release the held follow-ups.
+		await this.ctx.flushCompactionQueue({ willRetry: false });
 	}
 
 	/**

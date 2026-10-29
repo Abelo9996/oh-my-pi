@@ -764,12 +764,17 @@ describe("InputController keybinding setup", () => {
 	it("queues a follow-up /compact for the next yield instead of interrupting the run", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		const { handleCompactCommand, queueCompactionMessage } = withCompactionQueue(ctx);
-		const session = ctx.session as unknown as {
-			isStreaming: boolean;
-			popLastQueuedMessage: () => undefined;
-		};
-		session.isStreaming = true;
-		session.popLastQueuedMessage = () => undefined;
+		// Session queues popped like `AgentSession.popLastQueuedMessage`: steering first, then follow-ups.
+		const steering: string[] = [];
+		const followUp = ["sent before the compaction"];
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			getQueuedMessages: () => ({ steering: [...steering], followUp: [...followUp], liveSteered: 0 }),
+			popLastQueuedMessage: () => {
+				const text = steering.pop() ?? followUp.pop();
+				return text === undefined ? undefined : { text };
+			},
+		});
 		const controller = new InputController(ctx);
 
 		editor.setText("/compact keep the API notes");
@@ -789,13 +794,22 @@ describe("InputController keybinding setup", () => {
 			preserveDraft: true,
 		});
 
-		// Dequeue walks back newest-first: the held follow-up, then the compaction request.
-		controller.handleDequeue();
-		expect(editor.getText()).toBe("now continue");
-		expect(ctx.yieldCompaction).toBeDefined();
-		editor.setText("");
-		controller.handleDequeue();
-		expect(editor.getText()).toBe("/compact keep the API notes");
+		// A steer sent after the compaction lands before the yield.
+		steering.push("steer mid-run");
+
+		// Dequeue: the steer, then the held follow-up, then the request, then what was queued before it.
+		const restored: string[] = [];
+		for (let i = 0; i < 4; i++) {
+			editor.setText("");
+			controller.handleDequeue();
+			restored.push(editor.getText());
+		}
+		expect(restored).toEqual([
+			"steer mid-run",
+			"now continue",
+			"/compact keep the API notes",
+			"sent before the compaction",
+		]);
 		expect(ctx.yieldCompaction).toBeUndefined();
 	});
 

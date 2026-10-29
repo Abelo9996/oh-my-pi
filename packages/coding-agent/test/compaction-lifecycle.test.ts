@@ -137,19 +137,24 @@ describe("compaction queued for the next yield", () => {
 		session.waitForIdle.mockImplementation(async () => {
 			session.isStreaming = streamingAfterIdle;
 		});
+		const flushCompactionQueue = vi.fn(async () => {});
 		const ctx = {
 			session,
 			yieldCompaction: { text: "/compact soft", mode: "soft" },
 			updatePendingMessagesDisplay: vi.fn(),
 			showStatus: vi.fn(),
+			showWarning: vi.fn(),
+			flushCompactionQueue,
+			sessionManager: { getEntries: () => [{ type: "message" }] },
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
-		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand").mockResolvedValue("ok");
-		return { ctx, controller, handleCompactCommand };
+		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand");
+		return { ctx, controller, handleCompactCommand, flushCompactionQueue };
 	}
 
 	it("runs the queued compaction once the session is idle", async () => {
 		const { ctx, controller, handleCompactCommand } = buildYieldCtx(false);
+		handleCompactCommand.mockResolvedValue("ok");
 
 		await controller.runYieldCompaction();
 
@@ -164,5 +169,14 @@ describe("compaction queued for the next yield", () => {
 
 		expect(handleCompactCommand).not.toHaveBeenCalled();
 		expect(ctx.yieldCompaction).toEqual({ text: "/compact soft", mode: "soft" });
+	});
+
+	it("releases held follow-ups when there is nothing to compact", async () => {
+		const { ctx, controller, flushCompactionQueue } = buildYieldCtx(false);
+
+		await controller.runYieldCompaction();
+
+		expect(ctx.showWarning).toHaveBeenCalledWith("Nothing to compact (no messages yet)");
+		expect(flushCompactionQueue).toHaveBeenCalled();
 	});
 });
