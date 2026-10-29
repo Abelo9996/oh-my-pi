@@ -28,6 +28,7 @@
 - Eval shows printed JSON text (`print(json.dumps(…))`, `console.log(JSON.stringify(…))`) as a collapsible JSON tree, like printed dicts and objects
 - The warning that a saved Codex or Claude rate-limit reset is about to expire now shows once per reset across all conversations and omp windows, and only in its final 6 hours instead of from 24 hours out; the status line keeps counting it down meanwhile
 - The `.`/`c` continue shortcut no longer adds a hidden "continue" directive when your last message is still unanswered (for example after pressing Esc before the model replied); the agent simply answers that message again
+- With `bash.gitGuard` on, `git checkout`, `switch`, `restore`, `reset` and `stash` run in a linked worktree (not one of a bare repository) instead of being refused; uncommitted changes they discard are saved first (`git stash apply --index <id>` brings them back), and `git stash pop`, `apply`, `drop`, `branch` and `clear` refuse an entry another branch saved. A repository's main checkout keeps every refusal ([#17349](https://github.com/can1357/oh-my-pi/pull/17349) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
