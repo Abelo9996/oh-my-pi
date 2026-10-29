@@ -145,7 +145,7 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
-import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -2397,6 +2397,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
 			advertiseHeadlessAsk: options.advertiseHeadlessAsk,
 			settingsApproval: options.settingsApproval === true && !isSubagentSession,
+			tuiTranscript,
 			// Explicit resolvers retain their existing pass-through contract. Ordinary
 			// sessions inherit stored affinity into the child's own provider session.
 			getApiKey: options.getApiKey,
@@ -4190,6 +4191,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				memoryBackend: memoryBackend?.id,
 				securityEnabled: cfgSecurityEnabled.get(settings),
 				settingsApproval: toolSession.settingsApproval === true,
+				outReplies: outRepliesActive(settings, tuiTranscript),
 				evalPreludes: toolSession.getAdvertisedEvalPreludes?.(),
 				model: getActiveModelString(),
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),

@@ -5,9 +5,12 @@
 ### Breaking Changes
 
 - `StatusLineHost.resetExpiryNotice` now receives the session first and owns deduplication; `StatusLineComponent` no longer limits the saved-reset expiry warning to once per conversation
+- `ToolExecutionHandle` no longer declares `setToolActivityVisible`; the transcript still hides tool activity through components that implement it, and handles without it (reply blocks) stay visible
 
 ### Added
 
+- Added `ReplyWriteComponent`, `isReplyWrite`, `toolResultReplies`, and `replyDisplayMessage` (`chat/reply-write`): `write` calls to `reply`-scoped URLs (`out://`) and tool-result `details.replies` draw as assistant prose; `createReplyWriteComponent()` builds one wired to the interactive context
+- `InternalUrlSchemeSpec` exposes `write.scope` (`SchemeWriteScope`, now including `reply`) and `InternalUrlSchemeHost` requires `specs()`; `BashToolDetails.replies` carries text a command wrote to `out://`
 - Added file-backed task previews and optional `taskFile` and `taskFileSha256` provenance on `AgentProgress` and `SingleResult` ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal)).
 - Added `Editor.nativeTypeahead` (published as the TSP `typeahead` prop) and `Composer.releaseHeldInput()`: a deferred-input `Composer.start` asks Tern to keep and draw startup typing until the app releases the held input
 - Added `PI_LINK_SCHEME` and `PI_LINK_HOST` for host-qualified file links with optional line and column positions in remote sessions ([#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu)).

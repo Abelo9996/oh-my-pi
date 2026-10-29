@@ -312,7 +312,13 @@ describe("proc:// background jobs", () => {
 
 	it("advertises stdin and modes as service-only while kill remains available for jobs and agents", async () => {
 		const help = new InternalUrlRouter()
-			.describe({ skillUriAccess: false, ruleCount: 0, securityEnabled: false, settingsApproval: false })
+			.describe({
+				skillUriAccess: false,
+				ruleCount: 0,
+				securityEnabled: false,
+				settingsApproval: false,
+				outReplies: false,
+			})
 			.find(line => line.startsWith("`proc://`"));
 		expect(help).toMatch(/stdin[^;]*services.only/);
 		expect(help).toMatch(/\/mode[^;]*services.only/);

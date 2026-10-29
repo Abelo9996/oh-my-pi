@@ -4631,6 +4631,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.streamingComponent) liveSet.add(this.streamingComponent);
 			// Text after a tool call in the streaming reply is drawn by its own components.
 			for (const segment of this.#eventController.liveAssistantSegments()) liveSet.add(segment);
+			// So are replies a still-executing call's commands wrote to `out://`.
+			for (const reply of this.#eventController.liveToolReplies()) liveSet.add(reply);
 			for (const [id, component] of this.pendingTools) {
 				livePendingTools.set(id, component);
 				liveSet.add(component as unknown as Component);

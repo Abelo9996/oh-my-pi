@@ -60,6 +60,7 @@ import {
 import { cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
 	cfgAsyncEnabled,
+	cfgOutEnabled,
 	cfgToolsIntentTracing,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
@@ -82,6 +83,7 @@ export const cfgSystemPromptInputs = combine({
 	xdevDocs: cfgToolsXdevDocs,
 	xdevInlineDevices: cfgToolsXdevInlineDevices,
 	vaultEnabled: cfgVaultEnabled,
+	outEnabled: cfgOutEnabled,
 	renderMermaid: cfgTuiRenderMermaid,
 	renderSvg: cfgTuiRenderSvg,
 	autoGraph: cfgTuiAutoGraph,
@@ -572,6 +574,8 @@ export interface BuildSystemPromptOptions {
 	securityEnabled?: boolean;
 	/** Whether the user approves `cfg://` writes for this session; gates advertising `cfg://`. */
 	settingsApproval?: boolean;
+	/** Whether `out://` writes reach the user as transcript replies; gates advertising `out://`. */
+	outReplies?: boolean;
 	/**
 	 * Eval preludes advertised by this prompt. Each prelude's `guidance` is
 	 * appended as its own block after the rendered template, so custom templates
@@ -681,6 +685,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		memoryBackend,
 		securityEnabled = false,
 		settingsApproval = false,
+		outReplies = false,
 		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
@@ -962,6 +967,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		memoryBackend,
 		securityEnabled,
 		settingsApproval,
+		outReplies,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
 		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],

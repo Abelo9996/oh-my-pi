@@ -194,6 +194,7 @@ Choose the setting by the desired outcome:
   - Validates `cwd` with `fs.stat()`.
   - May allocate and write artifact files for full local output (`bash`) and minimizer-preserved raw output (`bash-original`).
   - `scheme://` paths are served per operation by `InternalUrlFilesystem`: file-backed schemes redirect to their backing files (writes only for mutable file-written schemes such as `local://`, within the approved tier); rendered resources are read-only; `realpath`/`readlink` print the physical backing path of file-backed URLs.
+  - A redirect to `out://` (`printf '…' > out://`) opens a write-only handle; on close its text becomes a reply shown to the user as assistant prose after the call. Replies ride every progress frame and the result as `details.replies`, so the transcript draws each once, live and on rebuild. They are accepted only while the call waits on the command (a backgrounded job's writes fail), and a reply past 64 KiB fails with `EFBIG` and is dropped whole.
 - Subprocesses / native bindings / client terminal
   - Non-PTY local execution uses native shell execution via `@oh-my-pi/pi-natives` (`Shell.run()` or `executeShell()`).
   - PTY uses native `PtySession.start()`.
@@ -232,7 +233,7 @@ Choose the setting by the desired outcome:
   - matched command -> `ToolError` with `Blocked: <rule.message>` and the original command.
   - invalid interceptor regexes are silently skipped by `compileRules()`.
 - Internal URL filesystem:
-  - failures surface inside the command as errno results: missing entries `ENOENT`, writes to immutable or handler-owned schemes `EROFS`, schemes above the approved tier `EACCES`, cross-scheme renames/links `EXDEV`, containment escapes `EACCES`. External programs started in a URL working directory fail instead of running on the host.
+  - failures surface inside the command as errno results: missing entries `ENOENT`, writes to immutable or handler-owned schemes (and to `out://` when `out.enabled` is off) `EROFS`, oversize `out://` replies `EFBIG`, schemes above the approved tier `EACCES`, cross-scheme renames/links `EXDEV`, containment escapes `EACCES`. External programs started in a URL working directory fail instead of running on the host.
 - Execution:
   - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
   - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.

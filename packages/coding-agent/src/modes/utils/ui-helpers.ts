@@ -37,6 +37,7 @@ import {
 	ReadToolGroupComponent,
 	readArgsCollapseIntoGroup,
 } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { imageContent, textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
@@ -55,6 +56,7 @@ import { span } from "@oh-my-pi/pi-tui/native/describe";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
+import { createToolCallBlock } from "../../modes/controllers/tool-call-block";
 import {
 	materializeImageReferenceLinks,
 	materializeImageReferenceLinksSync,
@@ -726,18 +728,15 @@ export class UiHelpers {
 								streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
 							})
 						: content.arguments;
-					const component = new ToolExecutionComponent(
-						renderToolName,
-						renderArgs,
-						{
-							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-							showImages: cfgTerminalShowImages.get(settings),
-						},
+					const component = createToolCallBlock(this.ctx, {
+						name: renderToolName,
+						args: renderArgs,
 						tool,
-						this.ctx.ui,
-						this.ctx.viewSession.sessionManager.getCwd(),
-						content.id,
-					);
+						id: content.id,
+						cwd: this.ctx.viewSession.sessionManager.getCwd(),
+					});
+					// Persisted args are final: settle a reply's text now. Cards keep their own args-complete timing.
+					if (!partialJson && component instanceof ReplyWriteComponent) component.setArgsComplete();
 					component.setExpanded(this.ctx.toolOutputExpanded);
 					this.ctx.chatContainer.addChild(component);
 
@@ -873,6 +872,9 @@ export class UiHelpers {
 							todoSnapshot = component;
 						}
 					}
+				}
+				for (const reply of toolResultReplies(message.details)) {
+					this.ctx.chatContainer.addChild(createAssistantMessageComponent(this.ctx, replyDisplayMessage(reply)));
 				}
 			} else {
 				readGroup?.seal();
