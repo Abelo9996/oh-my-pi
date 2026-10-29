@@ -783,53 +783,72 @@ describe("openai-codex streaming", () => {
 
 	describe.each(["websocket", "sse"] as const)("%s streamed retry advice", transport => {
 		it.each([
-			["top-level headers", "top", { "Retry-After": "425" }, 425_000],
-			["nested error headers", "error", { "retry-after": "436" }, 436_000],
-			["response.failed headers", "response", { "retry-after-ms": "1500" }, 1500],
-			["malformed advice", "top", { "Retry-After": "later" }, undefined],
-			["missing advice", "top", {}, undefined],
-		] as const)("preserves the session retry hint from %s", async (_name, placement, headers, expectedDelay) => {
-			const error = { code: "turn_rate_limit_exceeded", message: "Codex is at capacity, please try again later" };
-			const failure: Record<string, unknown> =
-				placement === "response"
-					? { type: "response.failed", response: { status: "failed", error: { ...error, headers } } }
-					: {
-							type: "error",
-							status: 429,
-							error: placement === "error" ? { ...error, headers } : error,
-							...(placement === "top" ? { headers } : {}),
-						};
-			const result =
-				transport === "sse"
-					? (await runCodexSseEvents([failure])).result
-					: await (async () => {
-							class CapacityWebSocket extends MockWebSocket {
-								constructor(url: string, options?: WsOptions) {
-									super(url, options);
-									this.scheduleOpen();
+			["top-level headers", "top", { "Retry-After": "425" }, 425_000, undefined],
+			["nested error headers", "error", { "retry-after": "436" }, 436_000, undefined],
+			["response.failed headers", "response", { "retry-after-ms": "1500" }, 1500, undefined],
+			["malformed advice", "top", { "Retry-After": "later" }, undefined, undefined],
+			["missing advice", "top", {}, undefined, undefined],
+			["empty nested headers with outer advice", "error", {}, 30_000, { "Retry-After": "30" }],
+			[
+				"malformed nested advice with outer advice",
+				"response",
+				{ "retry-after-ms": "later" },
+				30_000,
+				{ "Retry-After": "30" },
+			],
+			[
+				"valid nested advice before outer advice",
+				"error",
+				{ "retry-after-ms": "1500" },
+				1500,
+				{ "Retry-After": "30" },
+			],
+		] as const)(
+			"preserves the session retry hint from %s",
+			async (_name, placement, headers, expectedDelay, outerHeaders) => {
+				const error = { code: "turn_rate_limit_exceeded", message: "Codex is at capacity, please try again later" };
+				const failure: Record<string, unknown> =
+					placement === "response"
+						? { type: "response.failed", response: { status: "failed", error: { ...error, headers } } }
+						: {
+								type: "error",
+								status: 429,
+								error: placement === "error" ? { ...error, headers } : error,
+								...(placement === "top" ? { headers } : {}),
+							};
+				if (outerHeaders) failure.headers = outerHeaders;
+				const result =
+					transport === "sse"
+						? (await runCodexSseEvents([failure])).result
+						: await (async () => {
+								class CapacityWebSocket extends MockWebSocket {
+									constructor(url: string, options?: WsOptions) {
+										super(url, options);
+										this.scheduleOpen();
+									}
+									override send(): void {
+										this.sendJson(failure);
+									}
 								}
-								override send(): void {
-									this.sendJson(failure);
-								}
-							}
-							global.WebSocket = CapacityWebSocket as unknown as typeof WebSocket;
-							return streamOpenAICodexResponses(
-								createCodexTestModel("https://chatgpt.com/backend-api"),
-								createCodexTestContext(),
-								{
-									apiKey: createCodexTestToken(),
-									sessionId: `streamed-retry-${placement}`,
-									providerSessionState: new Map<string, ProviderSessionState>(),
-									fetch: async () => {
-										throw new Error("Capacity errors must not fall back to HTTP");
+								global.WebSocket = CapacityWebSocket as unknown as typeof WebSocket;
+								return streamOpenAICodexResponses(
+									createCodexTestModel("https://chatgpt.com/backend-api"),
+									createCodexTestContext(),
+									{
+										apiKey: createCodexTestToken(),
+										sessionId: `streamed-retry-${placement}`,
+										providerSessionState: new Map<string, ProviderSessionState>(),
+										fetch: async () => {
+											throw new Error("Capacity errors must not fall back to HTTP");
+										},
 									},
-								},
-							).result();
-						})();
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toContain("turn_rate_limit_exceeded");
-			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(expectedDelay);
-		});
+								).result();
+							})();
+				expect(result.stopReason).toBe("error");
+				expect(result.errorMessage).toContain("turn_rate_limit_exceeded");
+				expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(expectedDelay);
+			},
+		);
 	});
 
 	it("surfaces result-bearing native images with stale generating status", async () => {

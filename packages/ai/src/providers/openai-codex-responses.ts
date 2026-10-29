@@ -73,7 +73,7 @@ import {
 import { getProxyForUrl } from "../utils/proxy";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { getHeadersFromError, type HeadersLike } from "../utils/retry-after";
+import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { compactGrammarDefinition } from "./grammar";
@@ -5388,11 +5388,12 @@ export function createCodexProviderStreamError(rawEvent: Record<string, unknown>
 		event.type === "error"
 			? formatCodexErrorEvent(rawEvent, code, message)
 			: (formatCodexFailure(rawEvent) ?? "Codex response failed");
+	const nestedHeaders = getHeadersFromError(nestedError);
 	return new CodexProviderStreamError(
 		formattedMessage,
 		isRetryableCodexFailureEvent(rawEvent),
 		code || undefined,
-		getHeadersFromError(nestedError) ?? getHeadersFromError(rawEvent),
+		getRetryAfterMsFromHeaders(nestedHeaders) === undefined ? getHeadersFromError(rawEvent) : nestedHeaders,
 	);
 }
 
