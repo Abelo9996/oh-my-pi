@@ -305,16 +305,16 @@ const rows: Row[] = [
 		approved: false,
 	},
 	{
-		name: "a model whose provider may fall back server-side is refused",
+		name: "a model whose provider may fall back server-side is approved: the request omits the chain and a handoff fails closed",
 		settings: { modelRoles: { review: "factory-droid/claude-fable-5" } },
 		model: droidFable,
-		approved: false,
+		approved: true,
 	},
 	{
-		name: "a model whose server-side fallback target is also approved is still refused",
+		name: "a model whose server-side fallback target is also approved stays approved",
 		settings: { modelRoles: { review: "factory-droid/claude-fable-5", smol: "factory-droid/claude-opus-5" } },
 		model: droidFable,
-		approved: false,
+		approved: true,
 	},
 	{
 		name: "a route without a server-side fallback needs no fallback approval",
@@ -491,16 +491,14 @@ describe("per-call model grants", () => {
 		expect(approved(target, grants)).toBe(false);
 	});
 
-	it("names the server-side fallback and rejects even when its target is approved", () => {
+	it("approves a Factory model whose transport carries a refusal chain when its target is also granted", () => {
 		const grants = {
 			settings: Settings.isolated({
 				modelRoles: { review: "factory-droid/claude-fable-5", smol: "factory-droid/claude-opus-5" },
 			}),
 			agentName: "worker",
 		};
-		expect(() => assertPerCallModelApproved(droidFable, grants, registry)).toThrow(
-			/provider may answer with another model server-side \(factory-droid\/claude-opus-5\).*never switch models/,
-		);
+		expect(() => assertPerCallModelApproved(droidFable, grants, registry)).not.toThrow();
 	});
 
 	it("rejects a non-string task.perCallModelAllow entry from a config file and a runtime write", async () => {

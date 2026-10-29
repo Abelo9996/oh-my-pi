@@ -11,7 +11,6 @@
  * result to the exact models it lists.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { factoryDroidServerSideFallbackModels, isFactoryDroidModel } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import type { ModelRegistry } from "../config/model-registry";
@@ -185,15 +184,6 @@ function isGranted(model: Model<Api>, grants: PerCallModelGrants, chat: Model<Ap
 	});
 }
 
-/**
- * Models Factory may switch to server-side. Its transport always sends this refusal chain,
- * even when client fallback is disabled; granting its targets cannot keep a worker on one model.
- */
-function serverSideFallbacks(model: Model<Api>): string[] {
-	if (!isFactoryDroidModel(model)) return [];
-	return factoryDroidServerSideFallbackModels(model).map(id => formatModelString({ provider: model.provider, id }));
-}
-
 /** Throw {@link PerCallModelError} unless `model` is approved. */
 export function assertPerCallModelApproved(
 	model: Model<Api>,
@@ -201,13 +191,7 @@ export function assertPerCallModelApproved(
 	registry: ApprovalRegistry,
 ): void {
 	const chat = registry.getAvailable("chat");
-	if (isGranted(model, grants, chat, registry.getAll())) {
-		const fallbacks = serverSideFallbacks(model);
-		if (fallbacks.length === 0) return;
-		throw new PerCallModelError(
-			`Per-call model ${formatModelStringWithRouting(model)} is not approved for agent "${grants.agentName}": its provider may answer with another model server-side (${fallbacks.join(", ")}). Per-call workers never switch models; pick a model without a server-side fallback.`,
-		);
-	}
+	if (isGranted(model, grants, chat, registry.getAll())) return;
 	const allowGuidance =
 		cfgTaskPerCallModelAllow.get(grants.settings.grantAuthority()).length > 0
 			? " It must also be listed in task.perCallModelAllow."
