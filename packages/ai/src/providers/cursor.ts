@@ -1196,6 +1196,9 @@ function streamCursorWithWireMode(
 		// no later request can address; its cache entries are released at the end.
 		const ephemeralConversation =
 			!retryContext && options?.conversationId === undefined && options?.sessionId === undefined;
+		// Whether an earlier request already opened this conversation. A session
+		// id minted per call (e.g. by `streamSimple`) never has one.
+		let knownConversation = retryContext !== undefined;
 		// The turn's server records stand for the opening user message and tool
 		// results as the server saw them; they are captured only while what the
 		// host keeps still matches. Hashed now, before anything awaits, since a
@@ -1244,6 +1247,7 @@ function streamCursorWithWireMode(
 			// the last user message.
 			const rotatedFresh = retryContext ? false : freshRotatedConversationIds.has(conversationId);
 			const cachedConversation = cursorConversations.get(conversationId);
+			if (cachedConversation) knownConversation = true;
 			activeBlobStore = retryContext?.blobStore ?? cachedConversation?.blobs ?? new Map<string, Uint8Array>();
 			const blobStore = activeBlobStore;
 			const conversationEntry: CursorConversationEntry = { state: cachedConversation?.state, blobs: blobStore };
@@ -1837,6 +1841,7 @@ function streamCursorWithWireMode(
 			const currentRotated =
 				baseConversationId === undefined ? undefined : rotatedConversationIds.get(baseConversationId);
 			const canRotate = currentRotated === undefined || successfulRotatedConversationIds.has(currentRotated);
+			let rotatedRejection = false;
 			if (
 				conversationId !== undefined &&
 				baseConversationId !== undefined &&
@@ -1856,10 +1861,18 @@ function streamCursorWithWireMode(
 					from: conversationId,
 					to: rotated,
 				});
+				// Only a conversation an earlier request opened can be poisoned. A
+				// first request's rejection is real, and a caller retrying without a
+				// stable id would never reach the rotated one; keep Cursor's verdict.
+				rotatedRejection = knownConversation;
 			}
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
-			output.errorId = result.id;
+			// The rejection is non-retriable on the poisoned id, but the fresh id
+			// is a different request. Mark this one attempt transient so the
+			// caller's retry loop actually rebuilds on the rotated id; if that id
+			// rejects too, `canRotate` is false and the original status surfaces.
+			output.errorId = rotatedRejection ? AIError.create(AIError.Flag.Transient) : result.id;
 			if (error instanceof ConnectEndStreamError) {
 				output.errorClassificationMessage = result.message;
 				output.errorMessage = error.diagnosticMessage;

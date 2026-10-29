@@ -15,6 +15,7 @@
 - Fixed an interrupted turn reporting the transport's abort text, such as "Codex websocket transport error: request was aborted", instead of the reason the caller passed to `abort()`, such as "Interrupted by user" ([#17216](https://github.com/can1357/oh-my-pi/pull/17216) by [@MaisonnatM](https://github.com/MaisonnatM))
 - Fixed pi-native turns whose model thinks for over ~5 minutes before its first event being cut by Bun's fetch timeout or an intermediate proxy; the gateway now sends SSE keepalives and the client honors the configured first-event timeout ([#17363](https://github.com/can1357/oh-my-pi/issues/17363))
 - Fixed pi-native clients crashing with `TypeError: undefined is not an object (evaluating 'event.error.stopReason')` when the auth-gateway reports a mid-stream upstream failure ([#17363](https://github.com/can1357/oh-my-pi/issues/17363))
+- Fixed Cursor turns ending after a mid-turn stream cut when the automatic retry hits a zero-token `PROVIDER_ERROR`; the retry now runs on the rotated conversation instead of surfacing the 400 ([#17319](https://github.com/can1357/oh-my-pi/pull/17319) by [@morali](https://github.com/morali))
 
 ## [18.13.3] - 2026-10-28
 
