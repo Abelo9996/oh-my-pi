@@ -65,6 +65,7 @@
 - Fixed `lsp diagnostics` getting no report from language servers that check files only on save ([#17293](https://github.com/can1357/oh-my-pi/pull/17293))
 - Fixed live job widgets on subagent and background-job cards filling with words from files, web pages and search results the subagent read (for example a grid of dots labelled `Given`, `Never`, `[x]`): wildcard rules no longer read a subagent's tool results, a widget is checked against all output before it shows and dropped as soon as it stops fitting, and grid statuses only colour a cell when they start a word
 - Fixed an advisor batch that keeps failing (for example on a proxy rate limit) being retried without end instead of dropped after three failures when context maintenance re-primes the advisor before every attempt ([#17281](https://github.com/can1357/oh-my-pi/issues/17281), [#17291](https://github.com/can1357/oh-my-pi/pull/17291) by [@joshuaswarren](https://github.com/joshuaswarren))
+- Fixed a `models.yml` `thinking` override on prefix-bound Claude models dropping the catalog's prefix binding, which disabled bound-prefix preservation during pruning/compaction and the retry after a prefix-mismatch 400 ([#17276](https://github.com/can1357/oh-my-pi/issues/17276))
 
 ## [18.13.3] - 2026-10-28
 
