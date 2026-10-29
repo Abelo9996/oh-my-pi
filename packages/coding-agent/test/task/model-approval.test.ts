@@ -441,7 +441,7 @@ describe("per-call model grants", () => {
 		const second = createMockModel({ id: "worker-b" });
 		const usageOrder = ["mock/worker-a", "mock/worker-b"];
 		const settings = Settings.isolated(
-			{ modelRoles: { review: "mock/worker" } },
+			{ modelRoles: { review: "worker" } },
 			{ storage: { getModelUsageOrder: () => usageOrder } as AgentStorage },
 		);
 		const grants: PerCallModelGrants = {
