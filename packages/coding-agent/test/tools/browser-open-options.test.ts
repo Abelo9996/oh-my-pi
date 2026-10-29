@@ -428,14 +428,19 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 			).toBe("untrusted");
 			const opened = getTab(name);
 			const worker = opened?.backend === "worker" ? opened.worker : undefined;
-			// A run that outlives its timeout recycles the tab onto a new worker.
-			expect(
-				await rejectionOf(
-					invoke({ action: "run", name, code: "await Promise.withResolvers().promise;", timeout: 1 }),
-				),
-			).toMatchObject({ message: expect.stringContaining("Browser code execution timed out") });
+			// A worker that exits on its own is recycled: the tab is reattached to a new worker on the same page. The
+			// rejection's stack never touches the run's source, so the run guard leaves it to end the worker.
+			const endWorker = `const err = new Error("library-internal");
+err.stack = "Error: library-internal\\n    at #onFileChooser (puppeteer/Page.js:1:1)";
+Promise.reject(err);
+await Promise.withResolvers().promise;`;
+			expect(await rejectionOf(invoke({ action: "run", name, code: endWorker }))).toMatchObject({
+				message: expect.stringContaining("the tab is being reattached"),
+			});
 			const tab = getTab(name);
-			expect(tab?.backend === "worker" && tab.worker).not.toBe(worker);
+			if (tab?.backend !== "worker") throw new Error("Expected a worker tab");
+			expect(await tab.workerRecovery).toBe(true);
+			expect(tab.worker).not.toBe(worker);
 			expect(
 				returnedValue(
 					await invoke({
@@ -473,11 +478,12 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 		try {
 			const invoke = browserHost();
 			const name = `slow-${crypto.randomUUID()}`;
-			const open = () => rejectionOf(invoke({ action: "open", name, url: server.url.href, timeout: 3 }));
+			// The first open also starts the tab's worker within its budget; the second, reusing the tab, only navigates.
+			const open = (timeout: number) => rejectionOf(invoke({ action: "open", name, url: server.url.href, timeout }));
 			const keptTab = { message: expect.stringContaining(`browser.tab(${JSON.stringify(name)})`) };
 			// The first open creates the tab; the second reuses the one it kept.
-			expect(await open()).toMatchObject(keptTab);
-			expect(await open()).toMatchObject(keptTab);
+			expect(await open(3)).toMatchObject(keptTab);
+			expect(await open(1)).toMatchObject(keptTab);
 			expect(
 				returnedValue(
 					await invoke({

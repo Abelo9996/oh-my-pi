@@ -108,28 +108,6 @@ describe("RPC fork and tree navigation", () => {
 		expect((await client.getState()).sessionFile).toBe(source.sessionFile);
 	}, 30_000);
 
-	test("refuses while a turn is streaming", async () => {
-		const [, firstReply] = await seedTwoTurns();
-		const source = await client.getState();
-		const idle = Promise.withResolvers<void>();
-		const unsubscribe = client.onEvent(event => {
-			if (event.type === "agent_end") idle.resolve();
-		});
-		try {
-			await client.prompt("slow");
-			expect((await client.getState()).isStreaming).toBe(true);
-
-			expect(await rejectionOf(client.fork(firstReply))).toMatchObject({ command: "fork", code: "session_busy" });
-
-			// The fixture's "slow" turn streams until aborted.
-			await client.abort();
-			await withTimeout(idle.promise, 10_000, "Streaming turn did not finish");
-		} finally {
-			unsubscribe();
-		}
-		expect((await client.getState()).sessionFile).toBe(source.sessionFile);
-	}, 30_000);
-
 	/** Resolves on the first session event `match` accepts; register before the action that causes it. */
 	function nextEvent(match: (type: string) => boolean): Promise<void> {
 		const { promise, resolve } = Promise.withResolvers<void>();
@@ -140,6 +118,27 @@ describe("RPC fork and tree navigation", () => {
 		});
 		return promise;
 	}
+
+	/** Prompts the fixture's "slow" turn and resolves once its model call is in flight; it streams until aborted. */
+	async function startStreamingTurn(): Promise<void> {
+		const streaming = nextEvent(type => type === "notice");
+		await client.prompt("slow");
+		await withTimeout(streaming, 10_000, "Slow turn never reached the model");
+	}
+
+	test("refuses while a turn is streaming", async () => {
+		const [, firstReply] = await seedTwoTurns();
+		const source = await client.getState();
+		const idle = nextEvent(type => type === "agent_end");
+		await startStreamingTurn();
+		expect((await client.getState()).isStreaming).toBe(true);
+
+		expect(await rejectionOf(client.fork(firstReply))).toMatchObject({ command: "fork", code: "session_busy" });
+
+		await client.abort();
+		await withTimeout(idle, 10_000, "Streaming turn did not finish");
+		expect((await client.getState()).sessionFile).toBe(source.sessionFile);
+	}, 30_000);
 
 	test("navigate_tree moves the leaf within the same session file", async () => {
 		const [firstUser, firstReply, secondUser] = await seedTwoTurns();
@@ -179,13 +178,12 @@ describe("RPC fork and tree navigation", () => {
 	test("navigate_tree refuses while a turn is streaming", async () => {
 		const [, firstReply] = await seedTwoTurns();
 		const idle = nextEvent(type => type === "agent_end");
-		await client.prompt("slow");
+		await startStreamingTurn();
 
 		expect(await rejectionOf(client.navigateTree(firstReply!))).toMatchObject({
 			command: "navigate_tree",
 			code: "session_busy",
 		});
-		// The fixture's "slow" turn streams until aborted.
 		await client.abort();
 		await withTimeout(idle, 10_000, "Streaming turn did not finish");
 		expect((await client.getState()).messageCount).toBe(6);

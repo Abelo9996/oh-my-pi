@@ -15,6 +15,7 @@
 ### Changed
 
 - A muted `/live` call now stays shown as muted when the voice model starts a task or the session starts, instead of switching to "working" or "listening" while the microphone is still off ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
+- Model refreshes (startup, `/model`, toggling extended context) use far less CPU: unchanged models are no longer rebuilt on every pass, and with a custom agent directory or models config the model cache database is opened once per refresh instead of once per provider
 - `PI_INTENT_PROMPT` replaces the system-prompt guidance for the `i` intent field; `PI_INTENT_DESC` replaces its tool-schema description
 - Eval shows printed JSON text (`print(json.dumps(…))`, `console.log(JSON.stringify(…))`) as a collapsible JSON tree, like printed dicts and objects
 - The warning that a saved Codex or Claude rate-limit reset is about to expire now shows once per reset across all conversations and omp windows, and only in its final 6 hours instead of from 24 hours out; the status line keeps counting it down meanwhile
@@ -26,6 +27,7 @@
 
 ### Fixed
 
+- Fixed closing a browser tab while omp reattaches it after its worker exited taking most of a second longer than needed
 - Fixed startup warnings (`--model`, prewalk and `--plan-yolo` targets, a resumed session's folder that could not be opened) flashing in Tern before omp's UI covered them; they now show as warnings in the UI ([tern-sdk#90](https://github.com/stencil-hq/tern-sdk/issues/90))
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))

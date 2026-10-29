@@ -33,6 +33,7 @@ import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { drive } from "./helpers/fake-clock";
 
 describe("ModelRegistry runtime discovery", () => {
 	let tempDir: string;
@@ -3999,15 +4000,19 @@ describe("ModelRegistry runtime discovery", () => {
 			}
 			throw new Error(`Unexpected URL: ${url}`);
 		};
-		const models = await discoverLiteLLMModels(
-			{
-				provider: "litellm-test",
-				baseUrl: "http://127.0.0.1:4013/v1",
-				api: "openai-responses",
-				discovery: { type: "litellm", timeoutMs: 50 },
-			},
-			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
-		);
+		// The rich phase's 50ms budget elapses on the fake clock `drive` nudges.
+		vi.useFakeTimers();
+		const models = await drive(
+			discoverLiteLLMModels(
+				{
+					provider: "litellm-test",
+					baseUrl: "http://127.0.0.1:4013/v1",
+					api: "openai-responses",
+					discovery: { type: "litellm", timeoutMs: 50 },
+				},
+				{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+			),
+		).finally(() => vi.useRealTimers());
 		const model = models.find(model => model.id === "vendor-7/model-7");
 		if (!model) throw new Error("Missing fallback LiteLLM model");
 

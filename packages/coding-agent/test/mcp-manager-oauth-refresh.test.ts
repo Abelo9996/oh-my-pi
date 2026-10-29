@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
@@ -43,12 +44,21 @@ type ControlledSleep = {
 	resolve: () => void;
 };
 
-function installControlledBunSleep(): ControlledSleep[] {
-	const calls: ControlledSleep[] = [];
-	vi.spyOn(Bun, "sleep").mockImplementation((ms: number | Date) => {
-		const { promise, resolve } = Promise.withResolvers<void>();
-		const delayMs = typeof ms === "number" ? ms : Math.max(0, ms.getTime() - Date.now());
-		const call = {
+interface ControlledSleeps {
+	calls: ControlledSleep[];
+	/** Waiters for a delay that has not been requested yet, keyed by its length. */
+	waiters: Array<{ ms: number; resolve: (call: ControlledSleep) => void }>;
+}
+
+/**
+ * Hold every refresh delay until the test releases it: the peer-lease poll (`Bun.sleep`) and the
+ * lease-renewal interval (`scheduler.wait`, which its stop signal cancels).
+ */
+function installControlledSleeps(): ControlledSleeps {
+	const sleeps: ControlledSleeps = { calls: [], waiters: [] };
+	const hold = (delayMs: number, signal?: AbortSignal | null): Promise<void> => {
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		const call: ControlledSleep = {
 			ms: delayMs,
 			resolved: false,
 			resolve: () => {
@@ -57,10 +67,25 @@ function installControlledBunSleep(): ControlledSleep[] {
 				resolve();
 			},
 		};
-		calls.push(call);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				if (call.resolved) return;
+				call.resolved = true;
+				reject(signal.reason);
+			},
+			{ once: true },
+		);
+		sleeps.calls.push(call);
+		const waiter = sleeps.waiters.findIndex(candidate => candidate.ms === delayMs);
+		if (waiter !== -1) sleeps.waiters.splice(waiter, 1)[0]!.resolve(call);
 		return promise;
-	});
-	return calls;
+	};
+	vi.spyOn(Bun, "sleep").mockImplementation((ms: number | Date) =>
+		hold(typeof ms === "number" ? ms : Math.max(0, ms.getTime() - Date.now())),
+	);
+	vi.spyOn(scheduler, "wait").mockImplementation((ms, options) => hold(ms ?? 0, options?.signal));
+	return sleeps;
 }
 
 async function drainMicrotasks(count = 10): Promise<void> {
@@ -69,17 +94,17 @@ async function drainMicrotasks(count = 10): Promise<void> {
 	}
 }
 
-async function waitForControlledSleep(calls: ControlledSleep[], ms: number): Promise<ControlledSleep> {
-	for (let attempt = 0; attempt < 20; attempt++) {
-		const call = calls.find(candidate => !candidate.resolved && candidate.ms === ms);
-		if (call) return call;
-		await Promise.resolve();
-	}
-	throw new Error(`Timed out waiting for Bun.sleep(${ms})`);
+/** The pending delay of `ms`, once the code under test requests it. */
+function waitForControlledSleep(sleeps: ControlledSleeps, ms: number): Promise<ControlledSleep> {
+	const call = sleeps.calls.find(candidate => !candidate.resolved && candidate.ms === ms);
+	if (call) return Promise.resolve(call);
+	const { promise, resolve } = Promise.withResolvers<ControlledSleep>();
+	sleeps.waiters.push({ ms, resolve });
+	return promise;
 }
 
-function resolvePendingControlledSleeps(calls: ControlledSleep[]): void {
-	for (const call of calls) {
+function resolvePendingControlledSleeps(sleeps: ControlledSleeps): void {
+	for (const call of sleeps.calls) {
 		if (!call.resolved) call.resolve();
 	}
 }
@@ -276,7 +301,7 @@ describe("MCPManager shared SQLite OAuth refresh", () => {
 		await withSharedSQLiteAuth(async ({ authA, authB, storeA }) => {
 			const startMs = Date.parse("2026-07-10T12:00:00.000Z");
 			setSystemTime(new Date(startMs));
-			const sleeps = installControlledBunSleep();
+			const sleeps = installControlledSleeps();
 			const renewSpy = vi.spyOn(storeA, "renewCredentialRefreshLease");
 
 			await authA.credentials.set(SHARED_CREDENTIAL_ID, {

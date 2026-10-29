@@ -47,19 +47,22 @@ const server = Bun.serve({
 	},
 });
 const origin = `http://127.0.0.1:${server.port}`;
-let browser: BrowserHandle | undefined;
+const acquireHeadless = () => acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+/** The file's hold on one Chromium; each tab takes a hold of its own and gives it back when released. */
+let browserHold: BrowserHandle | undefined;
 
 beforeAll(async () => {
-	if (CHROMIUM_AVAILABLE) browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+	if (CHROMIUM_AVAILABLE) browserHold = await acquireHeadless();
 });
 
 afterAll(async () => {
-	if (browser) await releaseBrowser(browser, { kill: true });
+	if (browserHold) await releaseBrowser(browserHold, { kill: true });
 	server.stop(true);
 });
 
 async function runOnPage(code: string, timeoutMs = 30_000): Promise<unknown> {
-	if (!browser || !("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+	const browser = await acquireHeadless();
+	if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
 	const name = `read-after-navigation-${process.pid}`;
 	const session = {
 		cwd: process.cwd(),

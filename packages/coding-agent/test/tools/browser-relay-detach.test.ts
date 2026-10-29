@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as rewriteImports from "@oh-my-pi/pi-coding-agent/eval/js/shared/rewrite-imports";
 import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
@@ -12,6 +12,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import { drive } from "../helpers/fake-clock";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -285,6 +286,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 	});
 
 	afterEach(async () => {
+		vi.useRealTimers();
 		await releaseTab(name, { kill: false }).catch(() => undefined);
 		extension?.close();
 		relay?.stop();
@@ -463,13 +465,17 @@ describe("relay tabs Chrome detaches omp from", () => {
 			await invoke({ action: "run", code: 'await tab.emulate({ userAgent: "omp-detach-test" });', timeout: 10 });
 			const tab = getTab(name);
 			if (tab?.backend !== "worker") throw new Error("expected a worker tab");
-			// Hold the re-adoption for the call's whole budget once the detached worker is gone. Real time: the
-			// re-adoption's own init deadline reads the same clock, so a faked clock would fail it instead.
+			// The re-adoption takes the call's whole budget: once the detached worker is gone, the supervisor's clock
+			// moves on by the budget. The re-adoption's own init deadline reads the same clock and is left the share of
+			// its budget that the call's spending leaves it, as when the time really passes.
 			const budgetMs = 1_000;
+			const now = performance.now.bind(performance);
+			let spentMs = 0;
+			const clock = spyOn(performance, "now").mockImplementation(() => now() + spentMs);
 			const terminate = tab.worker.terminate.bind(tab.worker);
 			const held = spyOn(tab.worker, "terminate").mockImplementation(async () => {
 				await terminate();
-				await Bun.sleep(budgetMs);
+				spentMs = budgetMs;
 			});
 			try {
 				const reapplying = ext.nextSend("Network.setUserAgentOverride");
@@ -483,6 +489,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 				expect(failure).toContain(`used up this call's ${budgetMs}ms budget, so the call was not run again`);
 			} finally {
 				held.mockRestore();
+				clock.mockRestore();
 			}
 			expect((await invoke(readMark)).value).toBe("kept");
 		},
@@ -556,8 +563,13 @@ describe("relay tabs Chrome detaches omp from", () => {
 		async () => {
 			const ext = await openInlineRelayTab();
 			const detached = ext.nextDetach();
-			// The call times out, and a timed-out inline tab is killed rather than recycled.
-			const failure = String(await invoke({ action: "run", ...HANG, timeout: 1 }).catch((error: unknown) => error));
+			// The call times out, and a timed-out inline tab is killed rather than recycled. The inline core runs in this
+			// process, so its deadline is on the faked clock, which moves only while the call is in flight.
+			vi.useFakeTimers();
+			const failure = String(
+				await drive(invoke({ action: "run", ...HANG, timeout: 1 }).catch((error: unknown) => error)),
+			);
+			vi.useRealTimers();
 			expect(failure).toContain("timed out");
 			expect(getTab(name)).toBeUndefined();
 			// A killed core that kept its relay connection would hold its session on the tab, and the relay

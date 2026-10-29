@@ -118,12 +118,17 @@ function spawnRpcChild(options: { root: string; sessionDir: string }) {
 		/**
 		 * Read every frame the child writes until it exits. `cat` blocks in the
 		 * kernel until data arrives, so the parent awaits real I/O instead of
-		 * polling for EAGAIN. The parent's end is released once the child is gone;
-		 * with no writer left, `cat` reaches EOF after the last buffered byte. The
-		 * budget only bounds a child that never exits.
+		 * polling for EAGAIN. Its read end is opened here, before the parent's end
+		 * is released, so frames buffered by a child that already exited survive.
+		 * Once the child is gone and the parent's end is released, no writer is
+		 * left and `cat` reaches EOF after the last buffered byte. The budget only
+		 * bounds a child that never exits.
 		 */
 		drain: async (budgetMs: number): Promise<string> => {
-			const reader = Bun.spawn(["cat", fifoPath], { stdout: "pipe", stderr: "ignore" });
+			// Blocking O_RDONLY: the parent's open O_RDWR end lets it return at once.
+			const readEnd = fs.openSync(fifoPath, fs.constants.O_RDONLY);
+			const reader = Bun.spawn(["cat"], { stdin: readEnd, stdout: "pipe", stderr: "ignore" });
+			fs.closeSync(readEnd);
 			const output = new Response(reader.stdout).text();
 			const timer = setTimeout(() => child.kill(), budgetMs);
 			try {

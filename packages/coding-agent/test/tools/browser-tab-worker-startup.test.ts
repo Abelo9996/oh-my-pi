@@ -408,11 +408,9 @@ describe("OMP-owned browser input", () => {
 				});
 				const foreground = await browser.browser.newPage();
 				try {
-					// Raising another page puts this tab in the background; the run waits until Chromium reports it hidden.
 					await foreground.bringToFront();
 					const result = await runInTab(name, {
 						code: `
-							await page.waitForFunction(() => document.visibilityState === "hidden");
 							await tab.click("button");
 							const observation = await tab.observe();
 							await (await tab.id(observation.elements[0].id)).click();
@@ -916,13 +914,28 @@ describe("browser tabs whose renderer crashed", () => {
 				await watcher.detach();
 				await crashRenderer(browser, url);
 				tab.targetId = popupId;
-				const failure = runInTab(name, { code: "return 1;", timeoutMs: 10_000, session }).catch(
-					(error: unknown) => error,
-				);
-				// Commit the popup's load only after the new worker has looked the target up (it starts well inside
-				// this); nothing in the worker signals that moment to the test.
-				setTimeout(() => loadGate.resolve(), 1_500);
-				expect(String(await failure)).toContain("its page reloaded");
+				// Commit the popup's load only after the new worker has looked the target up. The worker lists
+				// Puppeteer's targets in the same turn it reports `setup`, so that report releases the load.
+				const RealWorker = globalThis.Worker;
+				globalThis.Worker = class SetupReportingWorker extends RealWorker {
+					constructor(...args: ConstructorParameters<typeof Worker>) {
+						super(...args);
+						this.addEventListener("message", event => {
+							if ((event.data as WorkerOutbound).type === "setup") loadGate.resolve();
+						});
+					}
+				};
+				let failure: unknown;
+				try {
+					failure = await runInTab(name, { code: "return 1;", timeoutMs: 10_000, session }).catch(
+						(error: unknown) => error,
+					);
+				} finally {
+					globalThis.Worker = RealWorker;
+				}
+				expect(String(failure)).toContain("its page reloaded");
+				// The worker that looked the page up adopted it; an inline fallback would retry after the load committed.
+				expect(getTab(name)).toMatchObject({ worker: { mode: "worker" } });
 				const next = await runInTab(name, { code: "return await page.title();", timeoutMs: 10_000, session });
 				expect(next.returnValue).toBe("late-commit");
 			} finally {

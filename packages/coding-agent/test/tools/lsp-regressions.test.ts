@@ -6404,19 +6404,23 @@ describe("lsp regressions", () => {
 
 			const newServer = installHandshakeLsp();
 			const newConfig: ServerConfig = { ...oldConfig, args: ["--mode", "new"] };
-			// The old process outlives both exit waits; the frozen clock is advanced through them.
-			vi.useFakeTimers();
-			await expect(drive(lspClient.shutdownStaleClients(tempDir.path(), [newConfig]))).rejects.toThrow(
-				"Failed to stop LSP server(s) with superseded configuration",
-			);
-			vi.useRealTimers();
+			// The old process outlives both exit waits, whose budget is spent on demand
+			// instead of on the wall clock.
+			const exitBudget = Promise.withResolvers<void>();
+			const sleep = vi.spyOn(Bun, "sleep").mockReturnValue(exitBudget.promise);
+			const teardown = lspClient.shutdownStaleClients(tempDir.path(), [newConfig]);
+			await oldServer.waitFor(message => message.method === "exit");
+			exitBudget.resolve();
+			await expect(teardown).rejects.toThrow("Failed to stop LSP server(s) with superseded configuration");
+			expect(oldServer.killed).toBe(true);
+			sleep.mockRestore();
 			await expect(lspClient.getOrCreateClient(newConfig, tempDir.path(), 1_000)).rejects.toThrow(
 				"Failed to stop LSP server(s) with superseded configuration",
 			);
 			expect(newServer.spawnCount).toBe(0);
 			oldServer.exit(0);
 		} finally {
-			vi.useRealTimers();
+			vi.restoreAllMocks();
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -6946,10 +6950,16 @@ describe("lsp regressions", () => {
 				const config: ServerConfig = { command: "fake-teardown-delayed", fileTypes: [".ts"], rootMarkers: [] };
 				const client = await lspClient.getOrCreateClient(config, tempDir.path());
 
-				// The process outlives both exit waits; the frozen clock is advanced through them.
-				vi.useFakeTimers();
-				const exited = await drive(lspClient.shutdownClientInstance(client));
-				vi.useRealTimers();
+				// The process outlives both exit waits, whose budget is spent on demand
+				// instead of on the wall clock.
+				const exitBudget = Promise.withResolvers<void>();
+				const sleep = vi.spyOn(Bun, "sleep").mockReturnValue(exitBudget.promise);
+				const teardown = lspClient.shutdownClientInstance(client);
+				await server.waitFor(message => message.method === "exit");
+				exitBudget.resolve();
+				const exited = await teardown;
+				sleep.mockRestore();
+				expect(server.killed).toBe(true);
 				expect(exited).toBe(false);
 				expect(lspClient.getActiveClients().some(s => s.name === config.command)).toBe(true);
 
@@ -6957,7 +6967,6 @@ describe("lsp regressions", () => {
 				await Bun.sleep(0);
 				expect(lspClient.getActiveClients().some(s => s.name === config.command)).toBe(false);
 			} finally {
-				vi.useRealTimers();
 				vi.restoreAllMocks();
 				tempDir.removeSync();
 			}

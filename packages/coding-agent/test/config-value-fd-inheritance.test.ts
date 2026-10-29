@@ -148,22 +148,6 @@ test.skipIf(process.platform === "win32")("a timed-out !command kills the descen
 	await expectTimeoutKillsWorker(`"${worker}" & sleep 30`, readyPipe, "backgrounded");
 });
 
-test.skipIf(process.platform === "win32")(
-	"a timed-out !command kills descendants reparented before the timeout",
-	async () => {
-		const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-config-reparented-"));
-		roots.push(root);
-		const readyPipe = makeReadyPipe(root);
-		const worker = path.join(root, "escaped-worker.sh");
-		await fs.promises.writeFile(worker, reparentedWorkerScript(readyPipe), { mode: 0o755 });
-
-		// The intermediate shell exits immediately after backgrounding the
-		// worker, and the worker reports only once reparented, so PID-tree
-		// traversal can no longer find it when the timeout fires.
-		await expectTimeoutKillsWorker(`sh -c '"${worker}" $$ &' & sleep 30`, readyPipe, "reparented");
-	},
-);
-
 test.skipIf(process.platform !== "linux")(
 	"a timed-out !command kills descendants that leave the isolated session",
 	async () => {

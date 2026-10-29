@@ -20,7 +20,8 @@ authStorage.keys.setRuntime("anthropic", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
 const askQuestions = [{ id: "target", question: "Where?", options: [{ label: "staging" }, { label: "prod" }] }];
 const mock = createMockModel({
-	// A prompt mentioning "slow" streams until the test aborts it.
+	// A prompt mentioning "slow" announces with a notice that its model call is in flight, then
+	// streams until the test aborts it.
 	// "seed-ask" calls `ask` (not registered here, so it records an error result) with questions
 	// a picker could reopen; "seed-bad-ask" calls it with arguments no picker could use.
 	handler: context => {
@@ -29,8 +30,10 @@ const mock = createMockModel({
 			const args = last.includes("seed-ask") ? { questions: askQuestions } : {};
 			return { content: [{ type: "toolCall", id: "ask-1", name: "ask", arguments: args }] };
 		}
+		if (!last.includes("slow")) return { content: ["Done"] };
+		session.emitNotice("info", "slow turn streaming", "fork-rpc-agent");
 		// The delay only bounds a leaked process; the test aborts the turn.
-		return { content: ["Done"], delayMs: last.includes("slow") ? 600_000 : 0 };
+		return { content: ["Done"], delayMs: 600_000 };
 	},
 });
 // The first goal continuation waits here until a branch summary starts, so it is decided but not yet started.

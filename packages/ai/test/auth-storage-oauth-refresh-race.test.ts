@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import {
 	type AuthCredentialStore,
 	AuthStorage,
@@ -1920,6 +1921,8 @@ describe("AuthStorage OAuth refresh race", () => {
 		vi.spyOn(Bun, "sleep").mockImplementation((ms: number | Date) =>
 			sleep(typeof ms === "number" ? Math.min(ms, 10) : ms),
 		);
+		const wait = scheduler.wait.bind(scheduler);
+		vi.spyOn(scheduler, "wait").mockImplementation((ms, options) => wait(Math.min(ms, 10), options));
 		let ownerLease: string | undefined;
 		const renewalLost = Promise.withResolvers<void>();
 		const acquire = ownerStore.tryAcquireCredentialRefreshLease?.bind(ownerStore);
