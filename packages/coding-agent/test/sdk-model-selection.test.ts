@@ -1500,55 +1500,73 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("selects the settings default model without synchronously validating auth", async () => {
-		const defaultModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!defaultModel) {
-			throw new Error("Expected bundled anthropic default model");
-		}
+	test.each(["pending", "failed"])(
+		"selects the settings default model without waiting for %s usage prefetch or validating auth",
+		async prefetchState => {
+			const defaultModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!defaultModel) {
+				throw new Error("Expected bundled anthropic default model");
+			}
 
-		const authStorage = createInMemoryAuthStorage();
-		authStorage.keys.setRuntime(defaultModel.provider, "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		const settings = Settings.isolated();
-		settings.setModelRole("default", `${defaultModel.provider}/${defaultModel.id}`);
+			const authStorage = createInMemoryAuthStorage();
+			authStorage.keys.setRuntime(defaultModel.provider, "test-key");
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const settings = Settings.isolated();
+			settings.setModelRole("default", `${defaultModel.provider}/${defaultModel.id}`);
 
-		const getApiKeySpy = vi
-			.spyOn(modelRegistry, "getApiKey")
-			.mockRejectedValue(new Error("settings default model should not validate auth during startup"));
-
-		try {
-			const { session } = await createAgentSession({
-				cwd: tempDir,
-				agentDir: tempDir,
-				authStorage,
-				modelRegistry,
-				settings,
-				sessionManager: SessionManager.inMemory(),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-				skipPythonPreflight: true,
-				rules: [],
-				preloadedCustomToolPaths: [],
-				toolNames: ["read"],
-			});
+			const getApiKeySpy = vi
+				.spyOn(modelRegistry, "getApiKey")
+				.mockRejectedValue(new Error("settings default model should not validate auth during startup"));
+			const pendingPrefetch = Promise.withResolvers<void>();
+			const prefetchSpy = vi
+				.spyOn(authStorage.keys, "prefetchUsage")
+				.mockImplementation(() =>
+					prefetchState === "pending"
+						? pendingPrefetch.promise
+						: Promise.reject(new Error("Usage prefetch unavailable")),
+				);
 
 			try {
-				expect(session.model?.provider).toBe(defaultModel.provider);
-				expect(session.model?.id).toBe(defaultModel.id);
-				expect(getApiKeySpy).not.toHaveBeenCalled();
+				const { session } = await createAgentSession({
+					cwd: tempDir,
+					agentDir: tempDir,
+					authStorage,
+					modelRegistry,
+					settings,
+					sessionManager: SessionManager.inMemory(),
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+					skipPythonPreflight: true,
+					rules: [],
+					preloadedCustomToolPaths: [],
+					toolNames: ["read"],
+				});
+
+				try {
+					expect(session.model?.provider).toBe(defaultModel.provider);
+					expect(session.model?.id).toBe(defaultModel.id);
+					expect(getApiKeySpy).not.toHaveBeenCalled();
+					expect(prefetchSpy).toHaveBeenCalledWith(defaultModel.provider, session.sessionId, {
+						baseUrl: defaultModel.baseUrl,
+						modelId: defaultModel.id,
+						accountIds: undefined,
+					});
+				} finally {
+					await session.dispose();
+				}
 			} finally {
-				await session.dispose();
+				pendingPrefetch.resolve();
+				prefetchSpy.mockRestore();
+				getApiKeySpy.mockRestore();
+				authStorage.close();
 			}
-		} finally {
-			getApiKeySpy.mockRestore();
-			authStorage.close();
-		}
-	});
+		},
+	);
 
 	test.each([
 		// Not in the catalog at all.
