@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
 import { inspect } from "node:util";
@@ -4907,6 +4907,25 @@ describe("window() waiting for a window to appear", () => {
 				expect(native.listings).toBe(steps.length + 1);
 			}
 		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps waiting when the wall clock jumps ahead mid-wait", async () => {
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(3);
+			const pending = run(native, 'return (await desktop.window({ app: "Preview", wait: 2000 })).id');
+			// A wall-clock step of a minute after the first listing leaves 1900 ms of the wait on a monotonic clock.
+			while (native.listings < 1) await turn();
+			setSystemTime(new Date(Date.now() + 60_000));
+			await pollListings(native, 3);
+			const result = await pending;
+			if (!result.ok) throw new Error(result.error.message);
+			expect(result.payload.returnValue).toBe("151");
+			expect(native.listings).toBe(3);
+		} finally {
+			setSystemTime();
 			vi.useRealTimers();
 		}
 	});

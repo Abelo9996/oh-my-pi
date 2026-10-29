@@ -1848,7 +1848,8 @@ export class ComputerWorkerCore {
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
 				const wait = typeof selector === "object" && selector !== null ? windowWait(selector.wait) : 0;
-				const deadline = Date.now() + wait;
+				// Monotonic, like the run deadline: a wall-clock step (NTP, a manual change) must not end or stretch the wait.
+				const deadline = performance.now() + wait;
 				let windows: DesktopWindow[];
 				let matches: DesktopWindow[];
 				for (;;) {
@@ -1858,7 +1859,7 @@ export class ComputerWorkerCore {
 							? windows.filter(window => window.id === String(selector))
 							: windows.filter(window => matchesFilter(window, selector));
 					// The last interval sleeps only what is left, so the final listing lands at the deadline.
-					const remaining = deadline - Date.now();
+					const remaining = deadline - performance.now();
 					if (matches.length > 0 || remaining <= 0) break;
 					await waitForRun(Math.min(WINDOW_WAIT_INTERVAL_MS, remaining), signal);
 				}
