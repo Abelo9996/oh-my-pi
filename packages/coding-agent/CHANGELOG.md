@@ -21,6 +21,7 @@
 
 ### Changed
 
+- The source-checkout launcher skips recreating its isolated Bun startup directory when it already exists.
 - OpenAI live steering (`providers.openaiLiveSteering`) is now off by default for GPT models; typed messages wait for the next tool boundary unless you enable it, avoiding `unsupported_native_inflight_message` errors
 
 - Sub-session collector now determines compression from filename extension instead of a boolean flag
@@ -47,6 +48,7 @@
 
 ### Fixed
 
+- Fixed `omp auth-gateway serve` routing a bare model id (e.g. Claude Code's `claude-opus-5-5`) to a mirror provider such as Cursor after a catalog refresh; a bare id now goes to the highest-priority credentialed provider (`modelProviderOrder`, then the built-in native-first order), and among equally ranked providers prefers one speaking the route's wire format
 - Fixed table charts marking the worse value "best" when a column or row name suggests the wrong direction (a GPU's memory bandwidth and L2 cache read as costs). Charts no longer guess which way is better from header wording; under `tui.autoGraph: smart` the judge decides, for single-measure tables and every metric row too, and can decline a chart of page numbers, step numbers or figures quoted in prose
 - Fixed background bash job widgets showing binary mojibake as the stage and counting it as hundreds of thousands of lines when a pipe carries binary data (`git archive | tar -x`, `curl | gunzip`); such pipes are now left out of the widget
 - Fixed closing a browser tab while omp reattaches it after its worker exited taking most of a second longer than needed

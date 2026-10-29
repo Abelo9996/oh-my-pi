@@ -5,6 +5,9 @@
 ### Changed
 
 - `auth.accountPolicies` `priority` now outranks a momentarily missing usage report, so new sessions stay on the preferred account ([#15124](https://github.com/can1357/oh-my-pi/pull/15124) by [@will-bogusz](https://github.com/will-bogusz))
+### Breaking Changes
+
+- Auth-gateway `ModelResolver` now receives `ModelResolveOptions` (`api`: the route's native wire; `accepts`: the scoped client's grants). A scoped client's bare id no longer falls back to scanning `listModels()`; resolvers pick the best candidate `accepts` admits
 
 ### Fixed
 
