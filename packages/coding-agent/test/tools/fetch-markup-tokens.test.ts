@@ -2,9 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { renderHtmlToText } from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { mockFetch } from "../helpers/fetch-mock";
 
 const PROSE = "This guide explains how the renderer handles every input it receives in one pass. ".repeat(3);
 
@@ -52,8 +50,12 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 
 	async function readPage(
 		html: string,
-		selector = "",
-		method = "native",
+		{
+			selector = "",
+			method = "native",
+			provider = "auto",
+			reader = () => new Response("offline", { status: 503 }),
+		}: { selector?: string; method?: string; provider?: string; reader?: () => Response } = {},
 	): Promise<{ text: string; notes: string[]; readerCalls: string[] }> {
 		const server = Bun.serve({
 			port: 0,
@@ -76,11 +78,11 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 				id: "test",
 				path: path.join(artifactsDir, `test.${toolType}.log`),
 			}),
-			settings: Settings.isolated({ "fetch.enabled": true }),
+			settings: Settings.isolated({ "fetch.enabled": true, "providers.fetch": provider }),
 			// Remote readers (Jina and the like) answer through here.
 			fetch: async input => {
 				readerCalls.push(String(input instanceof Request ? input.url : input));
-				return new Response("offline", { status: 503 });
+				return reader();
 			},
 		};
 		const result = await new ReadTool(session).execute("call", {
@@ -125,7 +127,7 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 	});
 
 	it("returns every meta tag when the URL is read with :raw", async () => {
-		const { text } = await readPage(DOCS_PAGE, ":raw", "raw");
+		const { text } = await readPage(DOCS_PAGE, { selector: ":raw", method: "raw" });
 
 		expect(text).toContain('<meta property="og:image"');
 	});
@@ -187,18 +189,14 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 
 	it("leaves another reader's output as it came", async () => {
 		const markdown = `---\nlicense: Do not redistribute\nmeta-og:title: Example\n---\n\n# Example\n\n${PROSE}`;
-		const result = await renderHtmlToText(
-			"https://example.com/article",
-			"<html><body><p>shell</p></body></html>",
-			5,
-			Settings.isolated({ "providers.fetch": "jina" }),
-			undefined,
-			null,
-			mockFetch(() => new Response(`Markdown Content:\n${markdown}`)),
-		);
+		const { text } = await readPage(DOCS_PAGE, {
+			method: "jina",
+			provider: "jina",
+			reader: () => new Response(`Markdown Content:\n${markdown}`),
+		});
 
-		expect(result.method).toBe("jina");
-		expect(result.content).toContain("license: Do not redistribute");
-		expect(result.content).toContain("meta-og:title: Example");
+		expect(text).toContain("license: Do not redistribute");
+		expect(text).toContain("meta-og:title: Example");
+		expect(text).not.toContain("meta_omitted");
 	});
 });
