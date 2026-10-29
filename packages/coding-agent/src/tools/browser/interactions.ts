@@ -92,6 +92,19 @@ interface PageShadowRoot {
 	elementFromPoint(x: number, y: number): PageElement | null;
 }
 
+/** The focused element of a document or shadow root; a shadow host passes focus on to its root's. */
+interface FocusedElement {
+	shadowRoot: { activeElement: FocusedElement | null } | null;
+	contains(other: unknown): boolean;
+}
+
+/** An element on the way up to a contenteditable's editing host. */
+interface EditableAncestor {
+	isContentEditable: boolean;
+	parentElement: EditableAncestor | null;
+	focus(): void;
+}
+
 interface PageElement {
 	readonly tagName: string;
 	id: string;
@@ -531,10 +544,11 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					value?: string;
 					focus?: () => void;
 					isContentEditable?: boolean;
-					parentElement: { isContentEditable: boolean } | null;
+					parentElement: EditableAncestor | null;
 					getAttribute(name: string): string | null;
 					namespaceURI: string | null;
 					ownerDocument: {
+						activeElement: FocusedElement | null;
 						createElementNS(
 							namespace: string | null,
 							tag: "input",
@@ -633,6 +647,15 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					return { target: "picker" as const, kind, refused };
 				}
 				if (node.isContentEditable) {
+					// An element inside an editing host cannot take focus itself, so its host is focused. Input goes
+					// to whatever holds focus, so a host whose focus handler moved it elsewhere (or an inert one)
+					// would have the replacement land in another control.
+					let host: EditableAncestor | null = node.parentElement?.isContentEditable ? node.parentElement : null;
+					while (host?.parentElement?.isContentEditable) host = host.parentElement;
+					host?.focus();
+					let active = node.ownerDocument.activeElement;
+					while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+					if (!active?.contains(node)) return { target: "unfocused" as const };
 					// Rich-text editors (Slate, Lexical) keep their own document and either undo a direct DOM write
 					// or stop tracking the element, so the old text is selected for the input that replaces it.
 					const range = node.ownerDocument.createRange();
@@ -668,6 +691,8 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 				);
 			}
 			return;
+		case "unfocused":
+			throw new ToolError("Cannot fill an element that does not keep focus");
 		case "editable":
 			if (!value && !prepared.deletable) return;
 			throwIfAborted(signal);

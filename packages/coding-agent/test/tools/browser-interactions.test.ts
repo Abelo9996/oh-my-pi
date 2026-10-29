@@ -707,6 +707,37 @@ return {
 		}
 	}, 40_000);
 
+	test("refuses to fill a contenteditable whose focus handler moves focus to another control", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-focus-${crypto.randomUUID()}`;
+		const focusHtml = `<!doctype html><input id="other" value="keep"><div id="editor" contenteditable>old</div>
+<script>document.querySelector("#editor").addEventListener("focus", () => document.querySelector("#other").focus());</script>`;
+		const context = { session, toolCallId: "browser-editable-focus" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(focusHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `let refused = "";
+try { await tab.fill("#editor", ""); } catch (error) { refused = error.message; }
+return { refused, other: await tab.value("#other"), editor: await tab.text("#editor") };`,
+					timeout: 25,
+				},
+				context,
+			);
+			const outcome = valueFrom<{ refused: string; other: string; editor: string }>(result);
+			expect(outcome.refused).toContain("does not keep focus");
+			expect(outcome).toMatchObject({ other: "keep", editor: "old" });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
 	test("a multi-line fill of a contenteditable inserts its line breaks without pressing Enter", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
