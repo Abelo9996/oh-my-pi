@@ -6140,6 +6140,8 @@ mod tests {
 		&LOCK
 	}
 
+	/// Runs `command` under [`shell_test_lock`] and returns its result and
+	/// output.
 	#[cfg(unix)]
 	async fn run_command_capture(
 		command: &str,
@@ -6148,6 +6150,33 @@ mod tests {
 		cancel_token: CancelToken,
 	) -> (ShellExecuteResult, String) {
 		let _guard = shell_test_lock().lock().await;
+		capture_unlocked(command, cwd, minimizer, cancel_token).await
+	}
+
+	/// [`run_command_capture`] that fails once the run outlasts `limit`. The
+	/// limit starts when the lock is held: in a single-process `cargo test`,
+	/// the wait behind slower shell tests took up the limit of a fast one.
+	#[cfg(unix)]
+	async fn run_command_capture_within(
+		limit: Duration,
+		command: &str,
+		cwd: Option<&std::path::Path>,
+		minimizer: Option<minimizer::MinimizerOptions>,
+		cancel_token: CancelToken,
+	) -> Result<(ShellExecuteResult, String), time::error::Elapsed> {
+		let _guard = shell_test_lock().lock().await;
+		time::timeout(limit, capture_unlocked(command, cwd, minimizer, cancel_token)).await
+	}
+
+	/// Runs `command` and collects its streamed output; the caller holds
+	/// [`shell_test_lock`].
+	#[cfg(unix)]
+	async fn capture_unlocked(
+		command: &str,
+		cwd: Option<&std::path::Path>,
+		minimizer: Option<minimizer::MinimizerOptions>,
+		cancel_token: CancelToken,
+	) -> (ShellExecuteResult, String) {
 		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions {
 			command: command.to_string(),
@@ -6180,9 +6209,12 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn uutils_diff_reads_process_substitution_fds() {
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture("diff <(echo a) <(echo b)", None, None, CancelToken::default()),
+			"diff <(echo a) <(echo b)",
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("process substitution should not hang");
@@ -6202,15 +6234,13 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(
-				"/bin/sh -c 'sleep 0.15; echo one > f' & /bin/cat < f; /bin/sh -c 'sleep 0.15; echo \
-				 two > f' & x=$(< f); echo \"x=$x\"; wait",
-				Some(root.path()),
-				None,
-				CancelToken::default(),
-			),
+			"/bin/sh -c 'sleep 0.15; echo one > f' & /bin/cat < f; /bin/sh -c 'sleep 0.15; echo two \
+			 > f' & x=$(< f); echo \"x=$x\"; wait",
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("a FIFO redirect waits for its writer and returns");
@@ -6231,24 +6261,12 @@ mod tests {
 				.make_node(root.path().join(name), pi_vfs::NodeKind::Fifo, 0o600)
 				.expect("create FIFO");
 		}
-		let cwd = root.path().to_path_buf();
-		let (tx, rx) = std::sync::mpsc::channel();
-		std::thread::spawn(move || {
-			let runtime = tokio::runtime::Builder::new_multi_thread()
-				.worker_threads(1)
-				.enable_all()
-				.build()
-				.expect("single-worker runtime");
-			let _ = tx.send(runtime.block_on(run_command_capture(
-				"echo one > f & cat < f; cat < g & echo two > g; wait",
-				Some(&cwd),
-				None,
-				CancelToken::default(),
-			)));
-		});
-		let (result, output) = rx
-			.recv_timeout(Duration::from_secs(5))
-			.expect("a FIFO redirect must not hold the worker its other end needs");
+		let (result, output) = capture_on_runtime(
+			"echo one > f & cat < f; cat < g & echo two > g; wait",
+			Some(root.path().to_path_buf()),
+			512,
+		)
+		.expect("a FIFO redirect must not hold the worker its other end needs");
 
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\ntwo\n"));
 	}
@@ -6266,21 +6284,19 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				concat!(
-					// First, so the job is `%1`.
-					"/bin/sleep 30 < f & jobs; kill %1; wait $!; echo \"kill-job=$?\"\n",
-					"/bin/sleep 30 < f & kill $!; wait $!; echo \"kill-pid=$?\"\n",
-					"/bin/cat < f & pid=$!; echo one > f; wait $pid; echo \"wait=$?\"\n",
-					"/bin/sh -c 'echo $$' > f & bg=$!; read -r self < f; wait $bg\n",
-					"[ \"$self\" = \"$bg\" ] && echo same-pid",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				// First, so the job is `%1`.
+				"/bin/sleep 30 < f & jobs; kill %1; wait $!; echo \"kill-job=$?\"\n",
+				"/bin/sleep 30 < f & kill $!; wait $!; echo \"kill-pid=$?\"\n",
+				"/bin/cat < f & pid=$!; echo one > f; wait $pid; echo \"wait=$?\"\n",
+				"/bin/sh -c 'echo $$' > f & bg=$!; read -r self < f; wait $bg\n",
+				"[ \"$self\" = \"$bg\" ] && echo same-pid",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the shell goes on while a background command waits for its FIFO");
@@ -6303,14 +6319,12 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(&fifo, pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				"cat < f & sleep 0.2; kill %1; wait; echo done",
-				Some(root.path()),
-				None,
-				CancelToken::default(),
-			),
+			"cat < f & sleep 0.2; kill %1; wait; echo done",
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the killed job ends");
@@ -6341,20 +6355,18 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(30),
-			run_command_capture(
-				concat!(
-					"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n",
-					"  cat < f & sleep 0.05; kill %%\n",
-					"  /bin/cat < f > got & sleep 0.1; echo \"hi$i\" > f; wait\n",
-					"  read -r x < got; [ \"$x\" = \"hi$i\" ] || echo \"lost $i\"\n",
-					"done; echo done",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n",
+				"  cat < f & sleep 0.05; kill %%\n",
+				"  /bin/cat < f > got & sleep 0.1; echo \"hi$i\" > f; wait\n",
+				"  read -r x < got; [ \"$x\" = \"hi$i\" ] || echo \"lost $i\"\n",
+				"done; echo done",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("no writer is left without a reader");
@@ -6374,17 +6386,15 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				concat!(
-					"/bin/echo out > /dev/stdout & wait\n",
-					"export f1=orig; /usr/bin/env > f & grep '^f1=' < f; wait",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				"/bin/echo out > /dev/stdout & wait\n",
+				"export f1=orig; /usr/bin/env > f & grep '^f1=' < f; wait",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the commands finish");
@@ -6404,20 +6414,18 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				concat!(
-					"/bin/echo replaced >f >/dev/null & cat <f; wait; echo \"replace=$?\"\n",
-					"/bin/echo closed 3>f >&3 3>&- & cat <f; wait\n",
-					"/bin/echo moved 3>f 1>&3- & cat <f; wait\n",
-					"/bin/echo both >f &>/dev/null & cat <f; wait; echo \"both=$?\"\n",
-					"/bin/echo descriptor >f >/dev/stdout & cat <f; wait",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				"/bin/echo replaced >f >/dev/null & cat <f; wait; echo \"replace=$?\"\n",
+				"/bin/echo closed 3>f >&3 3>&- & cat <f; wait\n",
+				"/bin/echo moved 3>f 1>&3- & cat <f; wait\n",
+				"/bin/echo both >f &>/dev/null & cat <f; wait; echo \"both=$?\"\n",
+				"/bin/echo descriptor >f >/dev/stdout & cat <f; wait",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the shell goes on while a background command waits for its FIFO");
@@ -6439,18 +6447,16 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				concat!(
-					"{ /bin/echo dup3 >f 1>&3 3>/dev/null & cat <f; wait; } 3>out3; cat out3\n",
-					"{ /bin/echo moved4 >f 1>&4- & cat <f; wait; } 4>out4; cat out4\n",
-					"/bin/echo sw 2>f 3>&1 1>&2 2>&3 3>&- & cat <f; wait",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				"{ /bin/echo dup3 >f 1>&3 3>/dev/null & cat <f; wait; } 3>out3; cat out3\n",
+				"{ /bin/echo moved4 >f 1>&4- & cat <f; wait; } 4>out4; cat out4\n",
+				"/bin/echo sw 2>f 3>&1 1>&2 2>&3 3>&- & cat <f; wait",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the shell goes on while a background command waits for its FIFO");
@@ -6469,20 +6475,17 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				concat!(
-					"{ echo a; sleep 0.2; } > f & mapfile -t lines < f; wait; echo \
-					 \"mapfile=${#lines[@]}\"\n",
-					"{ echo b; sleep 0.2; } > f & while read -r l; do echo \"read=$l\"; done < f; \
-					 wait\n",
-					"{ printf c; sleep 0.2; } > f & read -t 5 -r x < f; echo \"read-t=$? $x\"; wait",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				"{ echo a; sleep 0.2; } > f & mapfile -t lines < f; wait; echo \
+				 \"mapfile=${#lines[@]}\"\n",
+				"{ echo b; sleep 0.2; } > f & while read -r l; do echo \"read=$l\"; done < f; wait\n",
+				"{ printf c; sleep 0.2; } > f & read -t 5 -r x < f; echo \"read-t=$? $x\"; wait",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("each reader ends at its writer's EOF");
@@ -6491,20 +6494,25 @@ mod tests {
 	}
 
 	/// Runs `command` on a dedicated single-worker runtime and fails after five
-	/// seconds. The deadline lives on the calling thread, so it still fires when
-	/// a builtin blocks the runtime's only worker.
+	/// seconds.
 	#[cfg(unix)]
 	fn capture_on_single_worker(command: &'static str) -> (ShellExecuteResult, String) {
-		capture_on_runtime(command, 512)
+		capture_on_runtime(command, None, 512)
+			.expect("read must not wait on a blocking worker it cannot get")
 	}
 
-	/// [`capture_on_single_worker`] with the blocking pool capped at
-	/// `max_blocking_threads`.
+	/// Runs `command` in `cwd` on a dedicated single-worker runtime whose
+	/// blocking pool holds `max_blocking_threads`; fails once the run outlasts
+	/// five seconds. The deadline lives on the calling thread, so it still
+	/// fires when a builtin blocks the runtime's only worker, and starts once
+	/// this thread holds [`shell_test_lock`].
 	#[cfg(unix)]
 	fn capture_on_runtime(
 		command: &'static str,
+		cwd: Option<std::path::PathBuf>,
 		max_blocking_threads: usize,
-	) -> (ShellExecuteResult, String) {
+	) -> Result<(ShellExecuteResult, String), std::sync::mpsc::RecvTimeoutError> {
+		let _guard = shell_test_lock().blocking_lock();
 		let (tx, rx) = std::sync::mpsc::channel();
 		std::thread::spawn(move || {
 			let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -6513,15 +6521,14 @@ mod tests {
 				.enable_all()
 				.build()
 				.expect("single-worker runtime");
-			let _ = tx.send(runtime.block_on(run_command_capture(
+			let _ = tx.send(runtime.block_on(capture_unlocked(
 				command,
-				None,
+				cwd.as_deref(),
 				None,
 				CancelToken::default(),
 			)));
 		});
 		rx.recv_timeout(Duration::from_secs(5))
-			.expect("read must not wait on a blocking worker it cannot get")
 	}
 
 	/// Owned-shell pipeline stages already hold a blocking worker. Two `read`
@@ -6531,7 +6538,8 @@ mod tests {
 	#[test]
 	fn pipeline_reads_do_not_nest_on_a_full_blocking_pool() {
 		let (result, output) =
-			capture_on_runtime("printf 'a\\n' | read -r x | read -r y; printf 'done\\n'", 2);
+			capture_on_runtime("printf 'a\\n' | read -r x | read -r y; printf 'done\\n'", None, 2)
+				.expect("read must not wait on a blocking worker it cannot get");
 
 		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
 		assert_eq!(output, "done\n");
@@ -6570,9 +6578,12 @@ mod tests {
 		let command = "for f in $(cat /dev/stdin <<'EOF'\na\nb\nEOF\n); do echo \"$f\"; done\necho \
 		               to-stderr > /dev/stderr\necho via-tee | tee /dev/stderr > /dev/null\nsource \
 		               /dev/stdin <<< 'echo sourced'";
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(command, None, None, CancelToken::default()),
+			command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("descriptor paths must not read the host terminal");
@@ -6596,9 +6607,12 @@ mod tests {
 		let command =
 			format!("cat /dev/fd/{fd}; echo \"rc=$?\"; cat < /proc/self/fd/{fd}; echo \"rc=$?\"");
 
-		let (_, output) = time::timeout(
+		let (_, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(&command, None, None, CancelToken::default()),
+			&command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("closed descriptor paths should fail fast");
@@ -6616,9 +6630,12 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn process_substitution_operands_keep_the_shell_fd_name() {
 		let command = "wc -l <(printf 'a\\nb\\n'); ls <(true); sed -n -f <(echo p) <<< from-sed";
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(command, None, None, CancelToken::default()),
+			command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("process substitution should not hang");
@@ -6639,9 +6656,12 @@ mod tests {
 			 's/c/d/w /dev/stdout'",
 			dir.display()
 		);
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(&command, None, None, CancelToken::default()),
+			&command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("sed should not hang");
@@ -6658,9 +6678,12 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn descriptor_paths_keep_their_spelling() {
 		let command = "pgrep -F /dev/fd/9; sed 'w /dev/fd/9' <<< x; readlink /dev/stdin <<< x";
-		let (_, output) = time::timeout(
+		let (_, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(command, None, None, CancelToken::default()),
+			command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("closed descriptor paths should fail fast");
