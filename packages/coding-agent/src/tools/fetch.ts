@@ -547,6 +547,79 @@ function stripDataUriImages(markdown: string): string {
 	return markdown.replace(DATA_URI_IMAGE_RE, (_match, alt: string) => (alt.trim() ? `![${alt}]` : ""));
 }
 
+/**
+ * `<meta>` names and properties, as the page writes them in any letter case, whose front-matter
+ * line is worth its tokens to a reader; Open Graph, Twitter Card, viewport and verification tags
+ * are not.
+ */
+const READER_META_NAMES: Record<string, true> = {
+	description: true,
+	author: true,
+	"article:published_time": true,
+	"article:modified_time": true,
+};
+
+/** The key of a front-matter line: a plain YAML scalar, which holds no `: `, or a double-quoted one. */
+const FRONT_MATTER_KEY_RE = /^(?:("(?:\\.|[^\\"])*")|([^"][^\n]*?)): /;
+
+/** Omitted `<meta>` names the front matter lists by name; the rest are counted. */
+const MAX_OMITTED_META_NAMES = 25;
+
+/** Reader output at or under this many characters is no rendering of the page. */
+const MIN_RENDERED_CHARS = 100;
+
+/**
+ * The native converter's markdown without the front-matter lines of `<meta>` tags outside
+ * {@link READER_META_NAMES}. The converter opens with the page's head as a `---` block, one
+ * `key: value` line each, keys and values escaped onto it as YAML scalars (a `<meta>` tag's key is
+ * `meta-` and its name as written); the title, canonical and base lines stay. A `meta_omitted`
+ * line names the tags left out, so a task about the page's own metadata sees which ones the page
+ * has and where to read their values. A page whose only content is its `<head>` can fall under
+ * the length check once pruned; it is returned whole.
+ */
+function pruneFrontMatter(markdown: string): string {
+	if (!markdown.startsWith("---\n")) return markdown;
+	const end = markdown.indexOf("\n---\n", 3);
+	if (end < 0) return markdown;
+	const lines = markdown.slice(4, end).split("\n");
+	const kept: string[] = [];
+	const omitted: string[] = [];
+	for (const line of lines) {
+		const key = FRONT_MATTER_KEY_RE.exec(line);
+		// No front matter: the body opens with a `---` rule.
+		if (!key) return markdown;
+		let name: string;
+		try {
+			// The converter's double-quoted escapes are JSON's.
+			name = key[1] === undefined ? key[2] : JSON.parse(key[1]);
+		} catch {
+			return markdown;
+		}
+		if (!name.startsWith("meta-") || Object.hasOwn(READER_META_NAMES, name.slice(5).toLowerCase())) {
+			kept.push(line);
+		} else {
+			omitted.push(name.slice(5));
+		}
+	}
+	if (omitted.length === 0) return markdown;
+	const rest = markdown.slice(end);
+	const pruned = kept.length > 0 ? `---\n${kept.join("\n")}${rest}` : rest.slice("\n---\n".length);
+	if (stripDataUriImages(pruned).trim().length <= MIN_RENDERED_CHARS) return markdown;
+	// A name that is empty, or holds the list's separators or a quote, is written quoted.
+	const names = omitted
+		.slice(0, MAX_OMITTED_META_NAMES)
+		.map(name => (/^$|[,;"]/.test(name) ? JSON.stringify(name) : name));
+	const more = omitted.length - names.length;
+	const note = `${names.join(", ")}${more > 0 ? ` (+${more} more)` : ""}; read the URL with :raw for their values`;
+	// A JSON string is a YAML double-quoted scalar once the characters YAML reads as line breaks are escaped.
+	const value = JSON.stringify(note).replace(
+		/[\u0085\u2028\u2029]/g,
+		c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+	);
+	kept.push(`meta_omitted: ${value}`);
+	return `---\n${kept.join("\n")}${rest}`;
+}
+
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */
 export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "firecrawl" | "jina";
 
@@ -671,7 +744,7 @@ export async function renderHtmlToText(
 			const rendered = await runners[method]();
 			if (!rendered) continue;
 			const content = stripDataUriImages(rendered);
-			if (content.trim().length <= 100) continue;
+			if (content.trim().length <= MIN_RENDERED_CHARS) continue;
 			if (!isLowQualityOutput(content, method)) {
 				return { content, ok: true, method };
 			}
@@ -1553,7 +1626,10 @@ async function renderUrl(
 			notes.push("Page appears to require JavaScript or is mostly navigation");
 		}
 
-		const output = finalizeOutput(htmlResult.content);
+		// Every check above judged the rendering whole; only the copy returned is pruned.
+		const output = finalizeOutput(
+			htmlResult.method === "native" ? pruneFrontMatter(htmlResult.content) : htmlResult.content,
+		);
 		return {
 			url,
 			finalUrl,
