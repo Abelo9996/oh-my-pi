@@ -386,9 +386,7 @@ static ESCAPE_STOPS: LazyLock<Mutex<HashMap<String, Arc<AtomicU32>>>> =
 
 /// The shared count for `key`; a session without a key counts alone.
 pub(crate) fn escape_stop_counter(key: Option<&str>) -> Arc<AtomicU32> {
-	key.map_or_default(|key| {
-		Arc::clone(ESCAPE_STOPS.lock().entry(key.to_owned()).or_default())
-	})
+	key.map_or_default(|key| Arc::clone(ESCAPE_STOPS.lock().entry(key.to_owned()).or_default()))
 }
 
 pub(crate) fn escape_stops(key: &str) -> u32 {

@@ -262,10 +262,7 @@ fn socket_address(path: &OsStr) -> io::Result<(libc::sockaddr_un, libc::socklen_
 /// shared relocation directory must additionally be a real directory owned by
 /// us with no group/other access.
 fn prepare_parent(path: &Path) -> Result<(), IpcError> {
-	let Some(parent) = path
-		.parent()
-		.filter(|parent| !parent.is_empty())
-	else {
+	let Some(parent) = path.parent().filter(|parent| !parent.is_empty()) else {
 		return Ok(());
 	};
 	let euid = euid();

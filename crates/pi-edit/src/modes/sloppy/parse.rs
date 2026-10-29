@@ -286,7 +286,11 @@ fn flush_compiled(
 	}
 	let ir = match sections.last_mut() {
 		Some(section) => &mut section.ir,
-		None => &mut sections.push_mut(CompiledSection { path: String::new(), ir: Vec::new() }).ir,
+		None => {
+			&mut sections
+				.push_mut(CompiledSection { path: String::new(), ir: Vec::new() })
+				.ir
+		},
 	};
 	ir.push(format!("{OPENER}{}", if all { "*" } else { "" }));
 	if let Some(RewriteBody { lines, insert: Some(at) }) = &put {

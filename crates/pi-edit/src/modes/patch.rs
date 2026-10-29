@@ -237,7 +237,12 @@ fn adjust_lines_indentation(
 		if consistent && !samples.is_empty() {
 			let (width, offset) = if samples.len() == 1 {
 				let (&tabs, &spaces) = samples.first_key_value().unwrap();
-				(spaces.checked_div(tabs).filter(|_| spaces.is_multiple_of(tabs)), 0_isize)
+				(
+					spaces
+						.checked_div(tabs)
+						.filter(|_| spaces.is_multiple_of(tabs)),
+					0_isize,
+				)
 			} else {
 				let mut values = samples.iter();
 				let (&tabs_a, &spaces_a) = values.next().unwrap();
@@ -1481,9 +1486,7 @@ fn stage_from_parts(
 	move_to: Option<Resolved>,
 	use_new_encoding: bool,
 ) -> Result<StagedFile, EditError> {
-	let before = read
-		.as_ref()
-		.map_or_default(|value| value.text.clone());
+	let before = read.as_ref().map_or_default(|value| value.text.clone());
 	let comparison_after = after.as_deref().unwrap_or("");
 	let source_path = move_to
 		.as_ref()
@@ -1828,9 +1831,7 @@ impl ModeEngine for PatchEngine {
 			Err(err) if err.is_invalid_utf8() && !needs_content => (None, true),
 			Err(err) => return Err(err),
 		};
-		let initial_before = initial
-			.as_ref()
-			.map_or_default(|read| read.text.clone());
+		let initial_before = initial.as_ref().map_or_default(|read| read.text.clone());
 		let mut current = initial_before;
 		let mut exists = initially_existed;
 		let mut final_op = FileOp::Update;

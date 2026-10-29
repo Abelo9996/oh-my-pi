@@ -191,7 +191,9 @@ mod imp {
 	/// Not following preserves symlink timestamps instead of mutating the link
 	/// target.
 	fn set_times_nofollow(path: &Path, meta: &fs::Metadata) -> std::io::Result<()> {
-		let times = FileTimes::new().set_accessed(meta.accessed()?).set_modified(meta.modified()?);
+		let times = FileTimes::new()
+			.set_accessed(meta.accessed()?)
+			.set_modified(meta.modified()?);
 		fs::set_times_nofollow(path, times)
 	}
 }

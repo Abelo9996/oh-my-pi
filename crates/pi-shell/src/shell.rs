@@ -911,8 +911,9 @@ async fn create_session_for_run(
 	// implementations that run without spawning a process and resolve paths
 	// against the shell working directory. The whole set can be disabled
 	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
-	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`, `rsync`) additionally honors
-	// PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
+	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`, `rsync`) additionally
+	// honors PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own
+	// switches.
 	if !env_flag(config, "PI_DISABLE_UUTILS_BUILTINS") {
 		let destructive_disabled = env_flag(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
 		let rm_disabled = destructive_disabled || env_flag(config, "PI_DISABLE_RM_BUILTIN");

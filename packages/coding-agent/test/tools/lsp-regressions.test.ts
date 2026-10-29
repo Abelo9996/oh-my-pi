@@ -7,6 +7,7 @@ import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-co
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { drive } from "../helpers/fake-clock";
 import { rejectionOf, trackUnhandled } from "../helpers/rejection";
 import { restoreEnvValue } from "../helpers/settings-test-state";
 import { createLspWritethrough, LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
@@ -1342,15 +1343,22 @@ describe("lsp regressions", () => {
 			await openDocument(client, "next.ts");
 
 			const tool = new LspTool(makeLspSession(tempDir.path()));
-			await tool.execute("code-actions-late-push", {
-				action: "code_actions",
-				file: targetPath,
-				line: 1,
-				timeout: 10,
-			});
+			// The late report never becomes fresh, so the diagnostics wait spends its whole
+			// budget; the frozen clock is advanced through it instead of waiting it out.
+			vi.useFakeTimers();
+			await drive(
+				tool.execute("code-actions-late-push", {
+					action: "code_actions",
+					file: targetPath,
+					line: 1,
+					timeout: 10,
+				}),
+			);
+			vi.useRealTimers();
 
 			expect(contextDiagnostics).toBe(0);
 		} finally {
+			vi.useRealTimers();
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -2843,16 +2851,23 @@ describe("lsp regressions", () => {
 			});
 			const write = createLspWritethrough(cwd, { enableDiagnostics: true });
 
-			await write(first, "int first() { return 0; }\n", undefined, undefined, { id: "batch", flush: false });
-			const result = await write(second, "int second() { return 0; }\n", undefined, undefined, {
-				id: "batch",
-				flush: true,
-			});
+			// The compiler never reports on the second file, so its wait spends the whole
+			// budget; the frozen clock is advanced through it instead of waiting it out.
+			vi.useFakeTimers();
+			await drive(write(first, "int first() { return 0; }\n", undefined, undefined, { id: "batch", flush: false }));
+			const result = await drive(
+				write(second, "int second() { return 0; }\n", undefined, undefined, {
+					id: "batch",
+					flush: true,
+				}),
+			);
+			vi.useRealTimers();
 
 			expect(result.diagnostics?.unreported).toEqual(["compiler"]);
 			expect(result.diagnostics?.summary).toContain("no diagnostics report yet from compiler");
 			expect(result.diagnostics?.summary).not.toContain("no issues");
 		} finally {
+			vi.useRealTimers();
 			configCache.delete(cwd);
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
@@ -3295,18 +3310,25 @@ describe("lsp regressions", () => {
 					servers: { "rust-analyzer": { command: "fake-lsp", fileTypes: ["rs"], rootMarkers: [] } },
 				});
 
+				// Each file's pull stays unanswered until its batch wait's deadline, which the
+				// frozen clock is advanced through instead of waiting it out.
+				vi.useFakeTimers();
 				const output = textResult(
-					await new LspTool(makeLspSession(cwd)).execute("pull-unanswered", {
-						action: "diagnostics",
-						file: "*.rs",
-						timeout: 5,
-					}),
+					await drive(
+						new LspTool(makeLspSession(cwd)).execute("pull-unanswered", {
+							action: "diagnostics",
+							file: "*.rs",
+							timeout: 5,
+						}),
+					),
 				);
+				vi.useRealTimers();
 
 				expect(output).toContain("lib.rs: no diagnostics report yet from rust-analyzer");
 				expect(output).toContain("main.rs: no diagnostics report yet from rust-analyzer");
 				expect(output).not.toContain("failed");
 			} finally {
+				vi.useRealTimers();
 				configCache.delete(cwd);
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
@@ -3334,6 +3356,10 @@ describe("lsp regressions", () => {
 			installFakeLsp((message, server) => {
 				if (message.method === "initialize") {
 					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { diagnosticProvider: true } } });
+					// The project is loaded: diagnostics need not wait out the no-progress fallback.
+					for (const kind of ["begin", "end"]) {
+						server.send({ jsonrpc: "2.0", method: "$/progress", params: { token: "load", value: { kind } } });
+					}
 				} else if (documentUri(message.params) === dependencyUri) {
 					if (message.method === "textDocument/didOpen") {
 						const doc = piUtils.isRecord(message.params) ? message.params.textDocument : undefined;
@@ -6378,15 +6404,19 @@ describe("lsp regressions", () => {
 
 			const newServer = installHandshakeLsp();
 			const newConfig: ServerConfig = { ...oldConfig, args: ["--mode", "new"] };
-			await expect(lspClient.shutdownStaleClients(tempDir.path(), [newConfig])).rejects.toThrow(
+			// The old process outlives both exit waits; the frozen clock is advanced through them.
+			vi.useFakeTimers();
+			await expect(drive(lspClient.shutdownStaleClients(tempDir.path(), [newConfig]))).rejects.toThrow(
 				"Failed to stop LSP server(s) with superseded configuration",
 			);
+			vi.useRealTimers();
 			await expect(lspClient.getOrCreateClient(newConfig, tempDir.path(), 1_000)).rejects.toThrow(
 				"Failed to stop LSP server(s) with superseded configuration",
 			);
 			expect(newServer.spawnCount).toBe(0);
 			oldServer.exit(0);
 		} finally {
+			vi.useRealTimers();
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -6916,7 +6946,10 @@ describe("lsp regressions", () => {
 				const config: ServerConfig = { command: "fake-teardown-delayed", fileTypes: [".ts"], rootMarkers: [] };
 				const client = await lspClient.getOrCreateClient(config, tempDir.path());
 
-				const exited = await lspClient.shutdownClientInstance(client);
+				// The process outlives both exit waits; the frozen clock is advanced through them.
+				vi.useFakeTimers();
+				const exited = await drive(lspClient.shutdownClientInstance(client));
+				vi.useRealTimers();
 				expect(exited).toBe(false);
 				expect(lspClient.getActiveClients().some(s => s.name === config.command)).toBe(true);
 
@@ -6924,6 +6957,7 @@ describe("lsp regressions", () => {
 				await Bun.sleep(0);
 				expect(lspClient.getActiveClients().some(s => s.name === config.command)).toBe(false);
 			} finally {
+				vi.useRealTimers();
 				vi.restoreAllMocks();
 				tempDir.removeSync();
 			}

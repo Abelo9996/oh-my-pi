@@ -519,9 +519,7 @@ pub(crate) fn parts(path: &Path) -> Vec<Part> {
 	for component in path.components() {
 		match component {
 			Component::Prefix(_) | Component::RootDir => {
-				root
-					.get_or_insert_default()
-					.push(component.as_os_str());
+				root.get_or_insert_default().push(component.as_os_str());
 				continue;
 			},
 			_ => {},

@@ -456,6 +456,9 @@ describe("LspMuxServer", () => {
 		const firstClosed = first.client.waitForClose();
 		first.client.destroy();
 		await firstClosed;
+		// The client sees its own close at once; the mux detaches the session (and queues its orphan
+		// closes) only once it reads that close from the socket. A link before that finds the server busy.
+		await pollUntil(() => Promise.resolve(server.sessionCount === 0), "first session close");
 
 		const second = await link();
 		expect(second.connected.spawned).toBe(false);

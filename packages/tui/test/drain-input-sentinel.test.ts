@@ -41,9 +41,9 @@ describe("ProcessTerminal exit drain", () => {
 			drained = true;
 		});
 		expect(sentinels(harness.writes)).toBe(1);
-		// Real time: the drain measures its idle window with Date.now() and
-		// setTimeout, and the contract is that it outlasts that window.
-		await Bun.sleep(120);
+		// The drain measures its idle window with Date.now() and setTimeout, both on
+		// the harness's fake clock; the contract is that it outlasts that window.
+		await harness.elapse(120);
 		expect(drained).toBe(false);
 
 		await harness.feed('\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":9}\x1b\\', DA1_REPLY);

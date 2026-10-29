@@ -527,7 +527,10 @@ fn parse_hunk_header(line: &str) -> Option<(BlockTarget, bool)> {
 }
 
 fn unquote_path(raw: &str) -> Option<String> {
-	if let Some(inner) = raw.strip_circumfix('"', '"').or_else(|| raw.strip_circumfix('\'', '\'')) {
+	if let Some(inner) = raw
+		.strip_circumfix('"', '"')
+		.or_else(|| raw.strip_circumfix('\'', '\''))
+	{
 		return Some(inner.to_string());
 	}
 	if raw.starts_with('"') || raw.starts_with('\'') {

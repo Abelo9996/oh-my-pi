@@ -434,9 +434,15 @@ impl Rle<'_> {
 				}
 			}
 			let size = self.remaining.min(output.len() as u64) as usize;
-			let chunk = output.split_off_mut(..size).expect("size is at most output.len()");
+			let chunk = output
+				.split_off_mut(..size)
+				.expect("size is at most output.len()");
 			if !self.zeros {
-				let add = self.code.inner.split_off(..size).expect("run is within the RLE code");
+				let add = self
+					.code
+					.inner
+					.split_off(..size)
+					.expect("run is within the RLE code");
 				for (byte, delta) in chunk.iter_mut().zip(add) {
 					*byte = byte.wrapping_add(*delta);
 				}

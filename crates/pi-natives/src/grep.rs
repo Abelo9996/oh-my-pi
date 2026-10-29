@@ -1782,10 +1782,9 @@ fn process_candidates<M: Matcher + Sync>(
 
 	// Partition oversized-by-hint files out of pass 1 up front; files without a
 	// size hint stay in pass 1 and are deferred at read time if oversized.
-	let (normal, oversized_hinted): (Vec<_>, Vec<_>) =
-		candidates
-			.into_iter()
-			.partition(|file| file_size_hint(file.size).is_none_or(|size| size <= MAX_FILE_BYTES));
+	let (normal, oversized_hinted): (Vec<_>, Vec<_>) = candidates
+		.into_iter()
+		.partition(|file| file_size_hint(file.size).is_none_or(|size| size <= MAX_FILE_BYTES));
 	if !oversized_hinted.is_empty() {
 		state.deferred.lock().extend(oversized_hinted);
 	}

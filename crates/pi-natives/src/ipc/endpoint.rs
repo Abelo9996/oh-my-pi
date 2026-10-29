@@ -96,7 +96,9 @@ pub fn resolve_dir(dir: &str) -> String {
 			Component::RootDir | Component::CurDir | Component::Prefix(_) => {},
 		}
 	}
-	resolved.into_string().unwrap_or_else(|raw| raw.to_string_lossy().into_owned())
+	resolved
+		.into_string()
+		.unwrap_or_else(|raw| raw.to_string_lossy().into_owned())
 }
 
 /// Lexically absolute, normalized form of `dir` (like Node's `path.resolve`).
@@ -108,8 +110,9 @@ pub fn resolve_dir(dir: &str) -> String {
 		Path::new(dir)
 	};
 	let resolved = path::absolute(target).unwrap_or_else(|_| target.to_path_buf());
-	let mut text =
-		resolved.into_string().unwrap_or_else(|raw| raw.to_string_lossy().into_owned());
+	let mut text = resolved
+		.into_string()
+		.unwrap_or_else(|raw| raw.to_string_lossy().into_owned());
 	// `GetFullPathNameW` keeps a trailing separator; `path.resolve` drops it
 	// except on a drive root such as `C:\`.
 	while text.len() > 3 && text.ends_with(['\\', '/']) {

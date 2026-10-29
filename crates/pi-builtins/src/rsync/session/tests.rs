@@ -213,6 +213,60 @@ fn url_spelled_remote_operand_reaches_the_shell() {
 	assert_eq!(fs::read(dir.path().join("d1/file")).unwrap(), b"hi\n");
 }
 
+/// Parses "sent X bytes  received Y bytes" (commas allowed) from a line.
+fn sent_received(line: &str) -> (i64, i64) {
+	let num = |word: &str| word.replace(',', "").parse::<i64>().unwrap();
+	let words: Vec<&str> = line.split_whitespace().collect();
+	let at = |key: &str| words.iter().position(|w| *w == key).map(|i| num(words[i + 1])).unwrap();
+	(at("sent"), at("received"))
+}
+
+/// The --log-file exit line reports the live byte counters, which include the
+/// goodbye exchanged after the --stats snapshot. Captured from rsync 3.5.1 on
+/// a local protocol-33 copy: `--stats` says sent 300,244 / received 57, the log
+/// line of the same transfer says `sent 300249 bytes  received 74 bytes`, i.e.
+/// the sender's goodbye NDX_DONE frame (+5 sent) and the receiver's
+/// MSG_BLOCK_STATS + goodbye frames (+12 +5 received).
+#[test]
+fn log_file_exit_line_uses_live_counters() {
+	let dir = tempfile::tempdir().unwrap();
+	let src = dir.path().join("src");
+	fs::create_dir_all(&src).unwrap();
+	fs::write(src.join("a"), (0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8).collect::<Vec<u8>>()).unwrap();
+	fs::write(src.join("b"), b"hi\n").unwrap();
+	let (code, out, err) = run(&["-a", "--stats", "src/", "d1/"], dir.path());
+	assert_eq!((code, err.as_str()), (0, ""), "{out}");
+	let summary = out.lines().find(|l| l.starts_with("sent ")).unwrap();
+	let (sent, received) = sent_received(summary);
+	let (code, _, err) = run(&["-a", "--log-file=r.log", "src/", "d2/"], dir.path());
+	assert_eq!((code, err.as_str()), (0, ""));
+	let log = fs::read_to_string(dir.path().join("r.log")).unwrap();
+	let exit_line = log.lines().find(|l| l.contains("] sent ") && l.ends_with(" total size 300003")).unwrap();
+	assert_eq!(sent_received(exit_line), (sent + 5, received + 17), "{log}");
+
+	// A pull from the reference server: the client's whole connection through
+	// the final goodbye. Captured from rsync 3.5.1 pulling 300,000 bytes the
+	// same way: --stats sent 46 / received 300,184, log line `sent 51 bytes
+	// received 300212 bytes  total size 300000` (+5 sent, +28 received).
+	#[cfg(unix)]
+	{
+		let Some(rsync) = reference() else { return };
+		let rsh = fake_rsh(dir.path());
+		let rsh = rsh.to_str().unwrap();
+		let rpath = format!("--rsync-path={}", rsync.display());
+		let source = format!("h:{}/src/", dir.path().display());
+		let (code, out, err) = run(&["-a", "--stats", "-e", rsh, &rpath, &source, "p1/"], dir.path());
+		assert_eq!((code, err.as_str()), (0, ""), "{out}");
+		let summary = out.lines().find(|l| l.starts_with("sent ")).unwrap();
+		let (sent, received) = sent_received(summary);
+		let (code, _, err) = run(&["-a", "--log-file=p.log", "-e", rsh, &rpath, &source, "p2/"], dir.path());
+		assert_eq!((code, err.as_str()), (0, ""));
+		let log = fs::read_to_string(dir.path().join("p.log")).unwrap();
+		let exit_line = log.lines().find(|l| l.contains("] sent ") && l.ends_with(" total size 300003")).unwrap();
+		assert_eq!(sent_received(exit_line), (sent + 5, received + 28), "{log}");
+	}
+}
+
 /// A server's stdio may be O_NONBLOCK: EAGAIN is retried, not fatal.
 #[test]
 fn shared_writer_retries_would_block() {

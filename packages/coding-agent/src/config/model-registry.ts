@@ -26,7 +26,11 @@ import {
 	resolveMaxContextWindow,
 } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
-import { getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import {
+	getModelCacheWriteStats,
+	readModelCache,
+	retainModelCacheConnection,
+} from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
 	fingerprintStaticModels,
@@ -1353,6 +1357,7 @@ export class ModelRegistry {
 	} {
 		const modelsByProvider = new Map<string, Model<Api>[]>();
 		const authoritativeFreshProviders = new Set<string>();
+		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerId of providerIds) {
 			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
@@ -1522,6 +1527,7 @@ export class ModelRegistry {
 
 	#loadCachedDiscoverableModels(): Model<Api>[] {
 		const cachedModels: Model<Api>[] = [];
+		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerConfig of this.#discoverableProviders) {
 			const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
@@ -1874,6 +1880,9 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
 	): Promise<void> {
+		// One cache connection for the whole pass: every provider manager reads
+		// (and may write) its row, which would otherwise reopen the database each time.
+		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const selectedDiscoverableProviders = (
 			providerFilter

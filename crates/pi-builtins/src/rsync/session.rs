@@ -1696,6 +1696,9 @@ impl ClientRun<'_> {
 			let elapsed = outcome.end.map(|end| end.saturating_duration_since(start));
 			logger.with_role(outcome.role).output_summary(&stats, neg.proto.version, elapsed, opts.dry_run, opts.write_batch < 0);
 		}
+		// The log-file exit line (log_exit) reports the live counters, which
+		// include the goodbye exchanged after handle_stats took its snapshot.
+		let stats = live_totals(stats, &outcome.ctx.counters);
 		let (code, role) = if cancelled {
 			let err = RsyncError::cancelled();
 			let role = failure.as_ref().map_or(outcome.role, |f| f.role);
@@ -2083,7 +2086,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	}
 	let failure = lock(&shared.first).take();
 	let (io_error, stats, site) = match &outcome {
-		Some(o) => (o.ctx.io_error.load(Ordering::Relaxed), lock(&o.ctx.stats).clone(), o.site),
+		Some(o) => (o.ctx.io_error.load(Ordering::Relaxed), live_totals(lock(&o.ctx.stats).clone(), &o.ctx.counters), o.site),
 		None => (0, Stats::default(), None),
 	};
 	let end_role = failure.as_ref().map_or_else(|| outcome.as_ref().map_or(role, |o| o.role), |f| f.role);
@@ -2121,6 +2124,14 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	logger.flush();
 	*lock(&sink_writer) = None;
 	code
+}
+
+/// `stats` with the connection's byte counters as they stand now (upstream's
+/// `stats.total_read` / `stats.total_written`, which log_exit prints).
+fn live_totals(mut stats: Stats, counters: &IoCounters) -> Stats {
+	stats.total_read = i64::try_from(counters.total_read()).unwrap_or(i64::MAX);
+	stats.total_written = i64::try_from(counters.total_written()).unwrap_or(i64::MAX);
+	stats
 }
 
 /// The local server half after its client stopped it (upstream's SIGUSR1 to

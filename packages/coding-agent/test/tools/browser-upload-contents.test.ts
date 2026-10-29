@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,6 +8,7 @@ import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { findFreeCdpPort, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { prepareElementUpload } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { resolveOpTimeouts } from "@oh-my-pi/pi-coding-agent/tools/browser/op-timeouts";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import {
 	openUploadSource,
@@ -83,11 +84,8 @@ interface ProxyOptions {
 	maxMessageBytes?: number;
 	/** Answer `DOM.setFileInputFiles` with `Not allowed`, as Chrome does for a relay without file-URL access. */
 	denyFilePaths?: boolean;
-	/**
-	 * Hold each message over 1 MiB this long before forwarding it, as a slow link would. A real delay: the deadline under
-	 * test runs on the tab worker's own clock, which fake timers here cannot reach.
-	 */
-	holdLargeMs?: number;
+	/** Hold each message over 1 MiB, as a slow link would: `held` fires as one arrives, and it moves on at `release`. */
+	holdLarge?: { held(): void; release: Promise<void> };
 }
 
 interface ProxiedSocket {
@@ -141,8 +139,9 @@ function startCdpProxy(chromePort: number, options: ProxyOptions): CdpProxy {
 							return;
 						}
 					}
-				} else if (options.holdLargeMs) {
-					await Bun.sleep(options.holdLargeMs);
+				} else if (options.holdLarge) {
+					options.holdLarge.held();
+					await options.holdLarge.release;
 				}
 				const { upstream } = ws.data;
 				if (upstream?.readyState === WebSocket.OPEN) upstream.send(message);
@@ -471,14 +470,15 @@ return { errors, dropped: await tab.evaluate(() => window.dropped.map(file => fi
 	}, 60_000);
 
 	test("streams contents in messages under the link's cap", async () => {
-		const maxMessageBytes = 16 * 1024 * 1024;
+		// Just over one base64-encoded 8 MiB chunk, so a whole file in one message would not fit.
+		const maxMessageBytes = 11 * 1024 * 1024;
 		const { run, close } = await openConnectedTab("browser-upload-capped", {
 			proxy: routeProxy("contents", { maxMessageBytes }),
 		});
 		try {
 			// Base64 in a single message would come to 4/3 of the file, over the cap.
 			const digest = await writeRandomFile(path.join(tempDir, "large.bin"), maxMessageBytes);
-			// Three 16 MiB uploads: the budget covers slow hosts, since this checks chunking, not throughput.
+			// Three 11 MiB uploads: the budget covers slow hosts, since this checks chunking, not throughput.
 			const errors = await run(
 				collectErrors(`() => tab.uploadFile("#direct", "large.bin"),
 	() => tab.uploadFile("#trigger", "large.bin"),
@@ -493,25 +493,45 @@ return { errors, dropped: await tab.evaluate(() => window.dropped.map(file => fi
 	}, 120_000);
 
 	test("gives streaming contents the cell's budget, not the action deadline", async () => {
-		// Each chunk takes longer than the 8 s action deadline to arrive; finding the target does not.
+		// The chunk is still on its way when the action deadline passes; finding the target is not.
+		const cellSeconds = 30;
+		const { actionOpMs } = resolveOpTimeouts(cellSeconds * 1000);
+		const chunkHeld = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		// An inline tab worker runs in this process, so its deadlines are the action-sized `AbortSignal.timeout`s
+		// below; worker threads failing to start is what puts a tab on one.
+		const workerThreads = vi.spyOn(globalThis, "Worker").mockImplementation((() => {
+			throw new Error("Worker threads unavailable");
+		}) as never);
 		const { run, close } = await openConnectedTab("browser-upload-slow", {
-			proxy: routeProxy("contents", { holdLargeMs: 9_000 }),
+			proxy: routeProxy("contents", { holdLarge: { held: chunkHeld.resolve, release: release.promise } }),
+		}).finally(() => workerThreads.mockRestore());
+		const actionDeadlines: AbortController[] = [];
+		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+			if (ms !== actionOpMs) return realTimeout(ms);
+			const deadline = new AbortController();
+			actionDeadlines.push(deadline);
+			return deadline.signal;
 		});
 		try {
 			const digest = await writeRandomFile(path.join(tempDir, "slow.bin"), 2 * 1024 * 1024);
-			const outcome = await run(
-				`const started = Date.now();
-${collectErrors(`() => tab.uploadFile("#direct", "slow.bin"),`).replace("return errors;", "return { errors, ms: Date.now() - started };")}`,
-				30,
-			);
-			const { errors, ms } = outcome as { errors: string[]; ms: number };
-			expect(errors).toEqual([]);
-			expect(ms).toBeGreaterThan(8_000);
+			const uploading = run(collectErrors(`() => tab.uploadFile("#direct", "slow.bin"),`), cellSeconds);
+			await chunkHeld.promise;
+			// Every action deadline the upload started runs out while its chunk is held.
+			expect(actionDeadlines.length).toBeGreaterThan(0);
+			for (const deadline of actionDeadlines)
+				deadline.abort(new DOMException("The operation timed out.", "TimeoutError"));
+			release.resolve();
+			expect(await uploading).toEqual([]);
+			vi.restoreAllMocks();
 			const received = await run(
 				`return await tab.evaluate(async () => [...new Uint8Array(await crypto.subtle.digest("SHA-256", await document.querySelector("#direct").files[0].arrayBuffer()))].map(byte => byte.toString(16).padStart(2, "0")).join(""));`,
 			);
 			expect(received).toBe(digest);
 		} finally {
+			vi.restoreAllMocks();
+			release.resolve();
 			await close();
 		}
 	}, 60_000);

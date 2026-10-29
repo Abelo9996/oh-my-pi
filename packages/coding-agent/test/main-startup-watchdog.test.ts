@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+
+// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
+afterEach(() => {
+	clearOmpExtensionCliRoots();
+});
 
 describe("startup watchdog under test runner", () => {
 	afterEach(() => {

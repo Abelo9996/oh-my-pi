@@ -1956,7 +1956,9 @@ fn refuse_drag_source(
 ) -> CoreResult<()> {
 	let (x, y) = match event {
 		PointerEvent::Hold { x, y, button: MouseButton::Left, .. } => (*x, *y),
-		PointerEvent::Drag { path, button: MouseButton::Left, .. } if let Some(&start) = path.first() => {
+		PointerEvent::Drag { path, button: MouseButton::Left, .. }
+			if let Some(&start) = path.first() =>
+		{
 			start
 		},
 		_ => return Ok(()),
@@ -6840,39 +6842,40 @@ mod tests {
 
 	#[test]
 	fn held_keys_need_the_proof_typing_needs_whatever_the_button() {
-		let ready = |button, holds_keys, in_overlay, conflict: Option<KeyboardConflict>, proven| {
-			let steps = std::cell::RefCell::new(Vec::new());
-			let result = ready_press(
-				42,
-				button,
-				holds_keys,
-				in_overlay,
-				|| conflict,
-				|in_overlay| {
-					steps
-						.borrow_mut()
-						.push(format!("make key, overlay {in_overlay}"));
-					Ok(true)
-				},
-				|| {
-					steps.borrow_mut().push("await key".to_string());
-					Ok(())
-				},
-				|seen| {
-					steps.borrow_mut().push(format!("prove keys {seen:?}"));
-					proven.ok_or_else(|| {
-						DesktopError::invalid_target("a sheet attached to window 42 has focus")
-					})
-				},
-				|| Ok(()),
-			);
-			(
-				result
-					.map(|proof| proof.is_some())
-					.map_err(|error| error.code.as_str()),
-				steps.into_inner(),
-			)
-		};
+		let ready =
+			|button, holds_keys, in_overlay, conflict: Option<KeyboardConflict>, proven: bool| {
+				let steps = std::cell::RefCell::new(Vec::new());
+				let result = ready_press(
+					42,
+					button,
+					holds_keys,
+					in_overlay,
+					|| conflict,
+					|in_overlay| {
+						steps
+							.borrow_mut()
+							.push(format!("make key, overlay {in_overlay}"));
+						Ok(true)
+					},
+					|| {
+						steps.borrow_mut().push("await key".to_string());
+						Ok(())
+					},
+					|seen| {
+						steps.borrow_mut().push(format!("prove keys {seen:?}"));
+						proven.ok_or_else(|| {
+							DesktopError::invalid_target("a sheet attached to window 42 has focus")
+						})
+					},
+					|| Ok(()),
+				);
+				(
+					result
+						.map(|proof| proof.is_some())
+						.map_err(|error| error.code.as_str()),
+					steps.into_inner(),
+				)
+			};
 		let made = "make key, overlay false".to_string();
 		// A right or middle press without keys needs no key window.
 		assert_eq!(ready(MouseButton::Right, false, false, None, false), (Ok(false), Vec::new()));

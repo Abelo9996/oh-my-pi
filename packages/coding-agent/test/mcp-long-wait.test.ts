@@ -12,20 +12,16 @@
  * than the POST — so the cancellation paths are pinned here alongside the wait.
  */
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
-import * as path from "node:path";
 import * as mcpTimeout from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import { LegacySseTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/sse";
+import { asGlobalFetch } from "./helpers/fetch-mock";
 
-const PROBE_PATH = path.join(import.meta.dir, "fixtures", "mcp-idle-wait-probe.ts");
-const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
-/** Whole seconds, per `BUN_CONFIG_HTTP_IDLE_TIMEOUT`; the probe stalls well past it. */
-const CHILD_IDLE_SECONDS = "1";
-/** Bounds a wedged child: the probe stalls 7s and the idle wheel is coarse. */
-const CHILD_KILL_MS = 45_000;
-/** Leaves room for the kill bound to be the thing that reports a wedged child. */
-const CHILD_TEST_MS = 60_000;
 const DEADLINE_MS = 200;
+/** The runtime's socket idle default: five minutes of silence ends a `fetch` that did not opt out. */
+const RUNTIME_IDLE_MS = 5 * 60_000;
+/** How long a long-poll server stays silent before it answers: past the idle default. */
+const SILENCE_MS = RUNTIME_IDLE_MS + 60_000;
 
 interface StallingServer {
 	server: Bun.Server<undefined>;
@@ -43,6 +39,7 @@ afterEach(() => {
 		server.stop(true);
 	}
 	stalled = [];
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
 
@@ -115,71 +112,203 @@ function pinDeadline(ms: number): void {
 	spyOn(mcpTimeout, "resolveMCPTimeoutMs").mockReturnValue(ms);
 }
 
-describe("MCP waits that outlast the socket idle timer", () => {
-	it(
-		"delivers the answer on every MCP transport after a silence past the runtime's idle default",
-		async () => {
-			// The idle default is per-process, so the boundary is shortened in a
-			// child rather than in this suite's environment.
-			const proc = Bun.spawn([process.execPath, PROBE_PATH], {
-				cwd: REPO_ROOT,
-				env: {
-					...process.env,
-					BUN_CONFIG_HTTP_IDLE_TIMEOUT: CHILD_IDLE_SECONDS,
-					// Pin the configuration under test so an inherited override
-					// cannot give the probe a deadline of its own.
-					OMP_MCP_TIMEOUT_MS: "0",
-				},
-				stdin: "ignore",
-				stdout: "pipe",
-				stderr: "pipe",
-			});
-			// Real timer on purpose: the subject is another process's socket clock,
-			// which fake timers cannot drive. Kill rather than only fail — a wedged
-			// child would otherwise outlive the test holding its port and sockets.
-			const watchdog = setTimeout(() => proc.kill(), CHILD_KILL_MS);
-			let stdout: string;
-			let stderr: string;
-			let exitCode: number;
+/**
+ * Stand in for the runtime's socket idle timer on the fake clock. The native
+ * timer runs on a socket clock no test can drive (and current Bun no longer
+ * lets a process shorten it), so `fetch` is wrapped with its contract: unless a
+ * request passes `timeout: false`, a silence of `RUNTIME_IDLE_MS` — before the
+ * response head or between body chunks — ends it with `TimeoutError`. Requests
+ * still travel over real sockets to a real server.
+ */
+function emulateRuntimeIdleTimer(): void {
+	const realFetch = globalThis.fetch;
+	vi.spyOn(globalThis, "fetch").mockImplementation(
+		asGlobalFetch(async (input, init) => {
+			if ((init as { timeout?: unknown } | undefined)?.timeout === false) return realFetch(input, init);
+			const idle = new AbortController();
+			let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+			let source: ReadableStreamDefaultReader<Uint8Array> | undefined;
+			let timer: NodeJS.Timeout | undefined;
+			const disarm = (): void => clearTimeout(timer);
+			const arm = (): void => {
+				disarm();
+				timer = setTimeout(() => {
+					const error = new DOMException("The operation timed out.", "TimeoutError");
+					idle.abort(error);
+					bodyController?.error(error);
+					source?.cancel(error).catch(() => undefined);
+				}, RUNTIME_IDLE_MS);
+			};
+			arm();
+			const signal = init?.signal ? AbortSignal.any([init.signal, idle.signal]) : idle.signal;
+			let response: Response;
 			try {
-				[stdout, stderr, exitCode] = await Promise.all([
-					new Response(proc.stdout).text(),
-					new Response(proc.stderr).text(),
-					proc.exited,
-				]);
-			} finally {
-				clearTimeout(watchdog);
-				proc.kill();
+				response = await realFetch(input, { ...init, signal });
+			} catch (error) {
+				disarm();
+				throw error;
 			}
-			expect(exitCode, stderr).toBe(0);
-			const probe = JSON.parse(stdout.trim().split("\n").at(-1) ?? "") as Record<string, unknown>;
-
-			// Bun 1.3 honours the shortened process default; Bun 1.4 currently
-			// ignores it. Accept only those two concrete control outcomes so the
-			// transport assertions remain portable without mistaking another
-			// control failure for proof of the regression.
-			const control = probe.control;
-			if (control && typeof control === "object" && "outcome" in control && control.outcome === "threw") {
-				expect(control).toMatchObject({ outcome: "threw", name: "TimeoutError" });
-			} else {
-				expect(control).toEqual({
-					outcome: "resolved",
-					result: { jsonrpc: "2.0", id: "control", result: { waited: true } },
-				});
+			if (!response.body) {
+				disarm();
+				return response;
 			}
+			arm();
+			const reader = response.body.getReader();
+			source = reader;
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					bodyController = controller;
+				},
+				async pull(controller) {
+					const chunk = await reader.read();
+					if (idle.signal.aborted) return;
+					if (chunk.done) {
+						disarm();
+						controller.close();
+						return;
+					}
+					arm();
+					controller.enqueue(chunk.value);
+				},
+				cancel(reason) {
+					disarm();
+					return reader.cancel(reason);
+				},
+			});
+			return new Response(body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers: response.headers,
+			});
+		}),
+	);
+}
 
-			// Both `mcpFetch` paths — plain, and the manual-redirect one an
-			// origin-locked server takes — outlive the silence.
-			expect(probe.unlocked).toEqual({ outcome: "resolved", result: { waited: true } });
-			expect(probe.originLocked).toEqual({ outcome: "resolved", result: { waited: true } });
+type Leg = { outcome: "resolved"; result: unknown } | { outcome: "threw"; name: string };
 
+async function leg(run: () => Promise<unknown>): Promise<Leg> {
+	try {
+		return { outcome: "resolved", result: await run() };
+	} catch (error) {
+		return { outcome: "threw", name: error instanceof Error ? error.name : typeof error };
+	}
+}
+
+/**
+ * A long-poll server that takes each call and then sends nothing for
+ * `SILENCE_MS` of fake time. Streamable HTTP calls are answered on their POST;
+ * legacy calls are accepted with `202` at once and answered over the `/sse`
+ * stream, whose last byte before the silence is the endpoint event.
+ */
+function longPollServer(expectedPosts: number) {
+	const encoder = new TextEncoder();
+	/** Armed on the fake clock, so only `vi.advanceTimersByTime` ends it. */
+	const silence = (): Promise<void> => {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, SILENCE_MS);
+		return promise;
+	};
+	const postsArrived = Promise.withResolvers<void>();
+	let posts = 0;
+	const legacyPosted = Promise.withResolvers<string | number>();
+	const server = Bun.serve({
+		port: 0,
+		// The client's idle timer is the subject; a server-side one would drop
+		// the socket first and prove nothing.
+		idleTimeout: 0,
+		async fetch(request) {
+			const { pathname } = new URL(request.url);
+			if (pathname === "/sse") {
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(encoder.encode("event: endpoint\ndata: /messages\n\n"));
+							void Promise.all([legacyPosted.promise, silence()]).then(([id]) => {
+								const answer = { jsonrpc: "2.0", id, result: { waited: true } };
+								try {
+									controller.enqueue(encoder.encode(`event: message\ndata: ${JSON.stringify(answer)}\n\n`));
+									controller.close();
+								} catch {
+									// The client gave up and cancelled the stream; nothing to send it.
+								}
+							});
+						},
+					}),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			}
+			const body = (await request.json()) as { id: string | number };
+			if (pathname === "/messages") {
+				legacyPosted.resolve(body.id);
+				return new Response(null, { status: 202 });
+			}
+			if (++posts === expectedPosts) postsArrived.resolve();
+			await silence();
+			return Response.json({ jsonrpc: "2.0", id: body.id, result: { waited: true } });
+		},
+	});
+	return { server, postsArrived: postsArrived.promise, legacyPosted: legacyPosted.promise };
+}
+
+describe("MCP waits that outlast the socket idle timer", () => {
+	it("delivers the answer on every MCP transport after a silence past the runtime's idle default", async () => {
+		vi.useFakeTimers();
+		emulateRuntimeIdleTimer();
+		// The configuration an operator reaches for when waits are long: no
+		// client-side MCP deadline at all.
+		pinDeadline(0);
+		// Three POSTs go silent before their head: the control, then both
+		// `mcpFetch` paths — plain, and the manual-redirect one an origin-locked
+		// server takes.
+		const { server, postsArrived, legacyPosted } = longPollServer(3);
+		const base = `http://127.0.0.1:${server.port}`;
+		const url = `${base}/mcp`;
+		const unlocked = new HttpTransport({ type: "http", url, timeout: 0 });
+		const originLocked = new HttpTransport({ type: "http", url, timeout: 0, headerPolicy: "origin-locked" });
+		const legacy = new LegacySseTransport({ type: "sse", url: `${base}/sse`, timeout: 0 });
+		try {
+			await Promise.all([unlocked.connect(), originLocked.connect(), legacy.connect()]);
+			const streamSilent = Promise.withResolvers<void>();
+			const legs = Promise.all([
+				// Bare fetches without the MCP fetch policy prove the silence
+				// crosses the idle boundary, before a response head and mid-stream.
+				leg(async () => {
+					const response = await fetch(url, {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ jsonrpc: "2.0", id: "control", method: "tools/call", params: {} }),
+					});
+					return await response.json();
+				}),
+				leg(async () => {
+					const reader = (await fetch(`${base}/sse`)).body!.getReader();
+					await reader.read();
+					streamSilent.resolve();
+					while (!(await reader.read()).done) {}
+					return "closed";
+				}),
+				leg(() => unlocked.request("tools/call")),
+				leg(() => originLocked.request("tools/call")),
+				leg(() => legacy.request("tools/call")),
+			]);
+			// Every wait has reached its silence before any time passes.
+			await Promise.all([postsArrived, legacyPosted, streamSilent.promise]);
+			vi.advanceTimersByTime(SILENCE_MS);
+			const [control, controlStream, plain, locked, sse] = await legs;
+
+			expect(control).toEqual({ outcome: "threw", name: "TimeoutError" });
+			expect(controlStream).toEqual({ outcome: "threw", name: "TimeoutError" });
+			expect(plain).toEqual({ outcome: "resolved", result: { waited: true } });
+			expect(locked).toEqual({ outcome: "resolved", result: { waited: true } });
 			// The legacy transport puts the silence on its GET stream while the
 			// POST returns `202` at once, so a healthy-looking POST is no evidence
 			// the answer will ever arrive. It must survive the same silence.
-			expect(probe.legacySse).toEqual({ outcome: "resolved", result: { waited: true } });
-		},
-		CHILD_TEST_MS,
-	);
+			expect(sse).toEqual({ outcome: "resolved", result: { waited: true } });
+		} finally {
+			await Promise.all([unlocked.close(), originLocked.close(), legacy.close()]);
+			server.stop(true);
+		}
+	});
 
 	it("lets caller cancellation end a wait that was given no deadline", async () => {
 		pinDeadline(0);

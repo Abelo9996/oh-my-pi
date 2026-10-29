@@ -63,10 +63,7 @@ impl Clipboard {
 	/// Merge named registers from a completed transaction.
 	pub fn commit_from(&mut self, fork: &Self) {
 		let Some(named) = &fork.named else { return };
-		self
-			.named
-			.get_or_insert_default()
-			.extend(named.clone());
+		self.named.get_or_insert_default().extend(named.clone());
 	}
 }
 
@@ -438,8 +435,7 @@ impl EditStore {
 fn merge_seen(snapshot: &mut Snapshot, lines: Option<&[u32]>) {
 	let Some(lines) = lines else { return };
 	// Copies the set only while a lookup still holds the previous version.
-	Arc::make_mut(snapshot.seen_lines.get_or_insert_default())
-		.extend(lines.iter().copied());
+	Arc::make_mut(snapshot.seen_lines.get_or_insert_default()).extend(lines.iter().copied());
 }
 
 fn touch(state: &mut StoreState, path: &Path) {

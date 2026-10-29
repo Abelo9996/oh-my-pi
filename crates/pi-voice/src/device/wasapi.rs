@@ -863,7 +863,10 @@ fn stop_worker(
 	let Some(thread) = thread.take() else {
 		return Ok(());
 	};
-	thread.join().map_err(|_| format!("WASAPI {direction} thread panicked")).flatten()
+	thread
+		.join()
+		.map_err(|_| format!("WASAPI {direction} thread panicked"))
+		.flatten()
 }
 
 fn check_hresult(hr: HRESULT, what: &str) -> VoiceResult<()> {

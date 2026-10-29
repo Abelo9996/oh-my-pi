@@ -1,6 +1,6 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { acquireBrowser, type BrowserHandle, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
@@ -20,6 +20,9 @@ const PAGES: Record<string, string> = {
 		<script>addEventListener("beforeunload", event => { event.preventDefault(); event.returnValue = ""; });</script>`,
 };
 
+/** Holds `/slow-step2` until the run asks for `/release-slow-step2`. */
+let slowStep2 = Promise.withResolvers<void>();
+
 const server = Bun.serve({
 	port: 0,
 	async fetch(request) {
@@ -28,26 +31,35 @@ const server = Bun.serve({
 		if (pathname === "/step3") {
 			return new Response(`<title>Step 3</title><h1>Step 3: ${searchParams.get("response")}</h1>`, { headers });
 		}
+		if (pathname === "/release-slow-step2") {
+			slowStep2.resolve();
+			return new Response("released");
+		}
 		const page = PAGES[pathname];
 		if (page === undefined) return new Response("not found", { status: 404 });
 		// Pages a form leads to take a moment, as a server-rendered step of a form flow does; the second step long
 		// enough for a fill to finish on the step being left.
 		if (pathname === "/next" || pathname === "/green") await Bun.sleep(100);
 		if (pathname === "/step2") await Bun.sleep(500);
-		// Slower than the 4 s an action waits for a requested navigation.
-		if (pathname === "/slow-step2") await Bun.sleep(6_000);
+		// Sent only once the run reports that an action stopped waiting for the navigation to it.
+		if (pathname === "/slow-step2") await slowStep2.promise;
 		return new Response(page, { headers });
 	},
 });
 const origin = `http://127.0.0.1:${server.port}`;
+let browser: BrowserHandle | undefined;
 
-afterAll(() => {
+beforeAll(async () => {
+	if (CHROMIUM_AVAILABLE) browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+});
+
+afterAll(async () => {
+	if (browser) await releaseBrowser(browser, { kill: true });
 	server.stop(true);
 });
 
-async function runOnPage(code: string): Promise<unknown> {
-	const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+async function runOnPage(code: string, timeoutMs = 30_000): Promise<unknown> {
+	if (!browser || !("browser" in browser)) throw new Error("Expected a Puppeteer browser");
 	const name = `read-after-navigation-${process.pid}`;
 	const session = {
 		cwd: process.cwd(),
@@ -57,11 +69,10 @@ async function runOnPage(code: string): Promise<unknown> {
 	} as unknown as ToolSession;
 	try {
 		await acquireTab(name, browser, { url: `${origin}/form`, timeoutMs: 30_000 });
-		const result = await runInTab(name, { code, timeoutMs: 30_000, session });
+		const result = await runInTab(name, { code, timeoutMs, session });
 		return result.returnValue;
 	} finally {
 		await releaseTab(name, { kill: true });
-		if (browser.browser.connected) await releaseBrowser(browser, { kill: true });
 	}
 }
 
@@ -128,14 +139,33 @@ describe("browser calls after a click that navigates", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"answer the step a slow server is still sending",
 		async () => {
-			// Past the wait, Chromium holds evaluations on the step being left until the next one commits.
-			const result = await runOnPage(`
+			slowStep2 = Promise.withResolvers<void>();
+			// Past the wait, Chromium holds evaluations on the step being left until the next one commits. The wait
+			// itself only polls; the fill's first page call comes once it has run out, and only then does the server
+			// send the step. A 4 s cell gives the fill a 3 s deadline and so a 1.5 s navigation wait.
+			const result = await runOnPage(
+				`
 				await tab.goto("${origin}/slow-step1");
 				await tab.click("text/Continue");
-				await tab.fill('input[name="response"]', "42");
+				const client = page.mainFrame().client;
+				const send = client.send;
+				client.send = function (method, ...rest) {
+					if (method.startsWith("Runtime.") || method.startsWith("DOM.")) {
+						client.send = send;
+						void fetch("${origin}/release-slow-step2");
+					}
+					return send.call(this, method, ...rest);
+				};
+				try {
+					await tab.fill('input[name="response"]', "42");
+				} finally {
+					client.send = send;
+				}
 				await tab.click("text/Continue");
 				return await tab.text("h1");
-			`);
+			`,
+				4_000,
+			);
 			expect(result).toBe("Step 3: 42");
 		},
 		45_000,

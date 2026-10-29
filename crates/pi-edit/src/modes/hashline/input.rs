@@ -212,7 +212,8 @@ pub fn first_header_path(input: &str, options: &SplitOptions<'_>) -> Option<Stri
 }
 
 fn unquote(path: &str) -> &str {
-	path.strip_circumfix('"', '"')
+	path
+		.strip_circumfix('"', '"')
 		.or_else(|| path.strip_circumfix('\'', '\''))
 		.unwrap_or(path)
 }

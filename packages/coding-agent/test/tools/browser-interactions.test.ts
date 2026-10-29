@@ -105,6 +105,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
 			context,
 		);
 		try {
+			// A 2 s cell caps the per-op deadline at 1 s: every refused click below runs to it.
 			const attempt = async (call: string) => {
 				const result = await prelude.invoke(
 					{
@@ -116,8 +117,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
 } catch (error) {
 	return error instanceof Error ? error.message : String(error);
 }`,
-						// A 3 s cell caps the per-op deadline at 2 s.
-						timeout: 3,
+						timeout: 2,
 					},
 					context,
 				);
@@ -169,7 +169,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
 			// The match-count probe and the zero-match watchdog both query through `page.$$`;
 			// replacing it on the tab's page makes every probe fail the way the endpoint's did.
 			// The replacement stays until the tab closes below.
-			const attempt = async (probe: string, timeout: number) => {
+			const attempt = async (probe: string) => {
 				const result = await prelude.invoke(
 					{
 						action: "run",
@@ -181,21 +181,38 @@ try {
 } catch (error) {
 	return error instanceof Error ? error.message : String(error);
 }`,
-						timeout,
+						// A 3 s cell caps the action deadline at 2 s, the zero-match fail-fast window.
+						timeout: 3,
 					},
 					context,
 				);
 				return valueFrom<string>(result);
 			};
 			// A probe that throws never counts toward the 2 s fail-fast, so the click runs to its deadline.
-			const thrown = await attempt(`async () => { throw new Error("probe refused"); }`, 3);
+			const thrown = await attempt(`async () => { throw new Error("probe refused"); }`);
 			expect(thrown).toMatch(
 				/^tab\.click\("#missing"\) timed out after \d+ms; could not count matches: probe refused$/,
 			);
-			// A 12 s cell keeps the 8 s action deadline and leaves ~2 s past the 1 s probe wait
-			// before the whole-cell timeout.
-			const stalled = await attempt(`() => Promise.withResolvers().promise`, 12);
-			expect(stalled).toMatch(/; could not count matches: no answer within 1000ms$/);
+			// The same count probe follows every selector op's timeout; an explicit wait deadline reaches it
+			// without spending the 8 s action ceiling, and the 4 s cell leaves room past the 1 s probe wait.
+			const stalled = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `page.$$ = () => Promise.withResolvers().promise;
+try {
+	await tab.waitForSelector("#missing", { timeout: 300 });
+	return "found";
+} catch (error) {
+	return error instanceof Error ? error.message : String(error);
+}`,
+					timeout: 4,
+				},
+				context,
+			);
+			expect(valueFrom<string>(stalled)).toMatch(
+				/^tab\.waitForSelector\("#missing"\) timed out after 300ms; could not count matches: no answer within 1000ms$/,
+			);
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
@@ -244,11 +261,9 @@ try {
 			);
 
 			controller.abort(reason);
-			// Real Chromium CDP calls cannot run under fake timers; bound the formerly unending lookup.
-			const outcome = await Promise.race([settled, Bun.sleep(500).then(() => ({ status: "hung" as const }))]);
-			if (outcome.status !== "rejected") {
-				throw new Error(`Text-click candidate lookup ${outcome.status} after abort`);
-			}
+			// The abort, not the lookup's 5 s deadline, ends it: only the abort carries `reason` as its cause.
+			const outcome = await settled;
+			if (outcome.status !== "rejected") throw new Error("Text-click candidate lookup resolved after abort");
 			if (!(outcome.error instanceof Error)) throw new Error("Expected candidate lookup to reject with an Error");
 			expect(outcome.error.name).toBe("AbortError");
 			expect(outcome.error.cause).toBe(reason);
@@ -723,31 +738,33 @@ return { value: await tab.value("#q"), reported: await tab.evaluate(() => window
 			context,
 		);
 		const run = async <T>(code: string): Promise<T> =>
-			valueFrom<T>(await prelude.invoke({ action: "run", name: tabName, code, timeout: 3 }, context));
+			valueFrom<T>(await prelude.invoke({ action: "run", name: tabName, code, timeout: 2 }, context));
 		const readLength = `return (await tab.value("#area")).length;`;
 		try {
 			for (const action of ["fill", "type"]) {
 				await run(`await tab.evaluate(() => { document.querySelector("#area").value = ""; });`);
-				// A 3 s cell caps the per-op deadline at 2 s, far short of typing 20,000 characters.
+				// A 2 s cell caps the per-op deadline at 1 s, far short of typing 20,000 characters.
 				const message = await run<string>(`try {
 	await tab.${action}("#area", "x".repeat(20000));
 	return "typed";
 } catch (error) {
 	return error.message;
 }`);
-				expect(message).toMatch(
-					new RegExp(
-						`^tab\\.${action}\\("#area"\\) timed out after \\d+ms; typing stopped after \\d+ of 20000 characters`,
-					),
-				);
-				// Real Chromium input cannot run under fake timers, and "no more keys arrive" is only
-				// observable over wall time. One key in flight at the deadline may still land; nothing after it.
-				await Bun.sleep(300);
-				const settled = await run<number>(readLength);
-				await Bun.sleep(1000);
-				expect(settled).toBeGreaterThan(0);
-				expect(settled).toBeLessThan(20000);
-				expect(await run<number>(readLength)).toBe(settled);
+				const match = new RegExp(
+					`^tab\\.${action}\\("#area"\\) timed out after \\d+ms; typing stopped after (\\d+) of 20000 characters`,
+				).exec(message);
+				if (!match) throw new Error(`Unexpected ${action} timeout: ${message}`);
+				const typed = Number(match[1]);
+				expect(typed).toBeGreaterThan(0);
+				// Typing that went on past the deadline lands a key every CDP round trip, so by the time two more
+				// calls have read the field it would be well past the count. Only the one key in flight at the
+				// deadline may still land.
+				const first = await run<number>(readLength);
+				const second = await run<number>(readLength);
+				for (const length of [first, second]) {
+					expect(length).toBeGreaterThanOrEqual(typed);
+					expect(length).toBeLessThanOrEqual(typed + 1);
+				}
 			}
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);

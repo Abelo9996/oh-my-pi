@@ -357,7 +357,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		};
 		relay.browser.on("targetdestroyed", onGone);
 		try {
-			const run = runInTab(name, { code: "await page.close(); await wait(60_000);", timeoutMs: 5_000, session });
+			// The close and the disconnect take milliseconds; the cell's timeout then starts the recovery.
+			const run = runInTab(name, { code: "await page.close(); await wait(60_000);", timeoutMs: 1_500, session });
 			await gone.promise;
 			relay.browser.disconnect();
 			expect(await rejectionOf(run)).toBeInstanceOf(Error);

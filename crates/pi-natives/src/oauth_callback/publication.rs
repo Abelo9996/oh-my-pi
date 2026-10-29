@@ -51,8 +51,7 @@ pub(crate) fn publish_once(path: &Path, contents: &[u8]) -> io::Result<()> {
 fn create_temporary(parent: &Path, file_name: &std::ffi::OsStr) -> io::Result<(PathBuf, File)> {
 	for _ in 0..128 {
 		let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-		let name =
-			format!(".{}.{}.{}.tmp", file_name.display(), std::process::id(), sequence);
+		let name = format!(".{}.{}.{}.tmp", file_name.display(), std::process::id(), sequence);
 		let path = parent.join(name);
 		let mut options = OpenOptions::new();
 		options.write(true).create_new(true);

@@ -4862,14 +4862,8 @@ mod platform {
 		let mut stat = unsafe { zeroed::<libc::stat>() };
 		// SAFETY: `name` is NUL-terminated, `stat` is writable, and `dirfd` is an
 		// open directory descriptor for an AT_* relative metadata query.
-		let rc = unsafe {
-			libc::fstatat(
-				dirfd,
-				name.as_ptr(),
-				&raw mut stat,
-				libc::AT_SYMLINK_NOFOLLOW,
-			)
-		};
+		let rc =
+			unsafe { libc::fstatat(dirfd, name.as_ptr(), &raw mut stat, libc::AT_SYMLINK_NOFOLLOW) };
 		if rc != 0 {
 			return Err(io::Error::last_os_error());
 		}

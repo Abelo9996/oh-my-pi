@@ -64,7 +64,10 @@ pub(crate) fn filter_for(
 		{
 			cleaned
 		},
-		Some("diff") if exit_code == 0 && let Some(mode) = diff_listing_mode(ctx.command) => {
+		Some("diff")
+			if exit_code == 0
+				&& let Some(mode) = diff_listing_mode(ctx.command) =>
+		{
 			compact_diff_listing(&cleaned, mode)
 		},
 		Some("diff") => compact_diff_output(&cleaned),

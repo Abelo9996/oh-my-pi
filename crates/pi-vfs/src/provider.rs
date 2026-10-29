@@ -310,6 +310,11 @@ impl<P: FileSystem + ?Sized> Resolver for ProviderResolver<'_, P> {
 	}
 
 	async fn require_dir(&self, path: &Path) -> io::Result<()> {
-		self.0.metadata(path).await?.is_dir().ok_or_else(not_a_directory)
+		self
+			.0
+			.metadata(path)
+			.await?
+			.is_dir()
+			.ok_or_else(not_a_directory)
 	}
 }

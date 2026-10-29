@@ -250,7 +250,7 @@ describe("AgentSession idle maintenance", () => {
 
 			blocked = false;
 			h.session.refreshIdleMaintenance();
-			await flush();
+			await settle(h);
 			await elapse(RECAP_DELAY_MS);
 			await until(() => sideCalls(h) >= 1, "the recap request");
 			await flush();
@@ -452,7 +452,7 @@ describe("AgentSession idle maintenance", () => {
 
 			blocked = false;
 			h.session.refreshIdleMaintenance();
-			await flush();
+			await settle(h);
 			await elapse(3 * RECAP_DELAY_MS);
 
 			expect(sideCalls(h)).toBe(0);
@@ -471,7 +471,7 @@ describe("AgentSession idle maintenance", () => {
 
 			blocked = false;
 			h.session.refreshIdleMaintenance();
-			await flush();
+			await settle(h);
 			await elapse(3 * RECAP_DELAY_MS);
 
 			expect(sideCalls(h)).toBe(0);
@@ -707,7 +707,7 @@ describe("AgentSession idle maintenance", () => {
 
 			blocked = false;
 			h.session.refreshIdleMaintenance();
-			await flush();
+			await settle(h);
 			await elapse(RECAP_DELAY_MS);
 			await until(() => h.recaps.length === 1, "the recap event");
 			await flush();
@@ -729,7 +729,7 @@ describe("AgentSession idle maintenance", () => {
 
 			blocked = false;
 			h.session.refreshIdleMaintenance();
-			await flush();
+			await settle(h);
 			await elapse(RECAP_DELAY_MS);
 			await until(() => h.recaps.length === 1, "the recap event");
 		});
@@ -752,7 +752,7 @@ describe("AgentSession idle maintenance", () => {
 
 			blocked = false;
 			h.session.refreshIdleMaintenance();
-			await flush();
+			await settle(h);
 			await elapse(COMPACTION_DELAY_MS);
 			await until(() => compaction.mock.calls.length === 1, "the idle compaction pass");
 		});
@@ -801,7 +801,7 @@ describe("AgentSession idle maintenance", () => {
 
 			scheduled = false;
 			h.session.refreshIdleMaintenance();
-			await flush();
+			await settle(h);
 			await elapse(RECAP_DELAY_MS);
 			await until(() => h.recaps.length === 1, "the recap event");
 			await flush();

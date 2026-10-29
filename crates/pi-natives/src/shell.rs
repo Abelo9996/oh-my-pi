@@ -33,7 +33,9 @@ use crate::task;
 pub fn expand_windows_long_path(path: String) -> String {
 	#[cfg(windows)]
 	{
-		pi_shell::expand_to_long_path(std::path::Path::new(&path)).into_string().unwrap_or(path)
+		pi_shell::expand_to_long_path(std::path::Path::new(&path))
+			.into_string()
+			.unwrap_or(path)
 	}
 	#[cfg(not(windows))]
 	{
@@ -47,7 +49,9 @@ pub fn expand_windows_long_path(path: String) -> String {
 pub fn get_windows_short_path(path: String) -> String {
 	#[cfg(windows)]
 	{
-		pi_shell::get_short_path(std::path::Path::new(&path)).into_string().unwrap_or(path)
+		pi_shell::get_short_path(std::path::Path::new(&path))
+			.into_string()
+			.unwrap_or(path)
 	}
 	#[cfg(not(windows))]
 	{
