@@ -1857,8 +1857,10 @@ export class ComputerWorkerCore {
 						typeof selector === "string" || typeof selector === "number"
 							? windows.filter(window => window.id === String(selector))
 							: windows.filter(window => matchesFilter(window, selector));
-					if (matches.length > 0 || Date.now() + WINDOW_WAIT_INTERVAL_MS > deadline) break;
-					await waitForRun(WINDOW_WAIT_INTERVAL_MS, signal);
+					// The last interval sleeps only what is left, so the final listing lands at the deadline.
+					const remaining = deadline - Date.now();
+					if (matches.length > 0 || remaining <= 0) break;
+					await waitForRun(Math.min(WINDOW_WAIT_INTERVAL_MS, remaining), signal);
 				}
 				// Untyped scripts may pass nothing or `null`, which `matchesFilter` accepts as no filter: a desktop with one
 				// window returns it, and otherwise the error names the missing selector.

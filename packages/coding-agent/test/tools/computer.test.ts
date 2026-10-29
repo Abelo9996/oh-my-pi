@@ -4886,6 +4886,31 @@ describe("window() waiting for a window to appear", () => {
 		}
 	});
 
+	it("lists once more at a wait that is no whole number of intervals", async () => {
+		vi.useFakeTimers();
+		try {
+			// wait 150: listings at 0 and 100 ms, then 50 ms to the deadline; wait 50: 0 ms, then 50 ms.
+			for (const { wait, steps } of [
+				{ wait: 150, steps: [100, 50] },
+				{ wait: 50, steps: [50] },
+			]) {
+				const native = new OpeningSession(steps.length + 1);
+				const pending = run(native, `return (await desktop.window({ app: "Preview", wait: ${wait} })).id`);
+				for (const [index, step] of steps.entries()) {
+					while (native.listings <= index) await turn();
+					await turn();
+					vi.advanceTimersByTime(step);
+				}
+				const result = await pending;
+				if (!result.ok) throw new Error(result.error.message);
+				expect(result.payload.returnValue).toBe("151");
+				expect(native.listings).toBe(steps.length + 1);
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("still fails at once without wait", async () => {
 		const native = new OpeningSession(4);
 		const result = await run(native, 'return await desktop.window({ app: "Preview" })');
@@ -4909,7 +4934,7 @@ describe("window() waiting for a window to appear", () => {
 		try {
 			const native = new OpeningSession(Number.POSITIVE_INFINITY);
 			const pending = run(native, 'return await desktop.window({ app: "Preview", wait: 300 })');
-			// Listings at 0, 100, 200 and 300 ms: one more interval would end past the 300 ms wait.
+			// Listings at 0, 100 and 200 ms and the last at the 300 ms deadline.
 			await pollListings(native, 4);
 			const result = await pending;
 			expect(result.ok).toBe(false);
