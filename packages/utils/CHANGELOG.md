@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `logger.withContext(fields, fn)`, which adds `fields` to every record logged while `fn` runs, including from the promises and timers it starts and in events passed to log sinks, and `logger.withoutContext(fn)` for process-wide work whose records belong to no caller ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed `untilAborted` leaving a promise passed to it unobserved when the signal was already aborted, so its later rejection crashed the process as unhandled ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
