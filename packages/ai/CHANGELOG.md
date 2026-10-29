@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `auth.accountPolicies` `priority` now outranks a missing usage report, so a preferred account whose report could not be fetched no longer hands new sessions to a measured lower-priority sibling; blocks, reserve and hot 5-hour windows still come first ([#15124](https://github.com/can1357/oh-my-pi/pull/15124) by [@will-bogusz](https://github.com/will-bogusz))
+- `auth.accountPolicies` `priority` now outranks a momentarily missing usage report, so new sessions stay on the preferred account ([#15124](https://github.com/can1357/oh-my-pi/pull/15124) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
