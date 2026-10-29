@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
 - Added `task.perCallModel` (`off` by default, `eval`, `on`): task items and eval `agent()`/`workpool()` can select one exact `provider/model-id[@upstream][:level]`, limited to configured chat-role values, the selected bundled or user-level agent's own frontmatter while it is still discovered and not disabled, or the parent's live model; `task.perCallModelAllow` narrows those grants to exact models. Per-call workers recheck approval on every main-loop request and cold revival, disable retry fallback, context promotion and prewalk, omit Factory's server-side refusal chain, and fail a response served by another model. `task.maxEffort` bounds every per-call spawn: an explicit `:level` is clamped and an omitted `:level` inherits the agent's level capped at it; unset, `:inherit` and `:off` keep their existing meaning, though an endpoint's effort-negotiation retry may round to its nearest supported tier ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
