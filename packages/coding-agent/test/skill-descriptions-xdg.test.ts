@@ -25,7 +25,6 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
 	"skill description cache under XDG",
 	() => {
 		let tempRoot = "";
-		let configDir = "";
 		let agentDir = "";
 		let xdgData = "";
 		let originalAgentDir = "";
@@ -36,12 +35,15 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
 			originalEnv = {};
 			for (const key of ENV_KEYS) originalEnv[key] = process.env[key];
 			tempRoot = path.join(os.tmpdir(), "omp-skill-descriptions-xdg", Snowflake.next());
-			configDir = `.omp-skill-xdg-${Snowflake.next()}`;
-			agentDir = path.join(os.homedir(), configDir, "agent");
+			// The legacy database lives under the default agent dir, which resolves from
+			// `os.homedir()`; a temp home keeps the suite off the real (possibly read-only) HOME.
+			const home = path.join(tempRoot, "home");
+			spyOn(os, "homedir").mockReturnValue(home);
+			agentDir = path.join(home, ".omp", "agent");
 			xdgData = path.join(tempRoot, "data");
 			await fs.promises.mkdir(path.join(xdgData, "omp"), { recursive: true });
 			await fs.promises.mkdir(agentDir, { recursive: true });
-			process.env.PI_CONFIG_DIR = configDir;
+			process.env.PI_CONFIG_DIR = ".omp";
 			delete process.env.PI_CODING_AGENT_DIR;
 			__resetProfileSnapshotForTests();
 		});
@@ -55,7 +57,6 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
 			}
 			setAgentDir(originalAgentDir);
 			await fs.promises.rm(tempRoot, { recursive: true, force: true });
-			await fs.promises.rm(path.join(os.homedir(), configDir), { recursive: true, force: true });
 		});
 
 		it("adopts a legacy database, including uncheckpointed WAL rows, when XDG relocates it", () => {
