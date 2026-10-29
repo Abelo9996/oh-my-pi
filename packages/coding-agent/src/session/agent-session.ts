@@ -38,7 +38,6 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
-	EventLoopKeepalive,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -2319,40 +2318,27 @@ export class AgentSession implements SettingsScope {
 				}
 			},
 			scheduleIdleFlush: run => {
-				const keepalive = new EventLoopKeepalive();
-				try {
-					this.#schedulePostPromptTask(
-						async signal => {
+				this.#schedulePostPromptTask(
+					async signal => {
+						// Idle compaction rewrites history without owning a turn; flush into the compacted context.
+						// Cancellation (abort, session change, disposal) stops the wait at once instead of holding
+						// their post-prompt drain behind the compaction; abort re-requests the flush once it settles.
+						const idleCompaction = this.#maintenance.waitForIdleCompaction();
+						if (idleCompaction) {
 							try {
-								// Idle compaction rewrites history without owning a turn; flush into the compacted context.
-								// Cancellation (abort, session change, disposal) stops the wait at once instead of holding
-								// their post-prompt drain behind the compaction; abort re-requests the flush once it settles.
-								const idleCompaction = this.#maintenance.waitForIdleCompaction();
-								if (idleCompaction) {
-									try {
-										await untilAborted(signal, idleCompaction);
-									} catch {
-										this.yieldQueue.cancelIdleFlushScheduling();
-										return;
-									}
-								}
-								await run();
-							} finally {
-								keepalive[Symbol.dispose]();
-							}
-						},
-						{
-							delayMs: 1,
-							onSkip: () => {
-								keepalive[Symbol.dispose]();
+								await untilAborted(signal, idleCompaction);
+							} catch {
 								this.yieldQueue.cancelIdleFlushScheduling();
-							},
-						},
-					);
-				} catch (error) {
-					keepalive[Symbol.dispose]();
-					throw error;
-				}
+								return;
+							}
+						}
+						await run();
+					},
+					{
+						delayMs: 1,
+						onSkip: () => this.yieldQueue.cancelIdleFlushScheduling(),
+					},
+				);
 			},
 		});
 		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {

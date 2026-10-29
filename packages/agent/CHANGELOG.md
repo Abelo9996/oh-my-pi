@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the Bun event-loop workarounds `EventLoopKeepalive`, `YieldGate`, `yieldIfDue`, and `ExponentialYield` (`@oh-my-pi/pi-agent-core/utils/yield`); the agent loop no longer inserts cooperative sleeps while streaming or between tool calls
+
 ### Added
 
 - `PI_INTENT_DESC` replaces the schema description of the injected `i` intent field
