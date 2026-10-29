@@ -9,6 +9,7 @@
 ### Added
 
 - The agent can reply mid-task without ending its turn by writing Markdown to `out://` (`write`, or `> out://` from bash, up to 64 KiB): the reply shows like a response, streaming as it is written, so answering a question you ask during work or a requested progress report no longer cuts the task short. On by default in the interactive TUI and off in print, RPC, and ACP sessions; set `out.enabled` to force it either way
+- `tools.approval["computer.control"]: allow` lets the `computer` tool take foreground control on a machine with nobody to confirm it, such as a dedicated VM, and `deny` refuses it without asking; the approval mode alone never grants it ([#16917](https://github.com/can1357/oh-my-pi/pull/16917) by [@will-bogusz](https://github.com/will-bogusz))
 - Added opt-in `taskFile` input (`task.file=true`) to dispatch subagent instructions from a UTF-8 file via an absolute path or `local://` URL, recording the submitted path and SHA-256 ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal)).
 - Pin and unpin sessions from the resume picker with `Alt+K` / `Alt+Shift+K` (remappable as `app.session.pin` / `app.session.unpin`); pinned sessions move to the top at once and also lead search results ([#9837](https://github.com/can1357/oh-my-pi/pull/9837) by [@zhang17-24](https://github.com/zhang17-24))
 - Set `PI_LINK_SCHEME` (and optionally `PI_LINK_HOST`) to make file links in SSH/tmux sessions open through a desktop protocol handler such as `ompfile://<host>/<path>?line=N&col=M` ([#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu))
@@ -41,9 +42,6 @@
 
 - Adjusted view placement to align with column‑capped output, fixing view offsets after line truncation
 - In Tern, warnings, errors, the update notice, `@file` reads and finished background jobs, tangents and supervised processes read like the rest of the chat: an icon and the message instead of a raw terminal line
-- Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
-- llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
-- `tools.approval["computer.control"]: allow` lets the `computer` tool take foreground control on a machine with nobody to confirm it, such as a dedicated VM, and `deny` refuses it without asking; the approval mode alone never grants it ([#16917](https://github.com/can1357/oh-my-pi/pull/16917) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
