@@ -76,6 +76,7 @@
 - Fixed `webmcpInvoke` returning an empty error when a page's tool throws, and leaving a timed-out invocation running in the page ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed HTTP 413 failures on Factory Droid GPT and Grok models after switching from an OpenAI computer-use session: older computer screenshots are now dropped to fit Factory's request limit, as other images already were ([#16564](https://github.com/can1357/oh-my-pi/pull/16564) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a configured default or dictation model that no longer resolves being replaced silently; omp now warns and names the model it uses instead ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `lsp` finding no references for Rust files in another checkout than the session's, such as a sibling git worktree: that checkout is now added to the running language server's workspace, without starting another server ([#16271](https://github.com/can1357/oh-my-pi/pull/16271) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.13.3] - 2026-10-28
 
