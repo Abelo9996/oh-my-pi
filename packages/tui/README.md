@@ -113,10 +113,6 @@ interface Component {
 | `invalidate?()`          | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call.                                                                                                                                                                                                                                 |
 | `releaseRenderCaches?()` | Drops only derived render caches. The next `render()` must return the same rows without eager rebuilds, renderer callbacks, image conversions, or child replacement.                                                                                                                                                                           |
 
-`SvgFigure`, `FenceFigure`, `TableChartFigure`, and `FigureMarkdown` accept a `maxRows` option (a number or a callback returning a number or `undefined`) and expose `setMaxRows()` for resizing. Zero hides a figure; table charts include their leading separator in the limit. `FigureMarkdown` applies the limit to each child figure, so callers must reserve space for prose, headers, footers, and separators themselves. Overlay height is not forwarded automatically.
-
-An explicit ceiling takes effect immediately. In SIXEL terminals, resizing can temporarily show reserved rows while the fitted image is encoded off the JS thread, then repaint with the new image. Without an explicit ceiling, a terminal-height change keeps the old raster at its drawn size until the replacement raster lands.
-
 ## Built-in Components
 
 ### Composition
@@ -524,6 +520,12 @@ tui.addChild(image);
 SIXEL images encode off the JavaScript thread: the first render reserves the image's rows and the image appears on the repaint `budget` or `requestRender` triggers once the encode lands. Without either, it waits for an unrelated repaint.
 
 Supported formats: PNG, JPEG, GIF, WebP. Dimensions are parsed from the image headers automatically.
+
+### Figures
+
+`FigureMarkdown`, `SvgFigure`, and `TableChartFigure` size their images to a share of the terminal viewport. A surface shorter than the screen (an overlay, a pane) passes `maxRows: () => rows`, read on every render: the rows each figure may fill, a table chart's separator included. Zero hides a figure and keeps it from holding up transcript completion. Callers reserve room for prose and chrome themselves.
+
+Lowering the ceiling refits the drawn image at once and redraws it at the new size; a SIXEL reserves its rows while each re-encode runs off the JavaScript thread, as for a width change. Changing the ceiling of rows already committed to native scrollback forces a resync, so leave committed figures alone.
 
 ## Autocomplete
 

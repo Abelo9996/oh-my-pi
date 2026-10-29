@@ -745,13 +745,14 @@ export class Image implements Component {
 	}
 
 	/**
-	 * Resize a mutable surface's image. A changed SIXEL size reserves rows until
-	 * its off-thread encode lands; fallback height retains the tallest placement
-	 * because its rows may already be committed to native scrollback.
+	 * Refit to a new row ceiling; a SIXEL reserves its rows until the off-thread
+	 * encode lands. A demoted fallback keeps the height already drawn only
+	 * within the new ceiling: the owner chose to shrink the block.
 	 */
-	setMaxHeightCells(maxHeightCells?: number): void {
+	setMaxHeightCells(maxHeightCells: number): void {
 		if (this.#options.maxHeightCells === maxHeightCells) return;
 		this.#options.maxHeightCells = maxHeightCells;
+		this.#renderedGraphicRows = Math.min(this.#renderedGraphicRows, maxHeightCells);
 		this.#native = undefined;
 		this.invalidate();
 	}
@@ -839,8 +840,7 @@ export class Image implements Component {
 		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
 		// Only Kitty images with a budget id transmit their data separately from
 		// the placement; a pending re-transmit (after a purge or history clear)
-		// must rebuild live graphics lines. Suppressed images render only text.
-		// SIXEL and iTerm2 carry the image inside the line
+		// must rebuild the lines. SIXEL and iTerm2 carry the image inside the line
 		// itself and never register a transmit, so gating their cache on it would
 		// re-encode the full image on every render pass.
 		const imageId = this.#imageId;
@@ -858,7 +858,7 @@ export class Image implements Component {
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
 			// The text fallback embeds a link only under an enabled hyperlink policy.
 			this.#cachedLinked === linked &&
-			(!transmitsSeparately || suppressed || this.#budget?.shouldTransmit(imageId) !== true) &&
+			(!transmitsSeparately || this.#budget?.shouldTransmit(imageId) !== true) &&
 			// Cached rows reserved for a pending SIXEL encode must not reach scrollback.
 			!(scrollbackRenderDepth > 0 && this.#sixel !== undefined && this.#sixel.sequence === undefined)
 		) {

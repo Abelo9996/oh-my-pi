@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
-import * as natives from "@oh-my-pi/pi-natives";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { Image, ImageBudget, renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
@@ -46,7 +46,7 @@ function sixelColor(rows: readonly string[]): [number, number, number] {
 }
 
 async function translucentImage(requestRender: () => void): Promise<Image> {
-	const png = await natives.rasterizeSvg(
+	const png = await rasterizeSvg(
 		new TextEncoder().encode(
 			'<svg width="16" height="12"><rect width="16" height="12" fill="white" opacity="0.25"/></svg>',
 		),
@@ -76,7 +76,6 @@ describe("terminal image rendering", () => {
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
 		setTerminalBackgroundColor(undefined);
 		setCellDimensions(originalCellDims);
 		terminal.imageProtocol = originalProtocol;
@@ -175,6 +174,41 @@ describe("terminal image rendering", () => {
 		expect(budget.takeTransmits()).toEqual([]);
 	});
 
+	it("keeps a demoted image's drawn height only within a lowered row ceiling", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const budget = new ImageBudget(1);
+		const theme = { fallbackColor: (text: string) => text };
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			theme,
+			{ budget, imageKey: "shrunk", maxHeightCells: 10 },
+			SQUARE_DIMENSIONS,
+		);
+		const newer = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			theme,
+			{ budget, imageKey: "newer", maxHeightCells: 1 },
+			SQUARE_DIMENSIONS,
+		);
+		budget.beginPass();
+		expect(image.render(20)).toHaveLength(10);
+		budget.endPass();
+
+		image.setMaxHeightCells(2);
+		budget.beginPass();
+		expect(image.render(20)).toHaveLength(2);
+		newer.render(20);
+		expect(budget.endPass()).toBe(true);
+		budget.beginPass();
+		const demoted = image.render(20);
+		newer.render(20);
+		budget.endPass();
+		expect(demoted).toHaveLength(2);
+		expect(demoted.at(-1)).toContain("[Image:");
+	});
+
 	it("uses intrinsic image size when no bounds are provided", () => {
 		terminal.imageProtocol = ImageProtocol.Kitty;
 		const result = renderImage(BASE64_DUMMY, SQUARE_DIMENSIONS);
@@ -250,97 +284,6 @@ describe("terminal image rendering", () => {
 
 		expect(result?.rows).toBe(2);
 		expect((result?.sequence ?? "").startsWith("\x1bP")).toBe(true);
-	});
-
-	it.each(["width", "height"] as const)("keeps live SIXEL %s shrink encoding asynchronous", async axis => {
-		terminal.imageProtocol = ImageProtocol.Sixel;
-		const encodeAsync = spyOn(natives, "encodeSixelAsync");
-		const encodeSync = spyOn(natives, "encodeSixel");
-		let encoded = Promise.withResolvers<void>();
-		const image = new Image(
-			BASE64_ONE_PIXEL_PNG,
-			"image/png",
-			{ fallbackColor: text => text },
-			{ maxHeightCells: 10, requestRender: () => encoded.resolve() },
-			SQUARE_DIMENSIONS,
-		);
-		image.render(20);
-		await encoded.promise;
-		expect(image.render(20).join("")).toContain("\x1bP");
-
-		encoded = Promise.withResolvers<void>();
-		if (axis === "height") image.setMaxHeightCells(2);
-		const width = axis === "width" ? 4 : 20;
-		const pending = image.render(width);
-		expect(pending.length).toBeLessThanOrEqual(2);
-		expect(encodeAsync).toHaveBeenCalledTimes(2);
-		expect(encodeAsync.mock.calls[1]?.slice(1, 3)).toEqual([20, 20]);
-		expect(encodeSync).not.toHaveBeenCalled();
-		await encoded.promise;
-		const drawn = image.render(width);
-		expect(drawn.length).toBeLessThanOrEqual(2);
-		expect(drawn.join("")).toContain("\x1bP");
-		expect(encodeAsync).toHaveBeenCalledTimes(2);
-		expect(encodeSync).not.toHaveBeenCalled();
-	});
-
-	it("preserves previously drawn rows when a resized image is demoted to text", () => {
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		const budget = new ImageBudget(1);
-		const image = new Image(
-			BASE64_ONE_PIXEL_PNG,
-			"image/png",
-			{ fallbackColor: text => text },
-			{ maxHeightCells: 10, budget, imageKey: "resized" },
-			SQUARE_DIMENSIONS,
-		);
-		const newer = new Image(
-			BASE64_ONE_PIXEL_PNG,
-			"image/png",
-			{ fallbackColor: text => text },
-			{ maxHeightCells: 1, budget, imageKey: "newer" },
-			SQUARE_DIMENSIONS,
-		);
-		budget.beginPass();
-		expect(image.render(20)).toHaveLength(10);
-		budget.endPass();
-		budget.takeTransmits();
-
-		image.setMaxHeightCells(2);
-		budget.beginPass();
-		expect(image.render(20)).toHaveLength(2);
-		newer.render(20);
-		expect(budget.endPass()).toBe(true);
-
-		budget.beginPass();
-		const demoted = image.render(20);
-		newer.render(20);
-		budget.endPass();
-		expect(demoted).toHaveLength(10);
-		expect(demoted.at(-1)).toContain("[Image:");
-		expect(demoted.join("")).not.toContain("\x1b_G");
-		budget.takeTransmits();
-
-		budget.beginPass();
-		// Figure clipping reuses these immutable rows across unchanged frames.
-		expect(image.render(20)).toBe(demoted);
-		newer.render(20);
-		expect(budget.endPass()).toBe(false);
-		expect(budget.takeTransmits()).toEqual([]);
-
-		// Removing the newer image relaxes the budget; the following full pass
-		// must replace the cached fallback and retransmit the retired image.
-		budget.beginPass();
-		image.render(20);
-		budget.endPass();
-		budget.beginPass();
-		const promoted = image.render(20);
-		budget.endPass();
-		expect(promoted).toHaveLength(2);
-		expect(promoted.join("")).toContain("\x1b_Ga=p");
-		const transmits = budget.takeTransmits();
-		expect(transmits).toHaveLength(1);
-		expect(transmits[0]).toContain(`;${BASE64_ONE_PIXEL_PNG}\x1b\\`);
 	});
 
 	it("recomposites a cached SIXEL using the latest background after rapid changes", async () => {

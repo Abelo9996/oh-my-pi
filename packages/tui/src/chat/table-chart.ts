@@ -194,8 +194,8 @@ export function chartFence(svg: string): string {
 export interface TableChartFigureOptions {
 	/** Shared inline-image budget. */
 	budget?: ImageBudget;
-	/** Row ceiling including the separator; fewer than two rows hides the chart. Defaults to a share of the viewport. */
-	maxRows?: number | (() => number | undefined);
+	/** Rows the chart may fill, its separator included, read on every render; under two hides it. Unset or `undefined` takes a share of the terminal viewport. */
+	maxRows?: () => number | undefined;
 	/** The chart's rows changed outside a text update: its pick or raster landed. */
 	onChange: () => void;
 }
@@ -209,7 +209,6 @@ export interface TableChartFigureOptions {
 export class TableChartFigure implements Component {
 	readonly #options: TableChartFigureOptions;
 	readonly #figure: SvgFigure;
-	#maxRows?: number | (() => number | undefined);
 	#table: Tokens.Table | undefined;
 	/** The chart's SVG; `undefined` while not looked up or waiting for a pick. */
 	#chart: string | null | undefined;
@@ -218,23 +217,17 @@ export class TableChartFigure implements Component {
 
 	constructor(options: TableChartFigureOptions) {
 		this.#options = options;
-		this.#maxRows = options.maxRows;
 		this.#figure = new SvgFigure({
 			budget: options.budget,
-			maxRows: () => this.#resolveMaxRows(),
+			maxRows: () => this.#figureRows(),
 			onChange: options.onChange,
 		});
 	}
 
-	setMaxRows(maxRows?: number | (() => number | undefined)): void {
-		this.#maxRows = maxRows;
-		this.#figure.setMaxRows(() => this.#resolveMaxRows());
-	}
-
-	/** Reserve the separator inside the caller's ceiling before sizing the image. */
-	#resolveMaxRows(): number | undefined {
-		const bound = typeof this.#maxRows === "function" ? this.#maxRows() : this.#maxRows;
-		return bound != null && Number.isFinite(bound) ? Math.max(0, Math.floor(bound) - 1) : undefined;
+	/** The image's share of the caller's ceiling: all but the separator row. */
+	#figureRows(): number | undefined {
+		const rows = this.#options.maxRows?.();
+		return rows === undefined ? undefined : Math.max(0, rows - 1);
 	}
 
 	/** Point the figure at `table`. */
@@ -248,14 +241,14 @@ export class TableChartFigure implements Component {
 	/** Whether the chart is still being looked up, picked or drawn. */
 	get pending(): boolean {
 		return (
-			this.#resolveMaxRows() !== 0 &&
+			this.#figureRows() !== 0 &&
 			this.#table !== undefined &&
 			(this.#chart === undefined || (this.#chart !== null && this.#figure.pending))
 		);
 	}
 
 	render(width: number): readonly string[] {
-		if (this.#resolveMaxRows() === 0) return [];
+		if (this.#figureRows() === 0) return [];
 		if (this.#chart === undefined && !this.#waiting) this.#resolve();
 		if (!this.#chart) return [];
 		const rows = this.#figure.render(width);
