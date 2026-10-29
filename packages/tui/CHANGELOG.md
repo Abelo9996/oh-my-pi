@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- `PINNED_HUD_TOGGLE_ID` moved from `prompt/composer` to coding-agent's `task/output-manager`, so reserving subagent IDs does not load the interactive editor
 - `StatusLineHost.resetExpiryNotice` now receives the session first and owns deduplication; `StatusLineComponent` no longer limits the saved-reset expiry warning to once per conversation
 - `ToolExecutionHandle` no longer declares `setToolActivityVisible`; the transcript still hides tool activity through components that implement it, and handles without it (reply blocks) stay visible
 

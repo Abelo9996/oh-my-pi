@@ -13,6 +13,7 @@
 
 ### Changed
 
+- Reduced duplicate Rust dependency compilation when building the native addon with Cargo.
 - Native `glob` is about 3× faster on large trees; `grep`, `fuzzyFind`, `listWorkspace`, and `astGrep`/`astEdit` run on the same rewritten walker and return identical results from run to run
 - Native `grep` with `maxCount` (the agent's grep tool) searches files while the walk finds them and stops both once the limit is met: 1.3–2.3× faster, and a first page of results about 10× faster
 - The bash tool's built-in `rg` and recursive `grep` search files in parallel (about 2× faster) and print them in path order
