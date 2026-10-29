@@ -189,8 +189,13 @@ impl PathPolicy {
 			skip_git: true,
 			..Default::default()
 		};
-		let result =
-			pi_walker::walk::collect(&pi_walker::Fs::Native, &self.cwd, &opts, false, &stop, |_, entry| {
+		let result = pi_walker::walk::collect(
+			&pi_walker::Fs::Native,
+			&self.cwd,
+			&opts,
+			false,
+			&stop,
+			|_, entry| {
 				if !matches!(entry.file_type, pi_walker::FileType::File | pi_walker::FileType::Dir)
 					|| !glob.is_match_base(entry.path, entry.name())
 				{
@@ -200,8 +205,9 @@ impl PathPolicy {
 					return pi_walker::walk::Action::Stop;
 				}
 				pi_walker::walk::Action::Continue
-			})
-			.ok()?;
+			},
+		)
+		.ok()?;
 		if kept.load(Ordering::Relaxed) != 1 || result.len() != 1 {
 			return None;
 		}

@@ -50,8 +50,8 @@ Rust creates `brush_core::Shell` with:
 - process builtins registered unconditionally from `pi_builtins::process_builtins()` — `nohup`, `pgrep`, `pkill`, `pidwait`, `ps`, `sleep`, `timeout`, and `top` (`nohup` is withheld when `PI_DISABLE_NOHUP_BUILTIN` is set; `kill` comes from the default bash-mode set, where `pi-builtins`' richer implementation replaces brush's original),
 - in-process utility builtins registered from `pi_builtins::utility_builtins()` (see the next section),
 - an opt-in `git` builtin (`crates/pi-shell/src/git.rs`), registered when either layer below is on; anything a layer does not take runs the git binary with the original arguments:
-  - `PI_SMART_GIT` serves supported `git worktree add` invocations through `pi-vcs`: copy-on-write clone, worktree registration, and reconciliation to the target commit, with an in-process checkout fallback when cloning is unavailable;
-  - `PI_GIT_GUARD` (set by the coding agent from `bash.gitGuard`; `crates/pi-shell/src/git/guard.rs`) refuses, with exit status 1, git commands that discard or move work in a shared checkout: `stash` other than `list`/`show`/`create`, `reset --hard`, `reset` to a commit other than HEAD's, `switch` and `checkout` of a branch or commit, and `checkout` of paths and working-tree `restore` unless the repository is mid-merge/rebase/cherry-pick/revert (unmerged index entries or the operation's state files; a finished rebase's leftover `REBASE_HEAD` does not count), and even then not forced or whole-tree forms. It judges the expanded argv in the directory git actually runs in (`cd` and `-C` applied); `--git-dir`/`--work-tree`/`GIT_DIR`-style redirection forfeits the conflict exemption,
+   - `PI_SMART_GIT` serves supported `git worktree add` invocations through `pi-vcs`: copy-on-write clone, worktree registration, and reconciliation to the target commit, with an in-process checkout fallback when cloning is unavailable;
+   - `PI_GIT_GUARD` (set by the coding agent from `bash.gitGuard`; `crates/pi-shell/src/git/guard.rs`) refuses, with exit status 1, git commands that discard or move work in a shared checkout: `stash` other than `list`/`show`/`create`, `reset --hard`, `reset` to a commit other than HEAD's, `switch` and `checkout` of a branch or commit, and `checkout` of paths and working-tree `restore` unless the repository is mid-merge/rebase/cherry-pick/revert (unmerged index entries or the operation's state files; a finished rebase's leftover `REBASE_HEAD` does not count), and even then not forced or whole-tree forms. It judges the expanded argv in the directory git actually runs in (`cd` and `-C` applied); `--git-dir`/`--work-tree`/`GIT_DIR`-style redirection forfeits the conflict exemption,
 - skip-list for shell-sensitive vars (`PS1`, `PWD`, `SHLVL`, bash function exports, etc.),
 - a non-exported `env="$env"` fallback so PowerShell-style `$env:NAME` survives brush parameter expansion unless the user shadows `env`.
 
@@ -121,8 +121,8 @@ One-shot shell (`executeShell`) always creates and drops a fresh session per cal
 - `CancelToken` is constructed from `timeoutMs` and optional `AbortSignal`, then converted into the shared `pi_shell::cancel::CancelToken`.
 - On cancellation/timeout, shell cancellation token is triggered, descendant cleanup runs, then the task gets a 2-second graceful window (5 seconds on Windows) before forced abort.
 - Structured result flags are used:
-  - timeout -> `exitCode` omitted, `timedOut: true`.
-  - abort signal / `Shell.abort()` -> `exitCode` omitted, `cancelled: true`.
+   - timeout -> `exitCode` omitted, `timedOut: true`.
+   - abort signal / `Shell.abort()` -> `exitCode` omitted, `cancelled: true`.
 
 `Shell.abort()` behavior:
 
@@ -174,9 +174,9 @@ Concurrency guard:
 - PTY opened via `portable_pty::native_pty_system().openpty(...)`.
 - On Windows, `openpty()` is run on a helper thread with a 5s startup timeout; timeout rejects with `PTY creation timed out (5s). ConPTY may be unavailable on this system.`
 - `start()` runs the command through the configured shell:
-  - `cmd.exe`/`cmd` gets `/c`,
-  - `powershell`/`pwsh` gets `-Command`,
-  - other shells get `-lc`.
+   - `cmd.exe`/`cmd` gets `/c`,
+   - `powershell`/`pwsh` gets `-Command`,
+   - other shells get `-lc`.
 - `startArgv()` passes each argument directly to `portable_pty::CommandBuilder`.
 - PTY commands inherit the process environment after stripping Git repository-location overrides; explicit PTY `env` values can add them back.
 - Default size is `120x40`; dimensions are clamped (`cols 20..400`, `rows 5..200`) on start and resize.

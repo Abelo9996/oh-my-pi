@@ -1136,11 +1136,19 @@ mod tests {
 	fn repo_files(byte_budget: Option<usize>) -> Vec<PathBuf> {
 		let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 		let opts = pi_walker::walk::Options { gitignore: true, skip_git: true, ..Default::default() };
-		let walked =
-			pi_walker::walk::collect(&pi_walker::Fs::native(), &root, &opts, false, &pi_walker::Never, |_, entry| {
+		let walked = pi_walker::walk::collect(
+			&pi_walker::Fs::native(),
+			&root,
+			&opts,
+			false,
+			&pi_walker::Never,
+			|_, entry| {
 				let wanted = entry.file_type == pi_walker::FileType::File
 					&& matches!(
-						entry.rel_path().extension().and_then(std::ffi::OsStr::to_str),
+						entry
+							.rel_path()
+							.extension()
+							.and_then(std::ffi::OsStr::to_str),
 						Some("ts" | "py" | "rs")
 					);
 				if wanted {
@@ -1148,9 +1156,13 @@ mod tests {
 				} else {
 					pi_walker::walk::Action::Skip
 				}
-			})
-			.expect("repository should walk");
-		let mut files: Vec<PathBuf> = walked.iter().map(|entry| root.join(entry.rel_path())).collect();
+			},
+		)
+		.expect("repository should walk");
+		let mut files: Vec<PathBuf> = walked
+			.iter()
+			.map(|entry| root.join(entry.rel_path()))
+			.collect();
 		files.sort();
 		let Some(budget) = byte_budget else {
 			return files;

@@ -38,7 +38,6 @@ use std::{
 };
 
 use pi_vfs::BlockingFs;
-
 pub use root::{absolute, canonical, resolve_dir};
 
 /// Kind of a listed entry. Special files (devices, FIFOs, sockets) are never

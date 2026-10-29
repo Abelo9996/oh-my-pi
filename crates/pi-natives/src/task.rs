@@ -141,9 +141,10 @@ impl CancelToken {
 				"Native directory scan failed for {}: {error}",
 				path.display()
 			)),
-			pi_walker::walk::WalkError::Stopped => {
-				self.heartbeat().err().unwrap_or_else(|| Error::from_reason("Aborted"))
-			},
+			pi_walker::walk::WalkError::Stopped => self
+				.heartbeat()
+				.err()
+				.unwrap_or_else(|| Error::from_reason("Aborted")),
 		}
 	}
 }

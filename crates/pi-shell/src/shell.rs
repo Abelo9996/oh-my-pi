@@ -4778,10 +4778,11 @@ mod tests {
 			let help = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
 			let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
 			assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
-			// Some builtins are registered under the familiar command name but keep
-			// their implementation's own help text, exactly as the standalone
-			// versions did: `rg` is ripgrep, `jq` is jaq, `sg` is ast-grep (whose
-			// help names itself only through its usage line, here `sg`).
+			// Some builtins are registered under the familiar command name but
+			// keep their implementation's own help text, exactly as the
+			// standalone versions did: `rg` is ripgrep, `jq` is jaq, `sg`
+			// is ast-grep (whose help names itself only through its usage
+			// line, here `sg`).
 			let expected = match name {
 				"rg" => "ripgrep",
 				"jq" => "jaq",

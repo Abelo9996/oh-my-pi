@@ -366,7 +366,9 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 	let entries =
 		pi_walker::walk::collect(&pi_walker::Fs::Native, &root, &opts, false, &ct, |_, entry| {
 			match entry.file_type {
-				pi_walker::FileType::File | pi_walker::FileType::Dir => pi_walker::walk::Action::Continue,
+				pi_walker::FileType::File | pi_walker::FileType::Dir => {
+					pi_walker::walk::Action::Continue
+				},
 				pi_walker::FileType::Symlink => pi_walker::walk::Action::Skip,
 			}
 		})

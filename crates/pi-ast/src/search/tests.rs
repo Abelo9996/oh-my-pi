@@ -35,13 +35,20 @@ fn temp_tree(files: &[(&str, &str)]) -> TempTree {
 }
 
 /// Candidates as the `astGrep`/`astEdit` natives discover them.
-fn candidates(fs: &BlockingFs, root: &Path, glob: Option<&str>, lang: Option<&str>) -> Vec<Candidate> {
+fn candidates(
+	fs: &BlockingFs,
+	root: &Path,
+	glob: Option<&str>,
+	lang: Option<&str>,
+) -> Vec<Candidate> {
 	let include = glob.map(|glob| Selector::scope(glob, false).expect("glob compiles"));
 	let opts = Discover {
 		include: include.as_ref(),
 		hidden: true,
 		gitignore: true,
-		node_modules: include.as_ref().is_some_and(Selector::mentions_node_modules),
+		node_modules: include
+			.as_ref()
+			.is_some_and(Selector::mentions_node_modules),
 		any_file: lang.is_some(),
 		..Default::default()
 	};
@@ -55,7 +62,11 @@ fn displays(candidates: &[Candidate]) -> Vec<&str> {
 		.collect()
 }
 
-fn rewrite_spec<'a>(rules: &'a [(String, String)], lang: Option<&'a str>, mode: Mode) -> Rewrite<'a> {
+fn rewrite_spec<'a>(
+	rules: &'a [(String, String)],
+	lang: Option<&'a str>,
+	mode: Mode,
+) -> Rewrite<'a> {
 	Rewrite {
 		rules,
 		lang,
@@ -90,9 +101,14 @@ const BROKEN_PYTHON: &str = "def broken(:\n    print(\"BADPY_MARKER\")\n";
 const VALID_PYTHON: &str = "def working():\n    print(\"BADPY_MARKER\")\n";
 const REWRITTEN_PYTHON: &str = "def working():\n    repr(\"BADPY_MARKER\")\n";
 
-fn edit_python_tree(tree: &TempTree, dry_run: bool, fail_on_parse_error: bool) -> Result<Edited, Error> {
+fn edit_python_tree(
+	tree: &TempTree,
+	dry_run: bool,
+	fail_on_parse_error: bool,
+) -> Result<Edited, Error> {
 	let rules = rules(&[("print($A)", "repr($A)")]);
-	let spec = Rewrite { fail_on_parse_error, ..rewrite_spec(&rules, Some("python"), mode(dry_run)) };
+	let spec =
+		Rewrite { fail_on_parse_error, ..rewrite_spec(&rules, Some("python"), mode(dry_run)) };
 	rewrite_tree(tree, &spec, Some("*.py"))
 }
 
@@ -199,7 +215,11 @@ fn rewrite_previews_and_applies_valid_python() {
 		assert_eq!(changes.len(), 1);
 		assert_eq!(changes[0].before, "print(\"BADPY_MARKER\")");
 		assert_eq!(changes[0].after, "repr(\"BADPY_MARKER\")");
-		let expected = if dry_run { VALID_PYTHON } else { REWRITTEN_PYTHON };
+		let expected = if dry_run {
+			VALID_PYTHON
+		} else {
+			REWRITTEN_PYTHON
+		};
 		assert_eq!(fs::read_to_string(tree.root.join("valid.py")).unwrap(), expected);
 	}
 }
@@ -409,9 +429,10 @@ fn find_page_orders_and_pages_across_files() {
 	assert_eq!(found.files_with_matches, 2);
 	assert!(found.limit_reached);
 	assert_eq!(found.hits.len(), 1);
-	assert_eq!((found.hits[0].display.as_str(), found.hits[0].matched.text.as_str()), (
-		"a.ts", "foo(2)"
-	));
+	assert_eq!(
+		(found.hits[0].display.as_str(), found.hits[0].matched.text.as_str()),
+		("a.ts", "foo(2)")
+	);
 }
 
 #[test]
@@ -425,13 +446,14 @@ fn rewrite_goes_through_the_provider_for_url_trees() {
 	let found = candidates(&fs, Path::new("mem://root/src"), None, None);
 	let edited = rewrite(&fs, found, &rewrite_spec(&rules, None, Mode::Write), &Never)
 		.expect("URL tree should rewrite through the provider");
-	let shown: Vec<_> = edited.files.iter().map(|file| file.display.as_str()).collect();
+	let shown: Vec<_> = edited
+		.files
+		.iter()
+		.map(|file| file.display.as_str())
+		.collect();
 	assert_eq!(shown, ["a.ts", "nested/b.ts"]);
 	assert_eq!(mem.contents("mem://root/src/a.ts").as_deref(), Some("const f = identity;\n"));
-	assert_eq!(
-		mem.contents("mem://root/src/nested/b.ts").as_deref(),
-		Some("const g = identity;\n")
-	);
+	assert_eq!(mem.contents("mem://root/src/nested/b.ts").as_deref(), Some("const g = identity;\n"));
 	assert_eq!(
 		mem.contents("mem://root/other.ts").as_deref(),
 		Some("const h = (z) => z;\n"),

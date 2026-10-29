@@ -47,7 +47,7 @@ The `models` subpath (also exported from the root) provides timestamp-aware pric
 | `calculateCost(model, usage, timestamp?)`                         | Updates and returns `usage.cost` using `model.cost`.                                                      |
 | `calculateUsageCost(cost, usage, timestamp?)`                     | Updates and returns `usage.cost` using a `ModelCost`.                                                     |
 | `calculateUncachedInputCost(cost, promptInputTokens, timestamp?)` | Returns the cost of a fully uncached prompt.                                                              |
-| `getEffectiveTokenCost(cost, timestamp?)`                         | Returns the base card in force: the latest due effective rate, else the row's own legs.                  |
+| `getEffectiveTokenCost(cost, timestamp?)`                         | Returns the base card in force: the latest due effective rate, else the row's own legs.                   |
 | `getTimeBasedPricingPeriod(cost, timestamp?)`                     | Returns `"peak"`, `"off-peak"`, or `undefined` without a recurring tariff.                                |
 | `hasRecurringTariff(schedule)`                                    | Whether a `TimeBasedCost` carries a peak/off-peak tariff rather than only dated rate cards.               |
 | `getNextTimeBasedPricingTransition(cost, timestamp?)`             | Returns the next actual peak/off-peak change strictly after the timestamp, or `undefined` if none exists. |

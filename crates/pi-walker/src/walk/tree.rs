@@ -121,6 +121,7 @@ impl<'a> TreeEntry<'a> {
 	pub fn rel_path(&self) -> &'a Path {
 		super::rel_path(self.path)
 	}
+
 	/// Final path component (empty for the root).
 	pub fn name(&self) -> &'a [u8] {
 		match memchr::memrchr(b'/', self.path) {

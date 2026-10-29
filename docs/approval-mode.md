@@ -51,9 +51,9 @@ The **Remember across sessions** toggle above these answers decides where a gran
 
 ```yaml
 tools:
-  restrictedFolders:
-    - ~/secrets
-    - C:/work/payments
+   restrictedFolders:
+      - ~/secrets
+      - C:/work/payments
 ```
 
 - A restricted folder covers itself and everything below it. A call whose targets fall inside it (`read`, `write`, `edit`, `grep`, `glob`, `ast_grep`, `find`, and any tool reporting `approvalCacheTargets`) prompts with `Reason: Restricted folder: <folder>`. A recursive search rooted above a restricted folder prompts too, because it reads into it; a one-level listing of the parent does not.
@@ -69,11 +69,11 @@ tools:
 
 ```yaml
 tools:
-  approvalMode: write
-  approval:
-    bash: prompt
-    read: allow
-    mcp__filesystem_delete: deny
+   approvalMode: write
+   approval:
+      bash: prompt
+      read: allow
+      mcp__filesystem_delete: deny
 ```
 
 For MCP tools, key the policy by the exact final registered name. The ordinary form is
@@ -173,17 +173,12 @@ Examples:
 ```ts
 approval: "read";
 
-approval: (args) => (LSP_READONLY_ACTIONS.has(args.action) ? "read" : "write");
+approval: args => (LSP_READONLY_ACTIONS.has(args.action) ? "read" : "write");
 
-approval: (args) =>
-  isCritical(args.command)
-    ? { tier: "exec", override: true, reason: "Critical pattern detected" }
-    : "exec";
+approval: args =>
+	isCritical(args.command) ? { tier: "exec", override: true, reason: "Critical pattern detected" } : "exec";
 
-approval: (args) =>
-  isForbidden(args)
-    ? { tier: "exec", policy: "deny", reason: "Blocked by tool policy" }
-    : "write";
+approval: args => (isForbidden(args) ? { tier: "exec", policy: "deny", reason: "Blocked by tool policy" } : "write");
 ```
 
 ## ACP sessions
@@ -194,7 +189,7 @@ To auto-approve ACP tool calls, set the mode in global or project config:
 
 ```yaml
 tools:
-  approvalMode: yolo
+   approvalMode: yolo
 ```
 
 Or launch the ACP server with a runtime override or a one-process config overlay:

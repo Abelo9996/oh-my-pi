@@ -17,8 +17,8 @@ use napi::{
 };
 use napi_derive::napi;
 use parking_lot::{Condvar, Mutex};
-use pi_walker::grep::Engine;
 use pi_vfs::BlockingFs;
+use pi_walker::grep::Engine;
 
 use crate::{shell::vfs::ShellFilesystem, task, utils::clamp_u32};
 
@@ -689,4 +689,3 @@ pub fn grep<'env>(
 		}
 	})
 }
-

@@ -20,13 +20,13 @@ tools:
    approvalMode: write
 ```
 
-| Key                  |  Default | Meaning                                                                                                                                                                                                               |
-| -------------------- | -------: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `computer.enabled`   |  `false` | Expose the `computer` Eval prelude.                                                                                                                                                                                   |
-| `computer.display`   | `active` | Capture the monitor with the largest overlap with the focused window, falling back to the primary monitor. Use `all` for a composite, or a native display ID. On Wayland the portal display ID is `wayland-portal-0`. |
-| `computer.maxWidth`  |   `3840` | Maximum screenshot width. Some model transports impose an effective coordinate-safe cap of 1280.                                                                                                                      |
-| `computer.maxHeight` |   `2400` | Maximum screenshot height. Some model transports impose an effective coordinate-safe cap of 896.                                                                                                                      |
-| `computer.backgroundFallback` | `takeover` | What a window input call does when its background route is unavailable: `takeover` reruns that one call in takeover and returns focus to the user's app; `refuse` fails it with `BackgroundUnavailable`, takes nothing over, and also refuses the model's own foreground requests and, on macOS, its calls that open a menu (see *Screenshots and pixel input*). |
+| Key                           |    Default | Meaning                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------- | ---------: | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `computer.enabled`            |    `false` | Expose the `computer` Eval prelude.                                                                                                                                                                                                                                                                                                                              |
+| `computer.display`            |   `active` | Capture the monitor with the largest overlap with the focused window, falling back to the primary monitor. Use `all` for a composite, or a native display ID. On Wayland the portal display ID is `wayland-portal-0`.                                                                                                                                            |
+| `computer.maxWidth`           |     `3840` | Maximum screenshot width. Some model transports impose an effective coordinate-safe cap of 1280.                                                                                                                                                                                                                                                                 |
+| `computer.maxHeight`          |     `2400` | Maximum screenshot height. Some model transports impose an effective coordinate-safe cap of 896.                                                                                                                                                                                                                                                                 |
+| `computer.backgroundFallback` | `takeover` | What a window input call does when its background route is unavailable: `takeover` reruns that one call in takeover and returns focus to the user's app; `refuse` fails it with `BackgroundUnavailable`, takes nothing over, and also refuses the model's own foreground requests and, on macOS, its calls that open a menu (see _Screenshots and pixel input_). |
 
 There is no `computer.backend` setting: the native addon selects the platform backend. The `/computer`, `/computer on`, `/computer off`, and `/computer status` commands toggle or inspect the current session without writing config. Interactive and RPC CLI hosts watch settings files and reconcile enabled preludes for subsequent Eval calls; `/computer status` shows the effective setting. SDK hosts must refresh their settings themselves.
 
@@ -219,10 +219,10 @@ While the agent uses the desktop, the macOS session holds a `PreventUserIdleDisp
 
 The assertion does not wake a display that is already asleep or unlock a locked screen. `capabilities()` reports `screenLocked` and `displayAsleep`, a screenshot taken behind the lock screen carries `screenLocked: true` and a note, any failed call names the state, and a run that ends locked or asleep starts with a `Note:` line. Input is never refused because of the lock; measured on macOS 26, it behaves as follows:
 
-| State | Screenshots | Background click | Keystrokes, takeover, AX actions |
-| --- | --- | --- | --- |
-| Locked, display on | A display capture shows the lock screen; a window capture shows the window's last frame behind it. | Reaches the app behind the lock screen. | Fail: apps expose no AX windows or elements while locked. |
-| Locked, display asleep | Fail: no active displays. | Fails: no display layout. | Fail, as above. |
+| State                  | Screenshots                                                                                        | Background click                        | Keystrokes, takeover, AX actions                          |
+| ---------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------- | --------------------------------------------------------- |
+| Locked, display on     | A display capture shows the lock screen; a window capture shows the window's last frame behind it. | Reaches the app behind the lock screen. | Fail: apps expose no AX windows or elements while locked. |
+| Locked, display asleep | Fail: no active displays.                                                                          | Fails: no display layout.               | Fail, as above.                                           |
 
 No agent input reached the lock screen's password field.
 

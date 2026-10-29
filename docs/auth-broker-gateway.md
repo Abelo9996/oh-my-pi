@@ -79,7 +79,7 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/credential/:id/disable` | bearer | Disable one credential with a recorded cause                       |
 | `GET`    | `/v1/credentials/disabled`   | bearer | List disabled credentials; optional `provider` query filter        |
 | `POST`   | `/v1/credential/:id/block`   | bearer | Upsert a provider/scope rate-limit block                           |
-| `DELETE` | `/v1/credential/:id/block`   | bearer | Delete one block named by body `providerKey` and `blockScope`       |
+| `DELETE` | `/v1/credential/:id/block`   | bearer | Delete one block named by body `providerKey` and `blockScope`      |
 | `DELETE` | `/v1/credential/:id/blocks`  | bearer | Delete all rate-limit blocks for a credential                      |
 | `GET`    | `/v1/usage`                  | bearer | Aggregate current `UsageReport[]` across credentials               |
 | `GET`    | `/v1/usage/history`          | bearer | Persisted usage history; optional `sinceMs` and `provider` filters |
@@ -168,14 +168,14 @@ omp auth-gateway check   [--strict] [--json]
 
 ```json
 {
-  "ci": {
-    "tokenSha256": "<hex SHA-256 of the client's token>",
-    "models": ["anthropic/claude-sonnet-4-5", "openai-codex/*"],
-    "accounts": {
-      "anthropic": ["email:ci@example.com|org:org-team"],
-      "openai-codex": ["email:ci@example.com|org:ws-team"]
-    }
-  }
+	"ci": {
+		"tokenSha256": "<hex SHA-256 of the client's token>",
+		"models": ["anthropic/claude-sonnet-4-5", "openai-codex/*"],
+		"accounts": {
+			"anthropic": ["email:ci@example.com|org:org-team"],
+			"openai-codex": ["email:ci@example.com|org:ws-team"]
+		}
+	}
 }
 ```
 
@@ -205,26 +205,26 @@ omp auth-gateway check   [--strict] [--json]
 
 ### Endpoints
 
-| Method | Path                    | Auth   | Purpose                                                      |
-| ------ | ----------------------- | ------ | ------------------------------------------------------------ |
-| `GET`  | `/healthz`              | none   | Liveness + version                                           |
-| `GET`  | `/v1/usage`             | bearer | Aggregate `UsageReport[]` (proxied through `AuthStorage`)    |
-| `GET`  | `/v1/models`            | bearer | Registry catalog filtered to providers with credentials |
-| `GET`  | `/v1/credentials/check` | bearer | Per-credential auth health probe                             |
-| `POST` | `/v1/chat/completions`  | bearer | OpenAI Chat Completions wire format                          |
-| `POST` | `/v1/messages`          | bearer | Anthropic Messages wire format                               |
-| `POST` | `/v1/responses`         | bearer | OpenAI Responses wire format                                 |
-| `POST` | `/v1/pi/stream`         | bearer | Native `pi-ai` stream wire format                            |
-| `POST` | `/v1/systemone`         | bearer | TypeSafe System One judgments (`judge` models, e.g. `typesafe/jev-latest`); `/alpha/decisions` is the OpenRouter Decisions alias |
-| `POST` | `/v1/images/generations` | bearer | Image generation, OpenAI Images JSON wire; `/v1/images` is the OpenRouter alias (`image` models) |
-| `POST` | `/v1/images/edits`      | bearer | Image edits: OpenAI multipart or OpenRouter JSON input images |
-| `POST` | `/v1/audio/speech`      | bearer | Text-to-speech, OpenAI/OpenRouter JSON wire; answers raw audio bytes (`tts` models: `xai-tts`, `openai-speech`) |
-| `POST` | `/v1/audio/transcriptions` | bearer | Speech-to-text, OpenAI multipart `file` or OpenRouter JSON `input_audio` base64 (`stt` models on `openai-transcriptions`; 25 MiB cap) |
-| `POST` | `/v1/embeddings`        | bearer | Embeddings, OpenAI wire (`embedding` models on `openai-embeddings`; OpenAI + OpenRouter; 8 MiB cap) |
-| `POST` | `/v1/rerank`            | bearer | Rerank, OpenRouter wire (`rerank` models on `openrouter-rerank`) |
-| `POST` | `/v1/videos`            | bearer | Submit a video generation job, OpenRouter wire (`video` models on `openrouter-video`); answers `202` with gateway-rewritten polling/content URLs |
-| `GET`  | `/v1/videos/:id`        | bearer | Poll a video job. `:id` is gateway-issued and stateless: it encodes provider, model, and upstream job id |
-| `GET`  | `/v1/videos/:id/content` | bearer | Stream the finished video bytes with the upstream content type |
+| Method | Path                       | Auth   | Purpose                                                                                                                                          |
+| ------ | -------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET`  | `/healthz`                 | none   | Liveness + version                                                                                                                               |
+| `GET`  | `/v1/usage`                | bearer | Aggregate `UsageReport[]` (proxied through `AuthStorage`)                                                                                        |
+| `GET`  | `/v1/models`               | bearer | Registry catalog filtered to providers with credentials                                                                                          |
+| `GET`  | `/v1/credentials/check`    | bearer | Per-credential auth health probe                                                                                                                 |
+| `POST` | `/v1/chat/completions`     | bearer | OpenAI Chat Completions wire format                                                                                                              |
+| `POST` | `/v1/messages`             | bearer | Anthropic Messages wire format                                                                                                                   |
+| `POST` | `/v1/responses`            | bearer | OpenAI Responses wire format                                                                                                                     |
+| `POST` | `/v1/pi/stream`            | bearer | Native `pi-ai` stream wire format                                                                                                                |
+| `POST` | `/v1/systemone`            | bearer | TypeSafe System One judgments (`judge` models, e.g. `typesafe/jev-latest`); `/alpha/decisions` is the OpenRouter Decisions alias                 |
+| `POST` | `/v1/images/generations`   | bearer | Image generation, OpenAI Images JSON wire; `/v1/images` is the OpenRouter alias (`image` models)                                                 |
+| `POST` | `/v1/images/edits`         | bearer | Image edits: OpenAI multipart or OpenRouter JSON input images                                                                                    |
+| `POST` | `/v1/audio/speech`         | bearer | Text-to-speech, OpenAI/OpenRouter JSON wire; answers raw audio bytes (`tts` models: `xai-tts`, `openai-speech`)                                  |
+| `POST` | `/v1/audio/transcriptions` | bearer | Speech-to-text, OpenAI multipart `file` or OpenRouter JSON `input_audio` base64 (`stt` models on `openai-transcriptions`; 25 MiB cap)            |
+| `POST` | `/v1/embeddings`           | bearer | Embeddings, OpenAI wire (`embedding` models on `openai-embeddings`; OpenAI + OpenRouter; 8 MiB cap)                                              |
+| `POST` | `/v1/rerank`               | bearer | Rerank, OpenRouter wire (`rerank` models on `openrouter-rerank`)                                                                                 |
+| `POST` | `/v1/videos`               | bearer | Submit a video generation job, OpenRouter wire (`video` models on `openrouter-video`); answers `202` with gateway-rewritten polling/content URLs |
+| `GET`  | `/v1/videos/:id`           | bearer | Poll a video job. `:id` is gateway-issued and stateless: it encodes provider, model, and upstream job id                                         |
+| `GET`  | `/v1/videos/:id/content`   | bearer | Stream the finished video bytes with the upstream content type                                                                                   |
 
 For `POST /v1/systemone`, TypeSafe models accept TypeSafe's inline `assets` form (`data_base64` only; multipart `part` assets are rejected), and every asset must be referenced in `state`, `instructions`, or `criteria`; other native APIs reject that form with `422`. The existing `images` field remains available for compatible backends and accepts inline data only, for example `images: [{type:'image',data:'<base64>',mimeType:'image/png',detail:'high'}]`; file paths are not supported. Image data must be non-empty standard base64 with valid padding and canonical trailing bits; padding may be omitted. Optional `detail` must be `auto`, `low`, `high`, or `original`. Invalid image fields, or images sent to a judge model without image input, return `422` before provider credential lookup or any upstream request; images are never silently dropped.
 
@@ -281,27 +281,27 @@ Broker clients can restrict which broker credentials they see by setting `OMP_AU
 
 ```json
 {
-  "anthropic": ["email:alice@example.com|org:org-team"],
-  "openai-codex": []
+	"anthropic": ["email:alice@example.com|org:org-team"],
+	"openai-codex": []
 }
 ```
 
 An array lists exact `identityKey` values from the broker snapshot protocol. `identityKey` is the token-free identity field already carried by each authenticated `/v1/snapshot` credential entry. Operator tooling should project only `provider` and `identityKey`; it must not retain or print the accompanying credential payload. A dedicated account-listing CLI is intentionally outside this routing feature's scope.
 
-| Value | OAuth accounts visible | API keys visible |
-| --- | --- | --- |
-| `["id", …]` | only exact identity matches, including organization/workspace qualifiers; `[]` hides all | yes |
-| `true` | all | yes |
-| `false` | none | no |
-| `{ "accounts"?: ["id", …], "apiKeys"?: boolean }` | `accounts` as with the array form; omitted means all | `apiKeys`; omitted means yes |
+| Value                                             | OAuth accounts visible                                                                   | API keys visible             |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------- |
+| `["id", …]`                                       | only exact identity matches, including organization/workspace qualifiers; `[]` hides all | yes                          |
+| `true`                                            | all                                                                                      | yes                          |
+| `false`                                           | none                                                                                     | no                           |
+| `{ "accounts"?: ["id", …], "apiKeys"?: boolean }` | `accounts` as with the array form; omitted means all                                     | `apiKeys`; omitted means yes |
 
 Providers without their own key follow the `"*"` rule, and with no `"*"` key they are unrestricted. `"*": false` turns the file into an allow-list: only listed providers are visible, OAuth and API keys alike. For example, this exposes one Codex account and OpenRouter API keys, and nothing else:
 
 ```json
 {
-  "*": false,
-  "openai-codex": { "accounts": ["account:acct-123"], "apiKeys": false },
-  "openrouter": true
+	"*": false,
+	"openai-codex": { "accounts": ["account:acct-123"], "apiKeys": false },
+	"openrouter": true
 }
 ```
 
@@ -326,12 +326,12 @@ Broker-backed credential storage is **off** unless `OMP_AUTH_BROKER_URL` (or `au
 
 ### Environment variables
 
-| Variable                            | Purpose                                                                                                                                                                | Required when                                                                                                             |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `OMP_AUTH_BROKER_URL`               | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`). Selecting this puts the client in broker mode — local SQLite is bypassed.                     | Any time the omp client should resolve credentials through a broker (and required by `omp auth-gateway serve`).           |
-| `OMP_AUTH_BROKER_TOKEN`             | Bearer token used for every broker endpoint except `/v1/healthz`.                                                                                                      | When `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`. |
-| `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`   | Freshness window for the encrypted local snapshot cache. Default `3600000` (1 h); `0` disables cache reads and writes.                                                 | Optional in broker mode.                                                                                                  |
-| `OMP_AUTH_BROKER_SNAPSHOT_CACHE`    | Path override for the encrypted local snapshot cache. Default `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent).                                       | Optional in broker mode.                                                                                                  |
+| Variable                            | Purpose                                                                                                                                                                                               | Required when                                                                                                             |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `OMP_AUTH_BROKER_URL`               | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`). Selecting this puts the client in broker mode — local SQLite is bypassed.                                                    | Any time the omp client should resolve credentials through a broker (and required by `omp auth-gateway serve`).           |
+| `OMP_AUTH_BROKER_TOKEN`             | Bearer token used for every broker endpoint except `/v1/healthz`.                                                                                                                                     | When `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`. |
+| `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`   | Freshness window for the encrypted local snapshot cache. Default `3600000` (1 h); `0` disables cache reads and writes.                                                                                | Optional in broker mode.                                                                                                  |
+| `OMP_AUTH_BROKER_SNAPSHOT_CACHE`    | Path override for the encrypted local snapshot cache. Default `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent).                                                                      | Optional in broker mode.                                                                                                  |
 | `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | JSON file of per-provider visibility rules for broker credentials (OAuth `identityKey` lists, API-key toggle, `"*"` default for unlisted providers). Parsed once; invalid files abort initialization. | Optional in broker mode.                                                                                                  |
 
 Resolution order in `resolveAuthBrokerConfig()`:
@@ -344,12 +344,12 @@ The gateway uses the same broker URL/token resolution and account-pool environme
 
 ### `config.yml` keys
 
-| Key                 | Default | Purpose                                                                                                                                                                            |
-| ------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auth.broker.url`   | unset   | Same as `OMP_AUTH_BROKER_URL`; env wins. Hidden from the settings UI. Values are resolved as a literal, an environment variable name, or `!<shell command>` to use trimmed stdout. |
-| `auth.broker.token` | unset   | Same as `OMP_AUTH_BROKER_TOKEN`; env wins. Values are resolved the same way.                                                                                                       |
-| `auth.accountPolicies` | `[]` | Per-account OAuth routing rules: `provider`, identity selector `account` (`email`, `accountId`, `projectId`, optional `orgId`), optional `priority`, `reservePct` (0–100) and `reclaimAbovePct`. With `reclaimAbovePct` (above the account's effective reserve, at most 100), sessions automatically pinned to a lower-priority account move back on their next request once this account has that much quota left; explicitly chosen accounts never move. |
-| `retry.usageReservePct` | `10` | Default protected remaining-quota percentage when an account has no `reservePct` override. |
+| Key                     | Default | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth.broker.url`       | unset   | Same as `OMP_AUTH_BROKER_URL`; env wins. Hidden from the settings UI. Values are resolved as a literal, an environment variable name, or `!<shell command>` to use trimmed stdout.                                                                                                                                                                                                                                                                         |
+| `auth.broker.token`     | unset   | Same as `OMP_AUTH_BROKER_TOKEN`; env wins. Values are resolved the same way.                                                                                                                                                                                                                                                                                                                                                                               |
+| `auth.accountPolicies`  | `[]`    | Per-account OAuth routing rules: `provider`, identity selector `account` (`email`, `accountId`, `projectId`, optional `orgId`), optional `priority`, `reservePct` (0–100) and `reclaimAbovePct`. With `reclaimAbovePct` (above the account's effective reserve, at most 100), sessions automatically pinned to a lower-priority account move back on their next request once this account has that much quota left; explicitly chosen accounts never move. |
+| `retry.usageReservePct` | `10`    | Default protected remaining-quota percentage when an account has no `reservePct` override.                                                                                                                                                                                                                                                                                                                                                                 |
 
 Broker connection values come from the agent's main config file, not project settings. Account policies/reserve use effective settings (including project/explicit config layers). Long-lived SDK sessions follow policy changes and can replace the credential store in place when effective broker settings change; failed changes leave the current store active.
 
@@ -367,9 +367,9 @@ That ranking picks the account for a **new** session. A running session remember
 
 ### Token files
 
-| Path                              | Owner                                                | Mode                          |
-| --------------------------------- | ---------------------------------------------------- | ----------------------------- |
-| `<config-dir>/auth-broker.token`  | `omp auth-broker token` or `serve` | `0600`; new parent directory `0700` |
+| Path                              | Owner                                                                  | Mode                                |
+| --------------------------------- | ---------------------------------------------------------------------- | ----------------------------------- |
+| `<config-dir>/auth-broker.token`  | `omp auth-broker token` or `serve`                                     | `0600`; new parent directory `0700` |
 | `<config-dir>/auth-gateway.token` | `omp auth-gateway token` or `serve` (serve skips it under `--no-auth`) | `0600`; new parent directory `0700` |
 
 `<config-dir>` is `getConfigRootDir()`: `~/.omp/` by default, respecting `PI_CONFIG_DIR` and the active profile (`~/.omp/profiles/<name>/` for the default profile layout). Creating a token does not tighten permissions on an already-existing parent directory.

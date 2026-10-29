@@ -27,12 +27,12 @@ use ast_grep_core::{
 	source::Edit,
 	tree_sitter::{LanguageExt, StrDoc},
 };
+use pi_vfs::BlockingFs;
 use pi_walker::{
 	FileType, Stop,
 	glob::Selector,
 	walk::{self, Action, WalkError},
 };
-use pi_vfs::BlockingFs;
 
 use crate::{
 	language::{SupportLang, grammar::LanguageGrammar},
@@ -91,7 +91,11 @@ impl From<WalkError> for Error {
 
 /// [`Error::Stopped`] once `stop` fires.
 fn check(stop: &dyn Stop) -> Result<(), Error> {
-	if stop.stop() { Err(Error::Stopped) } else { Ok(()) }
+	if stop.stop() {
+		Err(Error::Stopped)
+	} else {
+		Ok(())
+	}
 }
 
 /// Which files below a directory root [`discover`] keeps.
@@ -175,24 +179,27 @@ pub fn discover(
 		..Default::default()
 	};
 	let excluded = |path: &[u8]| opts.exclude.is_some_and(|exclude| exclude.matches(path));
-	let collection = walk::collect(&walk_fs, &root, &walk_opts, true, stop, |_, entry| {
-		match entry.file_type {
+	let collection =
+		walk::collect(&walk_fs, &root, &walk_opts, true, stop, |_, entry| match entry.file_type {
 			FileType::Dir
 				if excluded(entry.path)
-					|| opts.include.is_some_and(|include| include.prunes(entry.path)) =>
+					|| opts
+						.include
+						.is_some_and(|include| include.prunes(entry.path)) =>
 			{
 				Action::SkipDir
 			},
 			FileType::File
-				if opts.include.is_none_or(|include| include.matches(entry.path))
+				if opts
+					.include
+					.is_none_or(|include| include.matches(entry.path))
 					&& !excluded(entry.path)
 					&& has_language(entry.rel_path()) =>
 			{
 				Action::Continue
 			},
 			_ => Action::Skip,
-		}
-	})?;
+		})?;
 	Ok(collection
 		.iter()
 		.map(|entry| Candidate {
@@ -452,7 +459,10 @@ pub fn find_page(
 	let (retained, limit_reached) = window.into_page();
 	let hits = retained
 		.into_iter()
-		.map(|retained| Hit { display: displays[retained.key.file].clone(), matched: retained.matched })
+		.map(|retained| Hit {
+			display: displays[retained.key.file].clone(),
+			matched: retained.matched,
+		})
 		.collect();
 	Ok(FindPage { hits, total_matches, files_with_matches, limit_reached, report })
 }
@@ -539,25 +549,25 @@ pub enum Mode {
 #[derive(Clone)]
 pub struct Rewrite<'a> {
 	/// `(pattern, replacement template)` rules, applied in order.
-	pub rules:              &'a [(String, String)],
+	pub rules:               &'a [(String, String)],
 	/// Language alias every file is parsed as; `None` infers it per file.
-	pub lang:               Option<&'a str>,
+	pub lang:                Option<&'a str>,
 	/// Node kind the patterns are parsed as, for fragments.
-	pub selector:           Option<&'a str>,
+	pub selector:            Option<&'a str>,
 	/// How closely patterns must match.
-	pub strictness:         MatchStrictness,
+	pub strictness:          MatchStrictness,
 	/// Most replacements across all files.
-	pub max_replacements:   usize,
+	pub max_replacements:    usize,
 	/// Most files changed.
-	pub max_files:          usize,
+	pub max_files:           usize,
 	/// Fail on the first unparsable file or pattern instead of skipping it
 	/// with a warning.
 	pub fail_on_parse_error: bool,
 	/// Drop a match overlapping an edit already kept in its file instead of
 	/// failing the render on the ambiguous overlap.
-	pub skip_overlaps:      bool,
+	pub skip_overlaps:       bool,
 	/// What to do with the replacements.
-	pub mode:               Mode,
+	pub mode:                Mode,
 }
 
 /// One replacement.
@@ -639,9 +649,13 @@ pub fn rewrite(
 		// error; failing in only some languages of a mixed tree is expected
 		// and surfaces per skipped file below.
 		if !prepared.languages.is_empty() && by_lang.values().all(Result::is_err) {
-			let mut errors = by_lang.iter().filter_map(|(key, result)| Some((key, result.as_ref().err()?)));
+			let mut errors = by_lang
+				.iter()
+				.filter_map(|(key, result)| Some((key, result.as_ref().err()?)));
 			if rewrite.fail_on_parse_error {
-				let (_, err) = errors.next().expect("compile failure recorded for every language");
+				let (_, err) = errors
+					.next()
+					.expect("compile failure recorded for every language");
 				return Err(Error::Invalid(format!("{pattern}: {err}")));
 			}
 			for (key, err) in errors {
@@ -806,8 +820,11 @@ pub fn rewrite_source(
 			Err(err) => warnings.push(format!("{pattern}: {err}")),
 		}
 	}
-	let unchanged =
-		|warnings: Vec<String>| SourceEdit { changes: Vec::new(), content: source.to_string(), warnings };
+	let unchanged = |warnings: Vec<String>| SourceEdit {
+		changes: Vec::new(),
+		content: source.to_string(),
+		warnings,
+	};
 	if rules.is_empty() {
 		return Ok(unchanged(warnings));
 	}
@@ -820,8 +837,12 @@ pub fn rewrite_source(
 		warnings.push(issue);
 		return Ok(unchanged(warnings));
 	}
-	let runnable: Vec<_> = rules.iter().map(|(template, pattern)| (*template, pattern)).collect();
-	let staged = stage(&ast, &runnable, rewrite.max_replacements, rewrite.skip_overlaps, None, stop)?;
+	let runnable: Vec<_> = rules
+		.iter()
+		.map(|(template, pattern)| (*template, pattern))
+		.collect();
+	let staged =
+		stage(&ast, &runnable, rewrite.max_replacements, rewrite.skip_overlaps, None, stop)?;
 	let content = render(source, &staged.edits)?;
 	Ok(SourceEdit { changes: staged.changes, content, warnings })
 }
@@ -841,7 +862,11 @@ struct Prepared {
 	missing_grammars: BTreeSet<&'static str>,
 }
 
-fn resolve(candidates: Vec<Candidate>, lang: Option<&str>, stop: &dyn Stop) -> Result<Prepared, Error> {
+fn resolve(
+	candidates: Vec<Candidate>,
+	lang: Option<&str>,
+	stop: &dyn Stop,
+) -> Result<Prepared, Error> {
 	let mut files = Vec::with_capacity(candidates.len());
 	let mut languages = BTreeMap::new();
 	let mut missing_grammars = BTreeSet::new();
@@ -859,7 +884,9 @@ fn resolve(candidates: Vec<Candidate>, lang: Option<&str>, stop: &dyn Stop) -> R
 					missing_grammars.insert(language.canonical_name());
 					continue;
 				}
-				languages.entry(language.canonical_name()).or_insert(language);
+				languages
+					.entry(language.canonical_name())
+					.or_insert(language);
 				files.push(Resolved { candidate, language: Ok(language) });
 			},
 			Err(err) => files.push(Resolved { candidate, language: Err(err.to_string()) }),
@@ -912,7 +939,13 @@ fn scan(
 	candidates: Vec<Candidate>,
 	query: &Query<'_>,
 	stop: &dyn Stop,
-	mut visit: impl FnMut(Candidate, SupportLang, String, &Ast, &[&Pattern]) -> Result<ControlFlow<()>, Error>,
+	mut visit: impl FnMut(
+		Candidate,
+		SupportLang,
+		String,
+		&Ast,
+		&[&Pattern],
+	) -> Result<ControlFlow<()>, Error>,
 ) -> Result<Report, Error> {
 	let prepared = resolve(candidates, query.lang, stop)?;
 	let mut warnings = Vec::new();
@@ -969,10 +1002,8 @@ fn scan(
 		}
 		let ast = language.ast_grep(&source);
 		if has_parse_error(&ast) {
-			warnings.push(format!(
-				"{}: parse error (syntax tree contains error nodes)",
-				candidate.display
-			));
+			warnings
+				.push(format!("{}: parse error (syntax tree contains error nodes)", candidate.display));
 		}
 		if visit(candidate, language, source, &ast, &runnable)?.is_break() {
 			break;
@@ -1004,7 +1035,8 @@ fn stage(
 	display: Option<&str>,
 	stop: &dyn Stop,
 ) -> Result<Staged, Error> {
-	let mut staged = Staged { changes: Vec::new(), edits: Vec::new(), limit_reached: false };
+	let mut staged =
+		Staged { changes: Vec::new(), edits: Vec::new(), limit_reached: false };
 	let mut seen = HashSet::new();
 	// Kept spans by start; disjoint, so only the nearest earlier start can
 	// overlap a new span.

@@ -12,8 +12,8 @@ use pi_ast::{
 	ops,
 	search::{self, MatchStrictness},
 };
-use pi_walker::{glob::Selector, walk::WalkError};
 use pi_vfs::BlockingFs;
+use pi_walker::{glob::Selector, walk::WalkError};
 
 use crate::{shell::vfs::ShellFilesystem, task};
 
@@ -475,8 +475,8 @@ pub fn ast_grep<'env>(
 			strictness: resolve_strictness(strictness),
 			captures: include_meta.unwrap_or(false),
 		};
-		let found = search::find_page(&fs, candidates, &query, page, &ct)
-			.map_err(|err| failure(&ct, err))?;
+		let found =
+			search::find_page(&fs, candidates, &query, page, &ct).map_err(|err| failure(&ct, err))?;
 		let missing_grammars = missing_grammars(&found.report);
 		Ok(AstFindResult {
 			matches: found
@@ -527,11 +527,11 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 		let language =
 			ops::resolve_supported_lang(lang).map_err(|err| Error::from_reason(err.to_string()))?;
 		let query = search::Query {
-			patterns: &patterns,
-			lang: None,
-			selector: selector.as_deref(),
+			patterns:   &patterns,
+			lang:       None,
+			selector:   selector.as_deref(),
 			strictness: resolve_strictness(strictness),
-			captures: include_meta.unwrap_or(false),
+			captures:   include_meta.unwrap_or(false),
 		};
 		let found = search::find_source(&source, language, &query, page, &ct)
 			.map_err(|err| failure(&ct, err))?;
@@ -607,8 +607,10 @@ pub fn ast_edit<'env>(
 		let mut changes = Vec::new();
 		let mut file_changes = Vec::with_capacity(edited.files.len());
 		for file in edited.files {
-			file_changes
-				.push(AstReplaceFileChange { path: file.display.clone(), count: to_u32(file.changes.len()) });
+			file_changes.push(AstReplaceFileChange {
+				path:  file.display.clone(),
+				count: to_u32(file.changes.len()),
+			});
 			changes.extend(
 				file
 					.changes

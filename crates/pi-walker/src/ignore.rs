@@ -150,14 +150,21 @@ impl Rules {
 	/// [`Self::matched`] for a filesystem `path` below `base`, the directory
 	/// the rules are relative to; a path outside `base` is matched whole.
 	pub fn matched_below(&self, base: &Path, path: &Path, is_dir: bool) -> Match {
-		let rel = path.strip_prefix(base).unwrap_or(path).as_os_str().as_encoded_bytes();
+		let rel = path
+			.strip_prefix(base)
+			.unwrap_or(path)
+			.as_os_str()
+			.as_encoded_bytes();
 		if cfg!(windows) && rel.contains(&b'\\') {
-			let slashed: Vec<u8> =
-				rel.iter().map(|&byte| if byte == b'\\' { b'/' } else { byte }).collect();
+			let slashed: Vec<u8> = rel
+				.iter()
+				.map(|&byte| if byte == b'\\' { b'/' } else { byte })
+				.collect();
 			return self.matched(&slashed, is_dir);
 		}
 		self.matched(rel, is_dir)
 	}
+
 	/// Like [`Self::matched`], then each ancestor of `path` as a directory,
 	/// nearest first; the first decision wins (`ignore`'s
 	/// `matched_path_or_any_parents`).

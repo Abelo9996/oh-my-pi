@@ -217,12 +217,7 @@ fn run_list_workspace(
 				}
 				if file_type == FileType::Dir {
 					if config.collect_agents_md && entry.depth == config.walk_max_depth {
-						probe_agents_md_at_walk_limit(
-							entry.abs,
-							&relative,
-							entry.depth,
-							&mut results,
-						);
+						probe_agents_md_at_walk_limit(entry.abs, &relative, entry.depth, &mut results);
 					}
 				} else if config.collect_agents_md
 					&& entry.name() == AGENTS_MD_FILENAME.as_bytes()

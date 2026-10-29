@@ -96,7 +96,7 @@ Behavior:
 | `executeShell(options, onChunk?)`                             | `execute_shell`             | `task::future(env, "shell.execute", ...)`                      | same cancellation race and 2s graceful window (5s on Windows)                                                                        |
 | `Process#terminate(options?)`                                 | `Process::terminate`        | `task::future(env, "process.terminate", ...)`                  | optional signal cancels termination waits; grace and hard-kill timeouts are process policy rather than `CancelToken` deadlines       |
 | `Process#waitForExit(options?)`                               | `Process::wait_for_exit`    | `task::future(env, "process.wait_for_exit", ...)`              | optional signal is bridged through `CancelToken`; `timeoutMs` is the wait operation's typed `false` timeout                          |
-| `PtySession#start(...)` / `startArgv(...)`                    | PTY methods                 | `task::future(env, "pty.start", ...)` + inner `spawn_blocking` | heartbeat checks before PTY allocation/spawn reject; checks in the running loop produce cancellation flags |
+| `PtySession#start(...)` / `startArgv(...)`                    | PTY methods                 | `task::future(env, "pty.start", ...)` + inner `spawn_blocking` | heartbeat checks before PTY allocation/spawn reject; checks in the running loop produce cancellation flags                           |
 | `htmlToMarkdown(html, options?)`                              | `html_to_markdown`          | `task::blocking("html_to_markdown", (), ...)`                  | none (`()` token)                                                                                                                    |
 | `encodeSixel(...)`                                            | `encode_sixel`              | synchronous native function                                    | none                                                                                                                                 |
 | `readImageFromClipboard()`                                    | `read_image_from_clipboard` | `task::blocking("clipboard.read_image", (), ...)`              | none (`()` token)                                                                                                                    |
@@ -125,15 +125,15 @@ Aborted
 ### Before-start vs mid-execution cancellation
 
 - **Before start / before first cancellation check**:
-  - `task::future` users that race on `ct.wait()` can resolve cancellation once they enter `select!`.
-  - `task::blocking` users observe cancellation at closure heartbeat checks, with an explicit-flag check again during JS result settlement. The helper itself does not insert a pre-compute heartbeat.
-  - PTY checks before `openpty` and before spawn reject setup rather than returning a command cancellation result.
+   - `task::future` users that race on `ct.wait()` can resolve cancellation once they enter `select!`.
+   - `task::blocking` users observe cancellation at closure heartbeat checks, with an explicit-flag check again during JS result settlement. The helper itself does not insert a pre-compute heartbeat.
+   - PTY checks before `openpty` and before spawn reject setup rather than returning a command cancellation result.
 
 - **Mid-execution**:
-  - `blocking`: next `heartbeat()` returns `Err("Aborted: ...")`.
-  - `future`: `ct.wait()` branch wins `select!`, then code cancels subordinate async machinery.
-  - shell: cancellation triggers a Tokio cancellation token and TERM/KILL waves over a per-run spawn registry, waits up to 2 seconds (5 on Windows) for the command task, then aborts the task if needed. Cleanup is scoped to that run, not a process-global descendant snapshot.
-  - PTY: heartbeat failure or `kill()` terminates PTY child/process targets and drains output briefly.
+   - `blocking`: next `heartbeat()` returns `Err("Aborted: ...")`.
+   - `future`: `ct.wait()` branch wins `select!`, then code cancels subordinate async machinery.
+   - shell: cancellation triggers a Tokio cancellation token and TERM/KILL waves over a per-run spawn registry, waits up to 2 seconds (5 on Windows) for the command task, then aborts the task if needed. Cleanup is scoped to that run, not a process-global descendant snapshot.
+   - PTY: heartbeat failure or `kill()` terminates PTY child/process targets and drains output briefly.
 
 ## Heartbeat expectations for long-running loops
 
