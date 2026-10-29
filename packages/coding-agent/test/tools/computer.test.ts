@@ -4966,14 +4966,17 @@ describe("window() waiting for a window to appear", () => {
 		}
 	});
 
-	it.each(["60000", "-1", '"soon"', "NaN"])("refuses an invalid wait of %s", async wait => {
-		const native = new OpeningSession(1);
-		const result = await run(native, `return await desktop.window({ app: "Preview", wait: ${wait} })`);
-		expect(result.ok).toBe(false);
-		if (result.ok) return;
-		expect(result.error.message).toContain("window({ wait }) takes milliseconds from 0 to 10000");
-		expect(native.listings).toBe(0);
-	});
+	it.each(["60000", "-1", '"soon"', "NaN", "1n", "(() => { const cycle = {}; cycle.self = cycle; return cycle; })()"])(
+		"refuses an invalid wait of %s",
+		async wait => {
+			const native = new OpeningSession(1);
+			const result = await run(native, `return await desktop.window({ app: "Preview", wait: ${wait} })`);
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			expect(result.error.message).toContain("window({ wait }) takes milliseconds from 0 to 10000");
+			expect(native.listings).toBe(0);
+		},
+	);
 
 	it("resolves a delayed window through Python keyword filters", async () => {
 		let definitions: readonly EvalPreludeDefinition[] = [];

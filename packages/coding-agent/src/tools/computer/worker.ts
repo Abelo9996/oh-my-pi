@@ -348,9 +348,14 @@ function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
 function windowWait(wait: unknown): number {
 	if (wait === undefined) return 0;
 	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
-		throw new ToolError(
-			`window({ wait }) takes milliseconds from 0 to ${MAX_WINDOW_WAIT_MS}; got ${JSON.stringify(wait)}`,
-		);
+		let got: string;
+		try {
+			got = JSON.stringify(wait) ?? describeArgument(wait);
+		} catch {
+			// BigInt and cyclic values do not serialize; the type still tells the caller what it passed.
+			got = describeArgument(wait);
+		}
+		throw new ToolError(`window({ wait }) takes milliseconds from 0 to ${MAX_WINDOW_WAIT_MS}; got ${got}`);
 	}
 	return wait;
 }
