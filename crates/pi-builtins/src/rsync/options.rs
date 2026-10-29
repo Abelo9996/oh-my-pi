@@ -765,7 +765,7 @@ pub(crate) fn local_server_options(client: &Options, env: &dyn Fn(&str) -> Optio
 
 /// The error `--files-from=FILE` produces when the session cannot open FILE.
 pub(crate) fn files_from_open_error(name: &OsStr, err: &std::io::Error) -> RsyncError {
-	let text = format!("failed to open files-from file {}: {}", name.to_string_lossy(), strerror(err));
+	let text = format!("failed to open files-from file {}: {}", name.display(), strerror(err));
 	RsyncError::new(RERR_SYNTAX, format!("rsync: {}", err_buf(&text))).at("main.c", 1913)
 }
 
@@ -797,11 +797,7 @@ fn usage_err(site: (&'static str, u32)) -> RsyncError {
 fn err_buf(text: &str) -> String {
 	let mut full = format!("{text}\n");
 	if full.len() > ERR_BUF - 1 {
-		let mut cut = ERR_BUF - 1;
-		while !full.is_char_boundary(cut) {
-			cut -= 1;
-		}
-		full.truncate(cut);
+		full.truncate(full.floor_char_boundary(ERR_BUF - 1));
 	}
 	full.strip_suffix('\n').map(str::to_string).unwrap_or(full)
 }
@@ -1588,7 +1584,7 @@ impl<'e> Parser<'e> {
 			.unwrap_or_else(|| if o.backup_dir.is_some() { OsString::new() } else { BACKUP_SUFFIX.into() });
 		o.backup_suffix = Some(suffix.clone());
 		if os_bytes_lossy(&suffix).contains(&b'/') {
-			return Err(self.option_error(format!("--suffix cannot contain slashes: {}", suffix.to_string_lossy())));
+			return Err(self.option_error(format!("--suffix cannot contain slashes: {}", suffix.display())));
 		}
 		// None: no --backup-dir; Some(false): given but empty after cleanup.
 		let mut dir_state = None;
@@ -1769,11 +1765,8 @@ fn popt_int(v: &[u8]) -> Result<i32, &'static str> {
 
 /// strtod() prefix of a size argument (digits, one '.', more digits; sign allowed).
 fn c_strtod(v: &[u8]) -> f64 {
+	let v = v.trim_ascii_start();
 	let mut i = 0;
-	while i < v.len() && v[i].is_ascii_whitespace() {
-		i += 1;
-	}
-	let start = i;
 	if matches!(v.get(i), Some(b'+' | b'-')) {
 		i += 1;
 	}
@@ -1807,7 +1800,7 @@ fn c_strtod(v: &[u8]) -> f64 {
 			end = k;
 		}
 	}
-	std::str::from_utf8(&v[start..end]).ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
+	std::str::from_utf8(&v[..end]).ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
 }
 
 /// Upstream parse_size_arg(): `N[.N][KMGTP][B|iB][+1|-1]`. Returns the error text
@@ -1824,11 +1817,7 @@ fn parse_size_arg(arg: &[u8], def_suf: u8, opt: &str, min: i64, max: i64, unlimi
 		}
 		// parse_size_arg formats into err_buf minus one byte and reserves the
 		// newline slot, so at most ERR_BUF - 2 (198) bytes of text survive.
-		let mut cut = text.len().min(ERR_BUF - 2);
-		while !text.is_char_boundary(cut) {
-			cut -= 1;
-		}
-		text.truncate(cut);
+		text.truncate(text.floor_char_boundary(ERR_BUF - 2));
 		text
 	};
 	let too_large = || fail("too large", Some(("max", max)));

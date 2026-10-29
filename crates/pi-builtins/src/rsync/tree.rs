@@ -255,7 +255,7 @@ impl<'a> Walk<'a> {
 	fn walk(&mut self, parts: &[&[u8]]) -> io::Result<()> {
 		for (i, part) in parts.iter().enumerate() {
 			if let Err(error) = self.descend(part) {
-				if i + 1 < parts.len() && error.raw_os_error() == Some(libc::ENOTDIR) {
+				if i + 1 < parts.len() && error.kind() == io::ErrorKind::NotADirectory {
 					return Err(err::looped());
 				}
 				return Err(error);

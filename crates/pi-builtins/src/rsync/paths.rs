@@ -474,10 +474,7 @@ pub(crate) fn vec_os_lossy(bytes: Vec<u8>) -> OsString {
 	#[cfg(unix)]
 	return OsString::from_vec(bytes);
 	#[cfg(not(unix))]
-	return match String::from_utf8(bytes) {
-		Ok(text) => OsString::from(text),
-		Err(e) => OsString::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
-	};
+	return OsString::from(String::from_utf8_lossy_owned(bytes));
 }
 
 /// The elements of a `/`-separated name, without empty and `.` elements.
@@ -499,7 +496,7 @@ pub(crate) fn push_rel(path: &mut PathBuf, name: &[u8]) -> io::Result<()> {
 pub(crate) fn rel_path(name: &[u8]) -> io::Result<PathBuf> {
 	let mut path = PathBuf::new();
 	push_rel(&mut path, name)?;
-	if path.as_os_str().is_empty() {
+	if path.is_empty() {
 		path.push(".");
 	}
 	Ok(path)
@@ -1031,11 +1028,7 @@ fn check_confined(fs: &BlockingFs, path: &Path, confine: &Path, create: bool) ->
 		Err(err) => return Err(err),
 	};
 	let root = fs.canonicalize(confine).unwrap_or_else(|_| confine.to_path_buf());
-	if within_confine(&resolved, &root) {
-		Ok(())
-	} else {
-		Err(loop_error())
-	}
+	within_confine(&resolved, &root).ok_or_else(loop_error)
 }
 
 /// Best-effort walk for path-based opens: every existing prefix of `path`

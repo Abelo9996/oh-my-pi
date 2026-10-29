@@ -1566,7 +1566,7 @@ mod tests {
 	}
 
 	fn detail(err: &io::Error) -> String {
-		wire_detail(err).map(|d| d.message.clone()).unwrap_or_default()
+		wire_detail(err).map_or_default(|d| d.message.clone())
 	}
 
 	#[test]
@@ -1609,14 +1609,15 @@ mod tests {
 		let mut frames = Vec::new();
 		let mut joined = Vec::new();
 		while !r.is_empty() {
-			let header = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
+			let (&header, rest) = r.split_first_chunk::<4>().expect("frame header");
+			let header = u32::from_le_bytes(header);
 			let len = (header & 0xFF_FFFF) as usize;
 			let code = (header >> 24) as u8 - MPLEX_BASE;
 			frames.push((code, len));
 			if code == MSG_DATA {
-				joined.extend_from_slice(&r[4..4 + len]);
+				joined.extend_from_slice(&rest[..len]);
 			}
-			r = &r[4 + len..];
+			r = &rest[len..];
 		}
 		(frames, joined)
 	}

@@ -219,7 +219,8 @@ pub(crate) trait ReadExt: Read {
 		let mut b = [0u8; 5];
 		fill(self, &mut b[..extra])?;
 		b[extra] = lead & lead_mask(extra);
-		Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+		let [le @ .., _] = b;
+		Ok(i32::from_le_bytes(le))
 	}
 
 	/// Variable-length 64-bit integer with at least `min_bytes` bytes.
@@ -240,8 +241,7 @@ pub(crate) trait ReadExt: Read {
 			fill(self, &mut v[min - 1..min - 1 + extra])?;
 			v[min + extra - 1] = lead & lead_mask(extra);
 		}
-		let mut le = [0u8; 8];
-		le.copy_from_slice(&v[..8]);
+		let [le @ .., _] = v;
 		Ok(i64::from_le_bytes(le))
 	}
 

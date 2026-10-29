@@ -597,13 +597,9 @@ impl Sender<'_> {
 		if self.ctx.opts.remove_source_files == 0 {
 			return Ok(());
 		}
-		let word = |at: usize, n: usize| -> u64 {
-			let mut b = [0u8; 8];
-			b[..n].copy_from_slice(&payload[at..at + n]);
-			u64::from_le_bytes(b)
-		};
-		let wire = word(0, 4) as u32 as i32;
-		let dest = self.ctx.local_server.then(|| (word(4, 8), word(12, 8)));
+		let word = |at: usize| u64::from_le_bytes(*payload[at..].first_chunk().expect("length checked"));
+		let wire = i32::from_le_bytes(*payload.first_chunk().expect("length checked"));
+		let dest = self.ctx.local_server.then(|| (word(4), word(12)));
 		let ndx = self.flists.from_wire(wire);
 		let seg = self.segment_for(ndx).ok_or_else(|| self.not_in_list(ndx, "successful_send"))?;
 		if ndx < self.flists.segment_start(seg).unwrap_or(0) {

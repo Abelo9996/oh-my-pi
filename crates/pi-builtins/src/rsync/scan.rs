@@ -218,7 +218,11 @@ fn start_filelist_progress(ctx: &Ctx, kind: &str) {
 
 /// Upstream maybe_emit_filelist_progress.
 fn maybe_emit_filelist_progress(ctx: &Ctx, show: bool, count: usize) {
-	if !show || ctx.logger.levels().info(Info::Flist) < 2 || count % 100 != 0 || ctx.opts.quiet > 0 {
+	if !show
+		|| ctx.logger.levels().info(Info::Flist) < 2
+		|| !count.is_multiple_of(100)
+		|| ctx.opts.quiet > 0
+	{
 		return;
 	}
 	if ctx.logger.needs_newline() == 2 {
@@ -1392,8 +1396,8 @@ impl Scanner {
 			return Ok(());
 		}
 		let mut name = name;
-		if name.len() > 1 && name.last() == Some(&b'/') {
-			name.pop();
+		if name.len() > 1 {
+			name.pop_if(|b| *b == b'/');
 		}
 		let read = self.filter_reader();
 		let mark = self.filters.enter_dir(&name, &read)?;
@@ -1853,8 +1857,7 @@ impl Scanner {
 				} else if fname[0] == b'.' {
 					name_type = DOTDIR_NAME;
 				}
-			} else if fname.last() == Some(&b'/') {
-				fname.pop();
+			} else if fname.pop_if(|b| *b == b'/').is_some() {
 				name_type = if fname == b"." { DOTDIR_NAME } else { SLASH_ENDING_NAME };
 			}
 			let mut i = 0;

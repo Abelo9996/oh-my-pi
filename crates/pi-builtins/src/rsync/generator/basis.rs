@@ -305,7 +305,7 @@ impl Gen<'_> {
 		let mode = file.mode & 0o7777;
 		let (tree, dir, dotted) = match &self.trees.temp_dir {
 			Some(tmp) => (tmp.clone(), std::path::PathBuf::new(), false),
-			None => (dest.tree.clone(), dest.rel.parent().map(Path::to_path_buf).unwrap_or_default(), true),
+			None => (dest.tree.clone(), dest.rel.parent().map_or_default(Path::to_path_buf), true),
 		};
 		match tree.create_temp_with(&dir, &base, mode, dotted) {
 			Ok((rel, f)) => Some((tree, rel, f)),

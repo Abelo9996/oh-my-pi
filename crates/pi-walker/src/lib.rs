@@ -4201,7 +4201,6 @@ mod platform {
 		borrow::Cow,
 		ffi::{CString, OsStr},
 		io,
-		mem::size_of,
 		os::{fd::RawFd, unix::ffi::OsStrExt},
 		path::Path,
 	};
@@ -4410,7 +4409,7 @@ mod platform {
 			let count = unsafe {
 				libc::getattrlistbulk(
 					fd.0,
-					std::ptr::addr_of_mut!(attrs).cast(),
+					(&raw mut attrs).cast(),
 					buffer.as_mut_ptr().cast(),
 					buffer.len(),
 					libc::FSOPT_NOFOLLOW as u64,
@@ -4427,26 +4426,24 @@ mod platform {
 				return Err(ReadDirError::Io(err));
 			}
 
-			let mut offset = 0usize;
+			let mut rest = &buffer[..];
 			for _ in 0..count {
-				if offset + size_of::<u32>() > buffer.len() {
+				let Some(&record_len) = rest.first_chunk::<4>() else {
 					return Err(invalid_data("truncated getattrlistbulk record length").into());
-				}
-				let record_len = u32::from_ne_bytes(
-					buffer[offset..offset + size_of::<u32>()]
-						.try_into()
-						.expect("slice length checked"),
-				) as usize;
-				if record_len < size_of::<u32>() || offset + record_len > buffer.len() {
+				};
+				let record_len = u32::from_ne_bytes(record_len) as usize;
+				let Some((record, tail)) = rest
+					.split_at_checked(record_len)
+					.filter(|_| record_len >= size_of::<u32>())
+				else {
 					return Err(invalid_data("invalid getattrlistbulk record length").into());
-				}
-				let record = &buffer[offset..offset + record_len];
+				};
 				if let Some(entry) = parse_record(record)?
 					&& emit(entry).map_err(ReadDirError::Walk)? == ReadDirControl::Stop
 				{
 					return Ok(ReadDirControl::Stop);
 				}
-				offset += record_len;
+				rest = tail;
 			}
 		}
 		Ok(ReadDirControl::Continue)
@@ -4624,7 +4621,7 @@ mod platform {
 	use std::{
 		ffi::{CString, OsStr},
 		io,
-		mem::{size_of, zeroed},
+		mem::zeroed,
 		os::unix::ffi::OsStrExt,
 		path::Path,
 	};
@@ -4831,7 +4828,7 @@ mod platform {
 				name.as_ptr(),
 				libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT,
 				mask,
-				std::ptr::addr_of_mut!(statx),
+				&raw mut statx,
 			)
 		};
 		if rc != 0 {
@@ -4869,7 +4866,7 @@ mod platform {
 			libc::fstatat(
 				dirfd,
 				name.as_ptr(),
-				std::ptr::addr_of_mut!(stat),
+				&raw mut stat,
 				libc::AT_SYMLINK_NOFOLLOW,
 			)
 		};
@@ -4893,14 +4890,10 @@ mod platform {
 	}
 
 	fn read_u16(bytes: &[u8]) -> io::Result<u16> {
-		if bytes.len() < size_of::<u16>() {
+		let Some(&bytes) = bytes.first_chunk::<2>() else {
 			return Err(invalid_data("truncated u16"));
-		}
-		Ok(u16::from_ne_bytes(
-			bytes[..size_of::<u16>()]
-				.try_into()
-				.expect("slice length checked"),
-		))
+		};
+		Ok(u16::from_ne_bytes(bytes))
 	}
 
 	fn trim_nul(bytes: &[u8]) -> &[u8] {
@@ -5006,7 +4999,7 @@ mod platform {
 					std::ptr::null_mut(),
 					None,
 					std::ptr::null(),
-					std::ptr::addr_of_mut!(iosb),
+					&raw mut iosb,
 					buffer.as_mut_ptr().cast(),
 					buffer.len() as u32,
 					FileIdFullDirectoryInformation,
@@ -5046,7 +5039,7 @@ mod platform {
 					.as_chunks::<2>()
 					.0
 					.iter()
-					.map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
+					.map(|&chunk| u16::from_ne_bytes(chunk))
 					.collect();
 				let name = OsString::from_wide(&name_units);
 				let file_type = file_type_from_attributes(info.FileAttributes);
@@ -5544,11 +5537,7 @@ mod tests {
 				})
 				.filter(filter.clone())
 				.collect_ranked_with_heartbeat(WalkRank::PathAsc, limit, || {
-					if beats.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
-						Ok(())
-					} else {
-						Err("cancelled")
-					}
+					(beats.fetch_add(1, AtomicOrdering::Relaxed) == 0).ok_or("cancelled")
 				});
 				assert!(
 					matches!(result, Err(WalkError::Interrupted(message)) if message == "cancelled")

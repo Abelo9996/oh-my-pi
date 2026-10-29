@@ -291,8 +291,8 @@ impl DestTrees {
 		let alt_opt = crate::rsync::options::alt_dest_opt(opts.alt_dest_type);
 		for bdir in &opts.basis_dirs {
 			let mut raw = crate::host::os_bytes_lossy(bdir).into_owned();
-			if raw.len() > 1 && is_separator(raw[raw.len() - 1]) {
-				raw.pop();
+			if raw.len() > 1 {
+				raw.pop_if(|b| is_separator(*b));
 			}
 			let given = bytes_os_lossy(&raw);
 			let given = Path::new(&given);
@@ -329,8 +329,8 @@ impl DestTrees {
 
 		if let Some(bdir) = &opts.backup_dir {
 			let mut raw = crate::host::os_bytes_lossy(bdir).into_owned();
-			if raw.len() > 1 && is_separator(raw[raw.len() - 1]) {
-				raw.pop();
+			if raw.len() > 1 {
+				raw.pop_if(|b| is_separator(*b));
 			}
 			let given = bytes_os_lossy(&raw);
 			let given = Path::new(&given);

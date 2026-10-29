@@ -147,16 +147,11 @@ fn classify_fast_path(pattern: &str) -> GlobFastPath {
 	{
 		return GlobFastPath::RootExtension(vec![ext.to_string()]);
 	}
-	if let Some(inner) = pattern
-		.strip_prefix("**/*.{")
-		.and_then(|value| value.strip_suffix('}'))
-	{
+	if let Some(inner) = pattern.strip_circumfix("**/*.{", '}') {
 		if let Some(extensions) = literal_csv(inner) {
 			return GlobFastPath::Extension(extensions);
 		}
-	} else if let Some(inner) = pattern
-		.strip_prefix("*.{")
-		.and_then(|value| value.strip_suffix('}'))
+	} else if let Some(inner) = pattern.strip_circumfix("*.{", '}')
 		&& let Some(extensions) = literal_csv(inner)
 	{
 		return GlobFastPath::RootExtension(extensions);
@@ -216,9 +211,7 @@ fn fix_unclosed_braces(pattern: String) -> String {
 	let closes = pattern.chars().filter(|&c| c == '}').count();
 	if opens > closes {
 		let mut fixed = pattern;
-		for _ in 0..(opens - closes) {
-			fixed.push('}');
-		}
+		fixed.extend(std::iter::repeat_n('}', opens - closes));
 		fixed
 	} else {
 		pattern
@@ -226,10 +219,9 @@ fn fix_unclosed_braces(pattern: String) -> String {
 }
 
 fn is_exact_brace_union(pattern: &str) -> bool {
-	if !(pattern.starts_with('{') && pattern.ends_with('}')) {
+	let Some(inner) = pattern.strip_circumfix('{', '}') else {
 		return false;
-	}
-	let inner = &pattern[1..pattern.len() - 1];
+	};
 	!inner.is_empty()
 		&& !inner
 			.chars()

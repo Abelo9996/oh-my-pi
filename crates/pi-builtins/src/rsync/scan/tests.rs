@@ -155,7 +155,7 @@ fn entries(fl: &Flists) -> Vec<(String, u32, u32)> {
 		fl.with_segment(seg, |l| {
 			for e in l.entries.iter().filter(|e| e.is_active()) {
 				let dir_flags = if e.is_dir() { e.flags & (FLAG_TOP_DIR | FLAG_CONTENT_DIR | FLAG_IMPLIED_DIR) } else { 0 };
-				out.push((String::from_utf8_lossy(&e.name()).into_owned(), e.mode, dir_flags));
+				out.push((String::from_utf8_lossy_owned(e.name()), e.mode, dir_flags));
 			}
 		});
 	}

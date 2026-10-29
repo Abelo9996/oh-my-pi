@@ -806,7 +806,7 @@ fn is_not_empty(err: &io::Error) -> bool {
 	}
 	#[cfg(unix)]
 	{
-		err.raw_os_error() == Some(libc::ENOTEMPTY) || err.raw_os_error() == Some(libc::EEXIST)
+		err.raw_os_error() == Some(libc::EEXIST)
 	}
 	#[cfg(not(unix))]
 	{

@@ -111,14 +111,7 @@ impl ConnCtl {
 
 /// The longest prefix of `s` that fits `max` bytes (C `strlcpy`).
 pub(crate) fn truncate(s: &str, max: usize) -> &str {
-	if s.len() <= max {
-		return s;
-	}
-	let mut end = max;
-	while !s.is_char_boundary(end) {
-		end -= 1;
-	}
-	&s[..end]
+	&s[..s.floor_char_boundary(max)]
 }
 
 /// A bidirectional byte stream to the peer.
@@ -789,7 +782,7 @@ pub(crate) fn split_rsh(cmd: &str) -> Result<Vec<String>, RsyncError> {
 			.at("main.c", 560));
 		}
 		// Splitting happens at ASCII bytes, so each word is still valid UTF-8.
-		words.push(String::from_utf8_lossy(&word).into_owned());
+		words.push(String::from_utf8_lossy_owned(word));
 	}
 	Ok(words)
 }
@@ -871,7 +864,7 @@ pub(crate) fn safe_file_arg(arg: &[u8], rules: FileArgRules) -> Vec<u8> {
 	let tilde = arg.first() == Some(&b'~')
 		&& !rules.am_sender
 		&& !rules.trust_sender_args
-		&& ((rules.relative_paths && !arg.windows(3).any(|w| w == b"/./")) || !arg.contains(&b'/'));
+		&& ((rules.relative_paths && !arg.array_windows().any(|w| w == b"/./")) || !arg.contains(&b'/'));
 	if tilde {
 		out.push(b'\\');
 	}
@@ -909,7 +902,7 @@ fn shell_argv(cfg: &ShellConfig<'_>) -> Result<ShellArgv, RsyncError> {
 	let words = split_rsh(cfg.rsh)?;
 	let base = words.first().map_or("", |w| shell_basename(w));
 	let rsh_like = base == "rsh" || base == "remsh";
-	let dash_l_set = words.windows(2).any(|w| w[0] == "-l" && !w[1].starts_with('-'));
+	let dash_l_set = words.array_windows().any(|[flag, value]| flag == "-l" && !value.starts_with('-'));
 
 	let mut argv: Vec<OsString> = words.iter().map(OsString::from).collect();
 	if let Some(user) = cfg.user
@@ -973,9 +966,11 @@ fn shell_basename(word: &str) -> &str {
 	if cfg!(windows) {
 		let base = base.rsplit('\\').next().unwrap_or(base);
 		let len = base.len();
-		if len > 4 && base.is_char_boundary(len - 4) && base[len - 4..].eq_ignore_ascii_case(".exe")
+		if len > 4
+			&& let Some((stem, ext)) = base.split_at_checked(len - 4)
+			&& ext.eq_ignore_ascii_case(".exe")
 		{
-			return &base[..len - 4];
+			return stem;
 		}
 		return base;
 	}
@@ -1058,7 +1053,7 @@ pub(crate) fn spawn_shell(
 	let exec_error = |err: &io::Error| {
 		RsyncError::new(
 			RERR_IPC,
-			syserr_text(role, err, &format!("Failed to exec {}", program.to_string_lossy())),
+			syserr_text(role, err, &format!("Failed to exec {}", program.display())),
 		)
 		.at("pipe.c", 85)
 	};

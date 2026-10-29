@@ -574,7 +574,7 @@ fn create_dir_exact(path: &Path, mode: u32) -> io::Result<()> {
 /// [`create_dir_exact`] for each missing directory up to `path`, walked as
 /// `std::fs::create_dir_all` walks them.
 fn create_dir_all_exact(path: &Path, mode: u32) -> io::Result<()> {
-	if path.as_os_str().is_empty() {
+	if path.is_empty() {
 		return Ok(());
 	}
 	match create_dir_exact(path, mode) {

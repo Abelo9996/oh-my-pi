@@ -115,7 +115,7 @@ pub(crate) fn local_client_info(client: &Options, remote_is_sender: bool) -> Vec
 	for arg in &args {
 		let bytes = crate::host::os_bytes_lossy(arg);
 		if bytes.first() == Some(&b'-') && bytes.get(1) != Some(&b'-') {
-			if let Some(pos) = bytes.windows(2).position(|w| w == b"e.") {
+			if let Some(pos) = bytes.array_windows().position(|w| w == b"e.") {
 				return bytes[pos + 1..].to_vec();
 			}
 			return Vec::new();

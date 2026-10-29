@@ -527,16 +527,15 @@ pub(crate) fn process_umask() -> u32 {
 		umask(mask);
 		u32::from(mask.bits())
 	});
-	cfg_if::cfg_if! {
-		if #[cfg(any(target_os = "linux", target_os = "android"))] {
+	cfg_select! {
+		any(target_os = "linux", target_os = "android") => {
 			procfs::process::Process::myself()
 				.ok()
 				.and_then(|me| me.status().ok())
 				.and_then(|status| status.umask)
 				.unwrap_or_else(|| *TOGGLED)
-		} else {
-			*TOGGLED
 		}
+		_ => *TOGGLED,
 	}
 }
 
@@ -859,7 +858,7 @@ impl RunningCommand {
 			})
 			.wait();
 		drop(running.swap_remove(index));
-		Some(response.map_err(|_| cancelled_command()).and_then(|status| status))
+		Some(response.map_err(|_| cancelled_command()).flatten())
 	}
 }
 
@@ -1130,7 +1129,7 @@ async fn dispatch<SE: ShellExtensions>(
 		.into_iter()
 		.map(|arg| CommandArg::from(arg.to_string_lossy().into_owned()))
 		.collect();
-	let name = args.first().map(ToString::to_string).unwrap_or_default();
+	let name = args.first().map_or_default(ToString::to_string);
 	let argv0 = command.argv0.map(|argv0| argv0.to_string_lossy().into_owned());
 	if let (Some(argv0), Some(first)) = (&argv0, args.first_mut()) {
 		*first = CommandArg::from(argv0.clone());
@@ -1881,10 +1880,10 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 	struct Guard;
 	impl Drop for Guard {
 		fn drop(&mut self) {
-			PANIC_SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+			PANIC_SCOPE_DEPTH.update(|depth| depth.saturating_sub(1));
 		}
 	}
-	PANIC_SCOPE_DEPTH.with(|depth| depth.set(depth.get() + 1));
+	PANIC_SCOPE_DEPTH.update(|depth| depth + 1);
 	let _guard = Guard;
 
 	let outcome = catch_unwind(AssertUnwindSafe(|| parsed.run(host)));
@@ -2066,12 +2065,12 @@ mod testing {
 
 		/// Stdout as a lossy string, for readable assertions.
 		pub fn out(&self) -> String {
-			String::from_utf8_lossy(&self.stdout()).into_owned()
+			String::from_utf8_lossy_owned(self.stdout())
 		}
 
 		/// Stderr as a lossy string, for readable assertions.
 		pub fn err(&self) -> String {
-			String::from_utf8_lossy(&self.stderr()).into_owned()
+			String::from_utf8_lossy_owned(self.stderr())
 		}
 	}
 

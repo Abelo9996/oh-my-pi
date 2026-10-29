@@ -278,7 +278,7 @@ impl Shell {
 	#[must_use]
 	pub fn pids(&self) -> Vec<i32> {
 		let registry = self.active_spawns.lock().clone();
-		registry.map_or_else(Vec::new, |registry| registry.live_pids())
+		registry.map_or_default(|registry| registry.live_pids())
 	}
 
 	/// Number of live external background jobs tracked by the persistent
@@ -748,10 +748,7 @@ fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, st
 	if !matches!(key, "TEMP" | "TMP" | "TMPDIR") || !path.is_absolute() {
 		return std::borrow::Cow::Borrowed(value);
 	}
-	match brush_core::sys::fs::expand_to_long_path(path)
-		.into_os_string()
-		.into_string()
-	{
+	match brush_core::sys::fs::expand_to_long_path(path).into_string() {
 		Ok(expanded) => std::borrow::Cow::Owned(expanded),
 		Err(_) => std::borrow::Cow::Borrowed(value),
 	}
@@ -2011,7 +2008,12 @@ fn should_skip_env_var(key: &str) -> bool {
 }
 
 fn ensure_trailing_newline_for_heredoc(command: &mut String) {
-	if command.ends_with('\n') || !command.as_bytes().windows(2).any(|window| window == b"<<") {
+	if command.ends_with('\n')
+		|| !command
+			.as_bytes()
+			.array_windows()
+			.any(|window| window == b"<<")
+	{
 		return;
 	}
 	command.push('\n');
@@ -2217,11 +2219,7 @@ fn set_nonblocking<T: std::os::fd::AsRawFd>(file: &T) -> io::Result<()> {
 
 	// SAFETY: `fd` remains valid here and we are only toggling `O_NONBLOCK`.
 	let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-	if result < 0 {
-		Err(io::Error::last_os_error())
-	} else {
-		Ok(())
-	}
+	(result >= 0).ok_or_else(io::Error::last_os_error)
 }
 
 #[cfg(unix)]
@@ -2251,29 +2249,14 @@ async fn emit_chunk(text: String, callback: Option<&Sender<String>>) {
 
 fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 	let (r, w) =
-		os_pipe::pipe().map_err(|err| Error::msg(format!("Failed to create {label} pipe: {err}")))?;
+		std::io::pipe().map_err(|err| Error::msg(format!("Failed to create {label} pipe: {err}")))?;
 
 	#[cfg(unix)]
-	let (r, w): (fs::File, fs::File) = {
-		use std::os::unix::io::{FromRawFd, IntoRawFd};
-		let r = r.into_raw_fd();
-		let w = w.into_raw_fd();
-		// SAFETY: We just obtained these fds from os_pipe and own them
-		// exclusively.
-		unsafe { (FromRawFd::from_raw_fd(r), FromRawFd::from_raw_fd(w)) }
-	};
-
+	use std::os::fd::OwnedFd as Owned;
 	#[cfg(windows)]
-	let (r, w): (fs::File, fs::File) = {
-		use std::os::windows::io::{FromRawHandle, IntoRawHandle};
-		let r = r.into_raw_handle();
-		let w = w.into_raw_handle();
-		// SAFETY: We just obtained these handles from os_pipe and own them
-		// exclusively.
-		unsafe { (FromRawHandle::from_raw_handle(r), FromRawHandle::from_raw_handle(w)) }
-	};
+	use std::os::windows::io::OwnedHandle as Owned;
 
-	Ok((r, w))
+	Ok((fs::File::from(Owned::from(r)), fs::File::from(Owned::from(w))))
 }
 
 /// Whether the `nohup` builtin should stand aside for the system binary.
@@ -6147,8 +6130,8 @@ mod tests {
 	}
 
 	fn shell_test_lock() -> &'static TokioMutex<()> {
-		static LOCK: std::sync::OnceLock<TokioMutex<()>> = std::sync::OnceLock::new();
-		LOCK.get_or_init(|| TokioMutex::new(()))
+		static LOCK: TokioMutex<()> = TokioMutex::const_new(());
+		&LOCK
 	}
 
 	#[cfg(unix)]
@@ -7423,7 +7406,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let mut session = create_session(&config).await.expect("create_session");
 
 		// Output pipe shared between the brush child and a concurrent reader. The
-		// reader runs on a blocking thread because `os_pipe` reads are blocking.
+		// reader runs on a blocking thread because pipe reads are blocking.
 		let (mut reader, writer) = pipe_to_files("e2e").expect("pipe");
 		let stdout_file = OpenFile::from(writer.try_clone().expect("clone"));
 		let stderr_file = OpenFile::from(writer);

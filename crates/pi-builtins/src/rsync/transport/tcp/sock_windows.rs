@@ -5,7 +5,7 @@
 use std::{
 	ffi::CString,
 	io,
-	mem::{size_of, zeroed},
+	mem::zeroed,
 	net::TcpStream,
 	os::windows::io::FromRawSocket,
 	sync::Once,
@@ -222,7 +222,7 @@ impl Socket {
 				size_of::<i32>() as i32,
 			)
 		};
-		if rc == ws::SOCKET_ERROR { Err(last_error()) } else { Ok(()) }
+		(rc != ws::SOCKET_ERROR).ok_or_else(last_error)
 	}
 
 	fn set_nonblocking(&self, on: bool) -> io::Result<()> {

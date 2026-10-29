@@ -320,12 +320,12 @@ fn vanished_file_sends_no_send_and_counts_io_error() {
 	// Frames: MSG_NO_SEND(0), then DONE x3 and MSG_IO_ERROR before the final DONE.
 	let bytes = sink.0.lock().unwrap().clone();
 	let mut frames = Vec::new();
-	let mut p = 0;
-	while p + 4 <= bytes.len() {
-		let h = u32::from_le_bytes(bytes[p..p + 4].try_into().unwrap());
+	let mut r = &bytes[..];
+	while let Some((&h, rest)) = r.split_first_chunk::<4>() {
+		let h = u32::from_le_bytes(h);
 		let (code, len) = ((h >> 24) as u8 - crate::rsync::consts::MPLEX_BASE, (h & 0xffffff) as usize);
-		frames.push((code, bytes[p + 4..p + 4 + len].to_vec()));
-		p += 4 + len;
+		frames.push((code, rest[..len].to_vec()));
+		r = &rest[len..];
 	}
 	let data: Vec<u8> = frames.iter().filter(|f| f.0 == 0).flat_map(|f| f.1.clone()).collect();
 	assert_eq!(data, vec![0, 0, 0], "only the phase echoes and the final NDX_DONE");

@@ -1288,7 +1288,7 @@ impl FileList {
 	fn search(&self, probe: &FileEntry, low: usize, high: usize, proto: Proto) -> Option<usize> {
 		let (mut lo, mut hi) = (low as isize, high as isize);
 		while lo <= hi {
-			let mid = (lo + hi) / 2;
+			let mid = lo.midpoint(hi);
 			let Some(up) = (mid..=hi).find(|&k| self.entries[k as usize].is_active()) else {
 				hi = mid - 1;
 				continue;
@@ -1586,7 +1586,7 @@ mod tests {
 	}
 
 	fn names(list: &FileList) -> Vec<String> {
-		list.entries.iter().map(|e| String::from_utf8_lossy(&e.name()).into_owned()).collect()
+		list.entries.iter().map(|e| String::from_utf8_lossy_owned(e.name())).collect()
 	}
 
 	// ---- golden bytes captured from rsync 3.5.1 (`--server --sender`, -naH --numeric-ids) ----
@@ -2406,7 +2406,7 @@ mod tests {
 			&logger,
 		);
 		let active: Vec<String> =
-			list.entries.iter().filter(|e| e.is_active()).map(|e| String::from_utf8_lossy(&e.name()).into_owned()).collect();
+			list.entries.iter().filter(|e| e.is_active()).map(|e| String::from_utf8_lossy_owned(e.name())).collect();
 		assert_eq!(active, [".", "full", "full/f", "kept"]);
 	}
 

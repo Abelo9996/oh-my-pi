@@ -288,7 +288,7 @@ fn decode(stream: &[u8], target: &[u8], sums: &Sums) -> Vec<i32> {
 	let mut pos = 0usize;
 	let mut file_pos = 0usize;
 	loop {
-		let v = i32::from_le_bytes(stream[pos..pos + 4].try_into().unwrap());
+		let v = i32::from_le_bytes(*stream[pos..].first_chunk().unwrap());
 		pos += 4;
 		ints.push(v);
 		if v > 0 {

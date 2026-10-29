@@ -305,7 +305,7 @@ enum Address<'a> {
 /// `write`'s refusal for a URI-shaped target it cannot address, reworded
 /// for edit; `suggestion` is the registered `scheme://` spelling.
 fn unknown_uri_target(display: &str, suggestion: Option<&str>) -> String {
-	let hint = suggestion.map_or_else(String::new, |url| format!(" Did you mean '{url}'?"));
+	let hint = suggestion.map_or_default(|url| format!(" Did you mean '{url}'?"));
 	format!(
 		"Unknown URI-like edit target '{display}'.{hint} Prefix the path with './' to edit it as a \
 		 filesystem path."
@@ -318,7 +318,7 @@ fn unknown_uri_target(display: &str, suggestion: Option<&str>) -> String {
 /// `#`; an untagged `#` is a malformed tag and leaves `target` untouched.
 pub fn unwrap_hashline_header_path(target: &str) -> &str {
 	let trimmed = target.trim_end();
-	let Some(inner) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+	let Some(inner) = trimmed.strip_circumfix('[', ']') else {
 		return target;
 	};
 	let path = match inner.rsplit_once('#') {

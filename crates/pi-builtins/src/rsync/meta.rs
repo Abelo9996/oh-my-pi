@@ -139,7 +139,7 @@ pub(crate) fn dest_mode_with(
 pub(crate) fn same_time(a_sec: i64, a_nsec: u32, b_sec: i64, b_nsec: u32, window: i64) -> bool {
 	match window {
 		0 => a_sec == b_sec,
-		w if w < 0 => a_sec == b_sec && a_nsec == b_nsec,
+		..0 => a_sec == b_sec && a_nsec == b_nsec,
 		w => a_sec.abs_diff(b_sec) <= w.unsigned_abs(),
 	}
 }
@@ -723,7 +723,7 @@ fn fake_stat_for(tree: &Tree, rel: &Path, real: &Metadata) -> io::Result<Option<
 				let head = format!("Corrupt {XSTAT_ATTR} xattr attached to ");
 				let text =
 					[head.as_bytes(), &full_fname(tree, rel), b": \"", &value[..end], b"\""].concat();
-				let text = String::from_utf8_lossy(&text).into_owned();
+				let text = String::from_utf8_lossy_owned(text);
 				let fatal = RsyncError::new(RERR_FILEIO, text).at("xattrs.c", 1257);
 				Err(io::Error::new(io::ErrorKind::InvalidData, fatal))
 			},

@@ -115,7 +115,7 @@ impl Sums {
 			let at = i as usize * s2;
 			crate::rsync::wire::fill(r, &mut sums.sum2[at..at + s2]).map_err(RsyncError::from_stream)?;
 			let len = head.block_len(i);
-			if lull_mod != 0 && (i as u32) % lull_mod == 0 {
+			if lull_mod != 0 && (i as u32).is_multiple_of(lull_mod) {
 				keepalive().map_err(RsyncError::from_stream)?;
 			}
 			if debug >= 3 {
@@ -446,7 +446,7 @@ impl Matcher<'_, '_> {
 		let mut steps: u32 = 0;
 		loop {
 			steps = steps.wrapping_add(1);
-			if steps % CANCEL_STRIDE == 0 {
+			if steps.is_multiple_of(CANCEL_STRIDE) {
 				self.ctx.check_cancel()?;
 			}
 			let mut sum = roll.value();

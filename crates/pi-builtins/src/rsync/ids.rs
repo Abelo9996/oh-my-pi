@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
+use std::fmt::NumBuffer;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -534,11 +535,12 @@ impl IdLists {
 		}
 		let mut text = Vec::new();
 		text.extend_from_slice(if kind == Kind::User { b"uid " } else { b"gid " });
-		text.extend_from_slice(node.id.to_string().as_bytes());
+		let mut buf = NumBuffer::new();
+		text.extend_from_slice(node.id.format_into(&mut buf).as_bytes());
 		text.push(b'(');
 		text.extend_from_slice(node.name.as_deref().unwrap_or(b""));
 		text.extend_from_slice(b") maps to ");
-		text.extend_from_slice(node.local.to_string().as_bytes());
+		text.extend_from_slice(node.local.format_into(&mut buf).as_bytes());
 		text.push(b'\n');
 		logger.rprintf(LogCode::Info, &text);
 	}

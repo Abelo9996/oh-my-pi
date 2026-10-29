@@ -185,12 +185,12 @@ fn generate_with(
 fn frames(bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
 	let mut out = Vec::new();
 	let mut r = bytes;
-	while r.len() >= 4 {
-		let header = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
+	while let Some((&header, rest)) = r.split_first_chunk::<4>() {
+		let header = u32::from_le_bytes(header);
 		let len = (header & 0xFF_FFFF) as usize;
 		let code = ((header >> 24) as u8).wrapping_sub(crate::rsync::consts::MPLEX_BASE);
-		out.push((code, r[4..4 + len].to_vec()));
-		r = &r[4 + len..];
+		out.push((code, rest[..len].to_vec()));
+		r = &rest[len..];
 	}
 	out
 }
@@ -243,12 +243,9 @@ fn parse_with(bytes: &[u8], with_sums: bool) -> (Vec<Req>, usize) {
 }
 
 fn set_mtime(path: &Path, secs: i64) {
-	filetime::set_symlink_file_times(
-		path,
-		filetime::FileTime::from_unix_time(secs, 0),
-		filetime::FileTime::from_unix_time(secs, 0),
-	)
-	.unwrap();
+	let t = crate::rsync::time::system_time(secs, 0).unwrap();
+	std::fs::set_times_nofollow(path, std::fs::FileTimes::new().set_accessed(t).set_modified(t))
+		.unwrap();
 }
 
 fn write_file(path: &Path, data: &[u8], secs: i64) {

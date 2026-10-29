@@ -1022,7 +1022,7 @@ pub(super) static LONG_OPTIONS: &[Spec] = &[
 	s("remote-option", b'M', S, |p, v| {
 		let arg = v.os();
 		if !os_bytes_lossy(&arg).starts_with(b"-") {
-			let text = format!("Remote option must start with a dash: {}", arg.to_string_lossy());
+			let text = format!("Remote option must start with a dash: {}", arg.display());
 			return Err(p.option_error(text));
 		}
 		p.o.remote_options.push(arg);
@@ -1078,7 +1078,7 @@ pub(super) static DAEMON_OPTIONS: &[Spec] = &[
 	s("dparam", b'M', S, |p, v| {
 		let arg = v.os();
 		if !os_bytes_lossy(&arg).contains(&b'=') {
-			let text = format!("--dparam value is missing an '=': {}", arg.to_string_lossy());
+			let text = format!("--dparam value is missing an '=': {}", arg.display());
 			return Err(p.daemon_error(text));
 		}
 		p.o.dparams.push(arg);

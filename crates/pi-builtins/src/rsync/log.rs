@@ -381,7 +381,7 @@ impl Logger {
 		let Some(path) = self.inner.cfg.log_file.clone() else {
 			return;
 		};
-		if path.as_os_str().is_empty() {
+		if path.is_empty() {
 			lock(&self.inner.outputs).log = LogTarget::Syslog;
 			return;
 		}

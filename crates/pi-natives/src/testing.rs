@@ -223,8 +223,7 @@ impl FileSystem for MemFs {
 					MemNode::File(_) => FileKind::File,
 				};
 				let name = pi_vfs::file_name(child)
-					.map(|name| name.into_owned())
-					.unwrap_or_default();
+					.map_or_default(|name| name.into_owned());
 				Ok(DirEntry::new(child.clone(), name, Some(FileType::from_kind(kind))))
 			})
 			.collect();

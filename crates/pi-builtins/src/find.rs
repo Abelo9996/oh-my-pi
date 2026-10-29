@@ -395,7 +395,7 @@ pub mod matchers {
 			/// the override is left unset and display falls back to the real path.
 			pub fn set_display_root(&mut self, operand: &Path, resolved_root: &Path) {
 				let display = match self.path().strip_prefix(resolved_root) {
-					Ok(rel) if rel.as_os_str().is_empty() => operand.to_path_buf(),
+					Ok(rel) if rel.is_empty() => operand.to_path_buf(),
 					Ok(rel) => pi_vfs::join_path(operand, rel),
 					Err(_) => return,
 				};
@@ -498,7 +498,7 @@ pub mod matchers {
 				// find.
 				None => Some(path),
 				// Paths like "foo" have a parent of "".  Avoid chdir("").
-				Some(parent) if parent.as_os_str().is_empty() => None,
+				Some(parent) if parent.is_empty() => None,
 				Some(parent) => Some(parent),
 			}
 		}
@@ -663,7 +663,7 @@ pub mod matchers {
 						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Cannot fit a single argument {}: {}",
-							path_to_file.to_string_lossy(),
+							path_to_file.display(),
 							e
 						);
 						matcher_io.set_exit_code(1);
@@ -761,7 +761,7 @@ pub mod matchers {
 			let result = fs_list
 				.into_iter()
 				.find(|fs| fs.dev_id == dev_id)
-				.map_or_else(String::new, |fs| fs.fs_type);
+				.map_or_default(|fs| fs.fs_type);
 
 			// cache the latest query if not a match before
 			cache.0.replace(Some((dev_id, result.clone())));
@@ -802,7 +802,7 @@ pub mod matchers {
 						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting filesystem type for {}",
-							file_info.path().to_string_lossy()
+							file_info.path().display()
 						);
 
 						false
@@ -940,13 +940,9 @@ pub mod matchers {
 						let ch = chars.next()?;
 						regex_push_literal(&mut regex, ch);
 					},
-					'[' => {
-						if let Some((expr, rest)) = extract_bracket_expr(chars.as_str()) {
-							regex.push_str(&expr);
-							chars = rest.chars();
-						} else {
-							regex_push_literal(&mut regex, ch);
-						}
+					'[' if let Some((expr, rest)) = extract_bracket_expr(chars.as_str()) => {
+						regex.push_str(&expr);
+						chars = rest.chars();
 					},
 					_ => regex_push_literal(&mut regex, ch),
 				}
@@ -1601,7 +1597,7 @@ pub mod matchers {
 						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting metadata for {}: {}",
-							file_info.path().to_string_lossy(),
+							file_info.path().display(),
 							e
 						);
 						matcher_io.set_exit_code(1);
@@ -1860,7 +1856,7 @@ pub mod matchers {
 						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting permissions for {}: {}",
-							file_info.path().to_string_lossy(),
+							file_info.path().display(),
 							e
 						);
 						false
@@ -1920,7 +1916,7 @@ pub mod matchers {
 				mut out: impl Write,
 				print_error_message: bool,
 			) {
-				match write!(out, "{}{}", file_info.display_path().to_string_lossy(), self.delimiter)
+				match write!(out, "{}{}", file_info.display_path().display(), self.delimiter)
 				{
 					Ok(()) => {},
 					Err(e) => {
@@ -2169,7 +2165,7 @@ pub mod matchers {
 				let start = self.string;
 				let mut digits = 0;
 
-				while self.front().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+				while self.front().is_ok_and(|c| c.is_ascii_digit()) {
 					digits += 1;
 					// safe to unwrap: the front() check already succeeded above.
 					self.advance_one().unwrap();
@@ -2376,8 +2372,8 @@ pub mod matchers {
 				// These are all (thankfully) documented on the find(1) man page.
 				FormatDirective::Dirname => match pi_vfs::parent_path(file_info.display_path()) {
 					None => "".into(),
-					Some(p) if p == Path::new("/") => "".into(),
-					Some(p) if p == Path::new("") => ".".into(),
+					Some(p) if p == "/" => "".into(),
+					Some(p) if p.is_empty() => ".".into(),
 					Some(parent) => parent.to_string_lossy(),
 				},
 
@@ -2583,7 +2579,7 @@ pub mod matchers {
 						let _ = writeln!(
 							matcher_io.host().stderr,
 							"Error processing '{}': {}",
-							file_info.path().to_string_lossy(),
+							file_info.path().display(),
 							e
 						);
 					},
@@ -2919,7 +2915,7 @@ pub mod matchers {
 						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting file size for {}: {}",
-							file_info.path().to_string_lossy(),
+							file_info.path().display(),
 							e
 						);
 						false
@@ -3060,7 +3056,7 @@ pub mod matchers {
 						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting modification time for {}: {}",
-							file_info.path().to_string_lossy(),
+							file_info.path().display(),
 							e
 						);
 						false
@@ -3142,7 +3138,7 @@ pub mod matchers {
 							&mut matcher_io.host().stderr,
 							"Error getting {:?} time for {}: {}",
 							self.x_option,
-							file_info.path().to_string_lossy(),
+							file_info.path().display(),
 							e
 						);
 						false
@@ -3188,7 +3184,7 @@ pub mod matchers {
 							&mut matcher_io.host().stderr,
 							"Error getting {:?} time for {}: {}",
 							self.newer_time_type,
-							file_info.path().to_string_lossy(),
+							file_info.path().display(),
 							e
 						);
 						false
@@ -3232,7 +3228,7 @@ pub mod matchers {
 							&mut matcher_io.host().stderr,
 							"Error getting {:?} time for {}: {}",
 							self.file_time_type,
-							file_info.path().to_string_lossy(),
+							file_info.path().display(),
 							e
 						);
 						false
@@ -3300,7 +3296,7 @@ pub mod matchers {
 							&mut matcher_io.host().stderr,
 							"Error getting {:?} time for {}: {}",
 							self.file_time_type,
-							file_info.path().to_string_lossy(),
+							file_info.path().display(),
 							e
 						);
 						false

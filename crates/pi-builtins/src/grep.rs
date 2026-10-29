@@ -148,15 +148,15 @@ impl RecordFormat {
 			out.write_all(&[if self.null_paths { b'\0' } else { separator }])?;
 		}
 		if let Some(number) = line_number {
-			write!(out, "{number}")?;
+			out.write_all(number.format_into(&mut fmt::NumBuffer::new()).as_bytes())?;
 			out.write_all(&[separator])?;
 		}
 		if let Some(column) = column {
-			write!(out, "{column}")?;
+			out.write_all(column.format_into(&mut fmt::NumBuffer::new()).as_bytes())?;
 			out.write_all(&[separator])?;
 		}
 		if let Some(offset) = byte_offset {
-			write!(out, "{offset}")?;
+			out.write_all(offset.format_into(&mut fmt::NumBuffer::new()).as_bytes())?;
 			out.write_all(&[separator])?;
 		}
 		Ok(path.is_some() || line_number.is_some() || column.is_some() || byte_offset.is_some())
@@ -188,7 +188,7 @@ impl RecordFormat {
 		count: u64,
 	) -> io::Result<()> {
 		self.write_prefix(out, path, None, None, None, b':')?;
-		write!(out, "{count}")?;
+		out.write_all(count.format_into(&mut fmt::NumBuffer::new()).as_bytes())?;
 		out.write_all(&[self.terminator])
 	}
 }
@@ -574,7 +574,7 @@ fn path_suffix_matches(matcher: &GlobMatcher, path: &Path) -> bool {
 	let mut components = path.components();
 	loop {
 		let suffix = components.as_path();
-		if suffix.as_os_str().is_empty() {
+		if suffix.is_empty() {
 			return false;
 		}
 		if matcher.is_match(suffix) {
@@ -1081,7 +1081,7 @@ fn process_reader<M: Matcher, R: Read, W: Write>(
 
 fn display_path_for_operand(operand: &OsStr, resolved: &Path, path: &Path) -> PathBuf {
 	let rel = path.strip_prefix(resolved).unwrap_or(path);
-	if rel.as_os_str().is_empty() {
+	if rel.is_empty() {
 		PathBuf::from(operand)
 	} else {
 		Path::new(operand).join(rel)
@@ -1114,7 +1114,7 @@ fn search_file_path<M: Matcher, W: Write>(
 						let _ = writeln!(
 							host.stderr,
 							"grep: {}: {}",
-							display_path.to_string_lossy(),
+							display_path.display(),
 							describe_search_error(&error)
 						);
 					}
@@ -1128,7 +1128,7 @@ fn search_file_path<M: Matcher, W: Write>(
 				let _ = writeln!(
 					host.stderr,
 					"grep: {}: {error}",
-					display_path.to_string_lossy()
+					display_path.display()
 				);
 			}
 			Ok(false)
@@ -1221,7 +1221,7 @@ fn search_dir<M: Matcher, W: Write>(
 				let _ = writeln!(
 					walk_err,
 					"grep: {}: {}",
-					display_path.to_string_lossy(),
+					display_path.display(),
 					error.error
 				);
 			}
@@ -1256,7 +1256,7 @@ fn search_dir<M: Matcher, W: Write>(
 				let _ = writeln!(
 					host.stderr,
 					"grep: {}: {message}",
-					display_path.to_string_lossy()
+					display_path.display()
 				);
 			}
 			Ok(any)
@@ -1270,7 +1270,7 @@ fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String>
 	} else {
 		host.fs().open(host.resolve(path)).and_then(read_pattern_source)
 	};
-	result.map_err(|error| format!("{}: {error}", path.to_string_lossy()))
+	result.map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn pattern_file_lines(bytes: &[u8]) -> Vec<String> {
@@ -1590,7 +1590,7 @@ fn execute_search<M: Matcher>(
 					let _ = writeln!(
 						host.stderr,
 						"grep: {}: Is a directory",
-						operand.to_string_lossy()
+						operand.display()
 					);
 				},
 			},
@@ -1620,7 +1620,7 @@ fn execute_search<M: Matcher>(
 				had_error = true;
 				if !opts.no_messages {
 					let _ =
-						writeln!(host.stderr, "grep: {}: {error}", operand.to_string_lossy());
+						writeln!(host.stderr, "grep: {}: {error}", operand.display());
 				}
 			},
 		}

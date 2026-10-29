@@ -988,8 +988,8 @@ fn run_commit_hook(repository: &GitRepo, name: &str, args: &[&OsStr]) -> Result<
 	Err(Error::Cli {
 		command:   format!("git commit ({name} hook)"),
 		exit_code: output.status.code().unwrap_or(1),
-		stdout:    String::from_utf8_lossy(&output.stdout).into_owned(),
-		stderr:    String::from_utf8_lossy(&output.stderr).into_owned(),
+		stdout:    String::from_utf8_lossy_owned(output.stdout),
+		stderr:    String::from_utf8_lossy_owned(output.stderr),
 	})
 }
 

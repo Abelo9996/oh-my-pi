@@ -115,14 +115,7 @@ fn join_bytes(dir: &[u8], name: &[u8]) -> Vec<u8> {
 }
 
 fn is_dir_error(err: &io::Error) -> bool {
-	if err.kind() == io::ErrorKind::IsADirectory {
-		return true;
-	}
-	#[cfg(unix)]
-	if err.raw_os_error() == Some(libc::EISDIR) {
-		return true;
-	}
-	false
+	err.kind() == io::ErrorKind::IsADirectory
 }
 
 fn is_eacces(err: &io::Error) -> bool {
@@ -145,31 +138,11 @@ fn eacces() -> io::Error {
 }
 
 fn is_xdev(err: &io::Error) -> bool {
-	#[cfg(unix)]
-	{
-		err.raw_os_error() == Some(libc::EXDEV)
-	}
-	#[cfg(windows)]
-	{
-		// ERROR_NOT_SAME_DEVICE
-		err.raw_os_error() == Some(17) || err.kind() == io::ErrorKind::CrossesDevices
-	}
-	#[cfg(not(any(unix, windows)))]
-	{
-		err.kind() == io::ErrorKind::CrossesDevices
-	}
+	err.kind() == io::ErrorKind::CrossesDevices
 }
 
 fn is_txtbsy(err: &io::Error) -> bool {
-	#[cfg(unix)]
-	{
-		err.raw_os_error() == Some(libc::ETXTBSY)
-	}
-	#[cfg(not(unix))]
-	{
-		let _ = err;
-		false
-	}
+	err.kind() == io::ErrorKind::ExecutableFileBusy
 }
 
 fn is_not_found(err: &io::Error) -> bool {
@@ -192,7 +165,7 @@ impl Loc {
 	}
 
 	fn parent(&self) -> PathBuf {
-		self.rel.parent().map(Path::to_path_buf).unwrap_or_default()
+		self.rel.parent().map_or_default(Path::to_path_buf)
 	}
 }
 
@@ -424,7 +397,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		if self.abs_partial.is_none() {
 			let opened = self.trees.partial_dir.as_deref().and_then(|dir| {
 				let path = self.ctx.paths.resolve(bytes_os_lossy(dir));
-				let leaf = path.file_name().map(PathBuf::from).unwrap_or_default();
+				let leaf = path.file_name().map_or_default(PathBuf::from);
 				let parent = path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.clone());
 				let opts = TreeOpts {
 					insecure_links: self.ctx.opts.insecure_links,
@@ -475,7 +448,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 			confine: opts.confine_root.as_ref().map(|c| self.ctx.paths.resolve(c)),
 		};
 		let tree = Tree::open(&self.ctx.fs, &p.tree.root().join(p.parent()), &tree_opts)?;
-		let rel = p.rel.file_name().map(PathBuf::from).unwrap_or_default();
+		let rel = p.rel.file_name().map_or_default(PathBuf::from);
 		Ok(Loc { tree, rel, name: p.name.clone() })
 	}
 
@@ -489,7 +462,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 			return true;
 		}
 		let dir = p.parent();
-		if dir.as_os_str().is_empty() {
+		if dir.is_empty() {
 			return true;
 		}
 		if create {
@@ -520,7 +493,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 	fn segment_starting_at(&self, start: i32) -> Option<usize> {
 		let (mut lo, mut hi) = (0, self.flists.len());
 		while lo < hi {
-			let mid = lo + (hi - lo) / 2;
+			let mid = usize::midpoint(lo, hi);
 			match self.flists.segment_start(mid)?.cmp(&start) {
 				std::cmp::Ordering::Equal => return Some(mid),
 				std::cmp::Ordering::Less => lo = mid + 1,
@@ -972,8 +945,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 				let mut f = f;
 				size_r = f.seek(SeekFrom::End(0)).unwrap_or(0);
 			}
-		} else if basis.as_ref().is_some_and(|(_, m)| !m.is_file()) {
-			basis = None;
+		} else if basis.take_if(|(_, m)| !m.is_file()).is_some() {
 			size_r = 0;
 		}
 
@@ -1319,10 +1291,11 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		if self.make_backups() && overwriting_basis {
 			match backup::make_backup(self.ctx, self.trees, &fname.name, false) {
 				Err(_) => return Err(RsyncError::bare(RERR_FILEIO).at("rsync.c", 900)),
-				Ok(BackupOutcome::Moved) if cmp_is_fname => {
-					if let Ok(Some((tree, rel))) = backup::backup_path(self.ctx, self.trees, &fname.name) {
-						backup_basis = Some(Loc { tree, rel, name: backup::backup_name(self.ctx, &fname.name) });
-					}
+				Ok(BackupOutcome::Moved)
+					if cmp_is_fname
+						&& let Ok(Some((tree, rel))) = backup::backup_path(self.ctx, self.trees, &fname.name) =>
+				{
+					backup_basis = Some(Loc { tree, rel, name: backup::backup_name(self.ctx, &fname.name) });
 				}
 				Ok(_) => {}
 			}
@@ -1586,7 +1559,7 @@ impl<'a, 'b> Receiver<'a, 'b> {
 		if gap {
 			return Err(RsyncError::bare(RERR_PROTOCOL).at("receiver.c", 743));
 		}
-		let name = self.flists.entry(ndx).map(|e| e.name()).unwrap_or_default();
+		let name = self.flists.entry(ndx).map_or_default(|e| e.name());
 		let resend: &[u8] = if is_redo { b" resend of" } else { b"" };
 		self.log.rprintf(LogCode::ErrorXfer, &[&b"(No batched update for"[..], resend, b" \"", &name, b"\")\n"].concat());
 		if self.ctx.inc_recurse && !self.ctx.opts.dry_run {

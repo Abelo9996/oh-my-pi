@@ -7,6 +7,7 @@
 use std::{
 	borrow::Cow,
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+	iter,
 	path::Path,
 };
 
@@ -56,10 +57,8 @@ pub fn normalize_text(source: &str) -> NormalizedText {
 			normalize_unicode(&character.to_string())
 		};
 		text.push_str(&normalized);
-		for _ in normalized.bytes() {
-			starts.push(start);
-			ends.push(end);
-		}
+		starts.extend(iter::repeat_n(start, normalized.len()));
+		ends.extend(iter::repeat_n(end, normalized.len()));
 	}
 	NormalizedText { text, starts, ends }
 }
@@ -253,7 +252,7 @@ pub(crate) fn parse_pattern(
 		tokens.len()
 	};
 	let mut selection_pairs = Vec::new();
-	if !selection_boundaries.is_empty() && selection_boundaries.len() % 2 == 0 {
+	if !selection_boundaries.is_empty() && selection_boundaries.len().is_multiple_of(2) {
 		for pair_index in 0..selection_boundaries.len() / 2 {
 			let start = selection_boundaries[pair_index * 2];
 			let end = selection_boundaries[pair_index * 2 + 1];
@@ -1725,9 +1724,9 @@ fn rewrite_proves_whole_span(content: &str, candidate: &Candidate, rewrite: &str
 	let normalized_rewrite = normalize_text(rewrite).text;
 	let contexts = candidate
 		.selection_spans
-		.windows(2)
-		.filter_map(|spans| {
-			let context = normalize_text(&content[spans[0].1..spans[1].0]).text;
+		.array_windows()
+		.filter_map(|&[(_, end), (start, _)]| {
+			let context = normalize_text(&content[end..start]).text;
 			(!context.is_empty()).then_some(context)
 		})
 		.collect::<Vec<_>>();
@@ -1898,9 +1897,7 @@ fn drop_selection_echoes(pattern: &str) -> Option<String> {
 fn echo_line_candidates(pattern: &str) -> Vec<String> {
 	let lines = pattern.split('\n').collect::<Vec<_>>();
 	let mut result = Vec::new();
-	for index in 1..lines.len() {
-		let previous = lines[index - 1];
-		let line = lines[index];
+	for (index, &[previous, line]) in lines.array_windows().enumerate() {
 		if !line.contains(SELECT_OPEN)
 			|| previous.contains(SELECT_OPEN)
 			|| previous.contains(GAP)
@@ -1911,7 +1908,7 @@ fn echo_line_candidates(pattern: &str) -> Vec<String> {
 		let without_markers = line.replace(SELECT_OPEN, "").replace(SELECT_CLOSE, "");
 		if normalize_text(&without_markers).text == normalize_text(previous).text {
 			let mut candidate = lines.clone();
-			candidate.remove(index - 1);
+			candidate.remove(index);
 			result.push(candidate.join("\n"));
 		}
 	}
@@ -2254,7 +2251,7 @@ fn no_op_error(
 	} else {
 		format!("Edits to {} made no change.", context.path)
 	};
-	let grounding = preview.map_or(String::new(), |(content, offset)| {
+	let grounding = preview.map_or_default(|(content, offset)| {
 		format!(
 			"\nYour rewrite normalized to text identical to these lines. Indentation-only changes \
 			 are applied verbatim; adjust the authored *** Replace if another whitespace change was \
@@ -2262,7 +2259,7 @@ fn no_op_error(
 			numbered_preview(content, offset)
 		)
 	});
-	let hint = hint.map_or(String::new(), |hint| format!("\n{hint}"));
+	let hint = hint.map_or_default(|hint| format!("\n{hint}"));
 	EditError::rejected(Rejection::NoChange, format!("{base}{grounding}{hint}"))
 }
 

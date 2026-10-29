@@ -5,7 +5,7 @@
 use std::{
 	ffi::{CStr, CString},
 	io,
-	mem::{size_of, zeroed},
+	mem::zeroed,
 	net::TcpStream,
 	os::fd::{AsRawFd, FromRawFd, OwnedFd},
 	time::Duration,
@@ -194,7 +194,7 @@ impl Socket {
 				size_of::<libc::c_int>() as libc::socklen_t,
 			)
 		};
-		if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+		(rc >= 0).ok_or_else(io::Error::last_os_error)
 	}
 
 	fn set_nonblocking(&self, on: bool) -> io::Result<()> {

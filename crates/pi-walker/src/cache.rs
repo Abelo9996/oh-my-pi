@@ -49,14 +49,13 @@ impl ScanCache {
 	}
 
 	fn expire(&mut self, now: Instant) {
-		self.entries.retain(|_, entry| {
-			if now.saturating_duration_since(entry.created_at) < self.ttl {
-				true
-			} else {
-				self.bytes -= entry.bytes;
-				false
-			}
-		});
+		let ttl = self.ttl;
+		for (_, entry) in self
+			.entries
+			.extract_if(|_, entry| now.saturating_duration_since(entry.created_at) >= ttl)
+		{
+			self.bytes -= entry.bytes;
+		}
 	}
 
 	fn get(&mut self, key: &CacheKey, now: Instant) -> Option<CacheEntry> {
@@ -101,16 +100,13 @@ impl ScanCache {
 	/// the next cache lookup.
 	fn invalidate(&mut self, target: Option<&Path>, now: Instant) {
 		self.generation = self.generation.wrapping_add(1);
-		self.entries.retain(|key, entry| {
-			if target.is_none_or(|target| target.starts_with(&key.root))
-				|| now.saturating_duration_since(entry.created_at) >= self.ttl
-			{
-				self.bytes -= entry.bytes;
-				false
-			} else {
-				true
-			}
-		});
+		let ttl = self.ttl;
+		for (_, entry) in self.entries.extract_if(|key, entry| {
+			target.is_none_or(|target| target.starts_with(&key.root))
+				|| now.saturating_duration_since(entry.created_at) >= ttl
+		}) {
+			self.bytes -= entry.bytes;
+		}
 	}
 }
 
@@ -868,11 +864,7 @@ mod tests {
 		);
 		let heartbeat_calls = AtomicU64::new(0);
 		let cancelled_after_copy = crate::collect_entries(root.path(), options, || {
-			if heartbeat_calls.fetch_add(1, Ordering::Relaxed) == 0 {
-				Ok(())
-			} else {
-				Err("cancelled after copy")
-			}
+			(heartbeat_calls.fetch_add(1, Ordering::Relaxed) == 0).ok_or("cancelled after copy")
 		});
 		assert!(
 			matches!(cancelled_after_copy, Err(crate::WalkError::Interrupted(error)) if error == "cancelled after copy")

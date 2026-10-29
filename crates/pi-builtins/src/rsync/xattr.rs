@@ -225,13 +225,10 @@ impl Ns {
 		if self.screened(name, filter, user_only) {
 			return false;
 		}
-		match self.internal_suffix(name) {
-			Some(suffix) => {
-				!((self.sender && !self.all)
-					|| (self.root < 0 && matches!(suffix, b"stat" | b"aacl" | b"dacl")))
-			},
-			None => true,
-		}
+		self.internal_suffix(name).is_none_or(|suffix| {
+			!((self.sender && !self.all)
+				|| (self.root < 0 && matches!(suffix, b"stat" | b"aacl" | b"dacl")))
+		})
 	}
 
 	/// Sender: local name → wire name.

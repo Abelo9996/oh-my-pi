@@ -302,7 +302,7 @@ pub(crate) fn daemon_handshake(
 			});
 		}
 		if line.starts_with(b"@ERROR") {
-			return Err(startclient(String::from_utf8_lossy(&line).into_owned()));
+			return Err(startclient(String::from_utf8_lossy_owned(line)));
 		}
 		if cfg.output_motd {
 			let mut text = line;
@@ -372,8 +372,8 @@ fn parse_greeting(line: &[u8]) -> Option<(i32, Option<i32>)> {
 
 /// `%d`: optional whitespace, optional sign, at least one digit.
 fn scan_int(s: &[u8]) -> Option<(i32, &[u8])> {
-	let start = s.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(s.len());
-	let mut i = start;
+	let s = s.trim_ascii_start();
+	let mut i = 0;
 	let negative = match s.get(i) {
 		Some(b'-') => {
 			i += 1;

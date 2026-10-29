@@ -687,7 +687,7 @@ impl Shared {
 	/// Upstream `read_a_msg` for everything but MSG_DATA.
 	fn handle_msg(&self, msg: Msg) -> io::Result<()> {
 		let int = || -> i32 {
-			msg.payload.get(..4).map_or(0, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+			msg.payload.first_chunk().map_or(0, |&b| i32::from_le_bytes(b))
 		};
 		match msg.code {
 			code if LogCode::from_u8(code).is_some() => {
@@ -743,7 +743,7 @@ impl Shared {
 			}
 			MSG_BLOCK_STATS => {
 				if self.am_sender
-					&& let Ok(bytes) = <[u8; 8]>::try_from(&msg.payload[..])
+					&& let Some(&bytes) = msg.payload.as_array::<8>()
 				{
 					lock(&self.stats).touched_blocks_4k = i64::from_le_bytes(bytes);
 				}
@@ -770,7 +770,7 @@ impl Shared {
 	/// side with the peer's code and no trailer of our own. The reader keeps
 	/// working so the exit tail can still drain the connection.
 	fn peer_error_exit(&self, payload: &[u8]) {
-		let val = payload.get(..4).map_or(0, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+		let val = payload.first_chunk().map_or(0, |&b| i32::from_le_bytes(b));
 		if payload.len() == 4
 			&& self.proto.version >= 31
 			&& let Some(w) = self.writer()
@@ -1878,7 +1878,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		let w = Arc::clone(&sink_writer);
 		Arc::new(move |code: LogCode, data: &[u8]| -> io::Result<()> {
 			let Some(w) = lock(&w).clone() else { return Err(io::Error::other("closed")) };
-			if w.try_send_msg(code as u8, data)? { Ok(()) } else { Err(io::Error::other("not multiplexed")) }
+			w.try_send_msg(code as u8, data)?.ok_or_else(|| io::Error::other("not multiplexed"))
 		})
 	};
 	let base_logger = Logger::remote_with_stderr(sink, Box::new(io.err.clone()), log_config(io, &opts, true, local_server))
@@ -2004,7 +2004,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 			res => {
 				let err = res.err().unwrap_or_else(|| io::Error::from_raw_os_error(20));
 				let what = if am_sender { "change_dir#3" } else { "change_dir#4" };
-				let name = String::from_utf8_lossy(&paths::full_fname(&io.cwd, &os_bytes_lossy(dir))).into_owned();
+				let name = String::from_utf8_lossy_owned(paths::full_fname(&io.cwd, &os_bytes_lossy(dir)));
 				let line = if am_sender { 984 } else { 1216 };
 				let err = RsyncError::new(crate::rsync::exit::RERR_FILESELECT, syserr_text(role, &err, &format!("{what} {name} failed")))
 					.at("main.c", line);

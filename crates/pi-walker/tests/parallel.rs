@@ -336,7 +336,7 @@ impl EntryVisitor for DirectoryOrderVisitor {
 		let parent = entry
 			.relative
 			.rsplit_once('/')
-			.map_or_else(String::new, |(parent, _)| parent.to_owned());
+			.map_or_default(|(parent, _)| parent.to_owned());
 		self
 			.children_by_parent
 			.entry(parent)

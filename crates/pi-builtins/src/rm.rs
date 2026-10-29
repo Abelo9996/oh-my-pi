@@ -931,8 +931,7 @@ impl Utility for Rm {
 fn run_matches(host: &mut Host, matches: &ArgMatches) -> i32 {
 	let files: Vec<_> = matches
 		.get_many::<OsString>(ARG_FILES)
-		.map(|v| v.map(OsString::as_os_str).collect())
-		.unwrap_or_default();
+		.map_or_default(|v| v.map(OsString::as_os_str).collect());
 
 	let force_flag = matches.get_flag(OPT_FORCE);
 	if files.is_empty() && !force_flag {
@@ -1751,7 +1750,7 @@ fn path_is_current_or_parent_directory(path: &Path) -> bool {
 		&& !path.has_root()
 	{
 		let rest = components.as_path();
-		return rest.as_os_str().is_empty() || path_is_current_or_parent_directory(rest);
+		return rest.is_empty() || path_is_current_or_parent_directory(rest);
 	}
 	let path_str = os_bytes(path.as_os_str());
 	let dir_separator = MAIN_SEPARATOR as u8;

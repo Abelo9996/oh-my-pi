@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use filetime::FileTime;
+use crate::rsync::time::system_time;
 
 /// Base of every pinned timestamp (2020-09-13).
 const T0: i64 = 1_600_000_000;
@@ -117,8 +117,9 @@ fn data(d: &Data) -> &'static [u8] {
 
 /// Sets atime and mtime without following a final symlink.
 fn set_time(path: &Path, secs: i64, nanos: u32) {
-	let t = FileTime::from_unix_time(secs, nanos);
-	filetime::set_symlink_file_times(path, t, t).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+	let t = system_time(secs, i64::from(nanos)).unwrap();
+	fs::set_times_nofollow(path, fs::FileTimes::new().set_accessed(t).set_modified(t))
+		.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
 }
 
 fn chmod(path: &Path, mode: u32) {

@@ -398,7 +398,7 @@ pub(crate) fn files_from_hostspec(
 ) -> Option<(String, OsString)> {
 	let mut port = 0;
 	let found = hostspec(arg, Some(&mut port), is_local_vfs)?;
-	Some((String::from_utf8_lossy(&found.host).into_owned(), bytes_os_lossy(found.path).into_owned()))
+	Some((String::from_utf8_lossy_owned(found.host), bytes_os_lossy(found.path).into_owned()))
 }
 
 /// `check_for_hostspec` plus the virtual-filesystem exemption.

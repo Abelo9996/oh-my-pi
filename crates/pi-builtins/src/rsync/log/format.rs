@@ -1,6 +1,8 @@
 //! Number formatting, time and permission strings, the itemize string, and
 //! the `--out-format` / `--log-file-format` escape engine.
 
+use std::fmt::NumBuffer;
+
 use crate::rsync::consts::{
 	ITEM_DELETED, ITEM_IS_NEW, ITEM_LOCAL_CHANGE, ITEM_MISSING_DATA, ITEM_REPORT_ACL,
 	ITEM_REPORT_ATIME, ITEM_REPORT_CHANGE, ITEM_REPORT_CRTIME, ITEM_REPORT_GROUP,
@@ -44,20 +46,21 @@ fn big_num_fract(n: i64, human: u8, fract: &str) -> String {
 			return format!("{value:.2}{unit}");
 		}
 	}
-	let digits = n.unsigned_abs().to_string();
+	let mut buf = NumBuffer::new();
+	let digits = n.unsigned_abs().format_into(&mut buf);
 	let mut out = String::with_capacity(digits.len() * 4 / 3 + fract.len() + 1);
 	if n < 0 {
 		out.push('-');
 	}
 	if human > 0 {
 		for (index, ch) in digits.chars().enumerate() {
-			if index != 0 && (digits.len() - index) % 3 == 0 {
+			if index != 0 && (digits.len() - index).is_multiple_of(3) {
 				out.push(',');
 			}
 			out.push(ch);
 		}
 	} else {
-		out.push_str(&digits);
+		out.push_str(digits);
 	}
 	out.push_str(fract);
 	out
@@ -440,16 +443,16 @@ fn expand_escape(
 		}
 		b'U' => {
 			let uid = if env.preserve_uid { item.uid } else { 0 };
-			spec.pad(uid.to_string().as_bytes(), cap)
+			spec.pad(uid.format_into(&mut NumBuffer::new()).as_bytes(), cap)
 		}
 		b'G' => {
 			if !env.preserve_gid || item.skip_group {
 				padded(b"DEFAULT")
 			} else {
-				spec.pad(item.gid.to_string().as_bytes(), cap)
+				spec.pad(item.gid.format_into(&mut NumBuffer::new()).as_bytes(), cap)
 			}
 		}
-		b'p' => spec.pad(env.pid.to_string().as_bytes(), cap),
+		b'p' => spec.pad(env.pid.format_into(&mut NumBuffer::new()).as_bytes(), cap),
 		b'M' => {
 			let mut stamp = timestring(item.mtime, env.tz).into_bytes();
 			for byte in &mut stamp {

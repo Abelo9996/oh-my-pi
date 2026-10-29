@@ -849,8 +849,7 @@ impl Filters {
 				.slots
 				.get(i)
 				.and_then(Option::as_ref)
-				.map(|s| s.debug_type.clone())
-				.unwrap_or_default(),
+				.map_or_default(|s| s.debug_type.clone()),
 		}
 	}
 
@@ -1112,7 +1111,7 @@ impl Filters {
 							&shown,
 						]
 						.concat();
-						let msg = String::from_utf8_lossy(&msg).into_owned();
+						let msg = String::from_utf8_lossy_owned(msg);
 						return Err(RsyncError::new(RERR_SYNTAX, msg).at("exclude.c", 1379));
 					}
 				}
@@ -1192,8 +1191,7 @@ impl Filters {
 		if xflags & XFLG_ANCHORED2ABS != 0 && rflags & FILTRULES_SIDES == other_side {
 			return;
 		}
-		if pat.len() > 1 && pat.last() == Some(&b'/') {
-			pat.pop();
+		if pat.len() > 1 && pat.pop_if(|b| *b == b'/').is_some() {
 			rflags |= FILTRULE_DIRECTORY;
 		}
 		let mut slash_cnt = count_slashes(&pat);
@@ -1340,7 +1338,7 @@ impl Filters {
 			]
 			.concat();
 			if xflags & XFLG_FATAL_ERRORS != 0 {
-				let msg = String::from_utf8_lossy(&msg).into_owned();
+				let msg = String::from_utf8_lossy_owned(msg);
 				return Err(RsyncError::new(RERR_FILEIO, msg).at("exclude.c", 1626));
 			}
 			self.error_msg(&[&msg[..], b"\n"].concat());

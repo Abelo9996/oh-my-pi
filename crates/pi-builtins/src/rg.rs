@@ -939,7 +939,7 @@ fn read_pattern_file(host: &mut Host, path: &OsStr) -> Result<Vec<String>, Strin
 				io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8")
 			})
 		})
-		.map_err(|err| format!("rg: {}: {err}", path.to_string_lossy()))?;
+		.map_err(|err| format!("rg: {}: {err}", path.display()))?;
 	Ok(text
 		.lines()
 		.map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
@@ -1150,7 +1150,7 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 		for path in &cli.ignore_files {
 			let resolved = host.resolve(path);
 			if let Some(error) = pi_walker::add_ignore_file(&mut builder, host.fs(), &resolved) {
-				return Err(format!("rg: {}: {error}", path.to_string_lossy()));
+				return Err(format!("rg: {}: {error}", path.display()));
 			}
 		}
 		Some(builder.build().map_err(|error| format!("rg: {error}"))?)
@@ -1210,7 +1210,7 @@ fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> 
 /// path-printing utilities.
 fn display_path(operand: &OsStr, root: &Path, path: &Path) -> PathBuf {
 	let rel = path.strip_prefix(root).unwrap_or(path);
-	if rel.as_os_str().is_empty() {
+	if rel.is_empty() {
 		return PathBuf::from(operand);
 	}
 	let display = if operand == OsStr::new(".") {
@@ -1508,8 +1508,8 @@ fn search_dir<M: Matcher, W: Write>(
 			let display_bytes = display_path.as_os_str().as_encoded_bytes().to_vec();
 			let display = (show_names || opts.json).then_some(display_bytes.as_slice());
 			let outcome = process_file(host, cli, matcher, searcher, path, display, opts, stats, out)?;
-			any_match.set(any_match.get() || outcome.any_match);
-			had_error.set(had_error.get() || outcome.had_error);
+			any_match.update(|v| v || outcome.any_match);
+			had_error.update(|v| v || outcome.had_error);
 			Ok(if opts.quiet && any_match.get() {
 				pi_walker::WalkDecision::Stop
 			} else {
@@ -1634,7 +1634,7 @@ fn list_files<W: Write>(
 			},
 			Ok(_) => {},
 			Err(err) => {
-				let _ = writeln!(host.stderr, "rg: {}: {err}", operand.to_string_lossy());
+				let _ = writeln!(host.stderr, "rg: {}: {err}", operand.display());
 				had_error = true;
 			},
 		}
@@ -1826,7 +1826,7 @@ fn execute_search<M: Matcher, W: Write>(
 				had_error = true;
 				if !opts.no_messages {
 					let _ =
-						writeln!(host.stderr, "rg: {}: {error}", operand.to_string_lossy());
+						writeln!(host.stderr, "rg: {}: {error}", operand.display());
 				}
 			},
 		}

@@ -56,7 +56,7 @@ impl<'f> BasisMap<'f> {
 	pub(super) fn new(file: &'f File, size: u64, blength: i32) -> Self {
 		let blk = u64::try_from(blength.max(0)).unwrap_or(0);
 		let mut read_size = (blk * 2).max(16 * 1024);
-		if blk != 0 && read_size % blk != 0 {
+		if blk != 0 && !read_size.is_multiple_of(blk) {
 			read_size += blk - read_size % blk;
 		}
 		Self { file, size, window: aligned_len(read_size), buf: Vec::new(), start: 0, len: 0, fd_pos: None }
@@ -437,7 +437,7 @@ impl Receiver<'_, '_> {
 		let head = SumHead::read_as(input, ctx.proto, xfer_len, Role::Receiver)?;
 		let mut map = basis.as_ref().filter(|b| b.size > 0).map(|b| BasisMap::new(b.file, b.size, head.blength));
 		if map.is_some() && self.log.levels().debug(Debug::Deltasum) >= 2 {
-			let b = basis.as_ref().map(|b| b.loc.name.clone()).unwrap_or_default();
+			let b = basis.as_ref().map_or_default(|b| b.loc.name.clone());
 			let text = [&b"recv mapped "[..], &b, b" of size ", big_num(size_r as i64, 0).as_bytes(), b"\n"].concat();
 			self.log.rprintf(LogCode::Info, &text);
 		}
@@ -657,7 +657,7 @@ struct Flow {
 
 /// "write failed on %s" and the RERR_FILEIO exit.
 fn write_failed(log: &crate::rsync::log::Logger, err: &io::Error, loc: Option<&Loc>) -> RsyncError {
-	let name = loc.map(Loc::full).unwrap_or_default();
+	let name = loc.map_or_default(Loc::full);
 	log.rsyserr(LogCode::ErrorXfer, err, &[&b"write failed on "[..], &name].concat());
 	RsyncError::bare(RERR_FILEIO).at("receiver.c", 660)
 }

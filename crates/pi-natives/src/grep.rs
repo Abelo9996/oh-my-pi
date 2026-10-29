@@ -1785,10 +1785,7 @@ fn process_candidates<M: Matcher + Sync>(
 	let (normal, oversized_hinted): (Vec<_>, Vec<_>) =
 		candidates
 			.into_iter()
-			.partition(|file| match file_size_hint(file.size) {
-				Some(size) => size <= MAX_FILE_BYTES,
-				None => true,
-			});
+			.partition(|file| file_size_hint(file.size).is_none_or(|size| size <= MAX_FILE_BYTES));
 	if !oversized_hinted.is_empty() {
 		state.deferred.lock().extend(oversized_hinted);
 	}

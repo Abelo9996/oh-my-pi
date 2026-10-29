@@ -1116,7 +1116,7 @@ impl Gen<'_> {
 			return;
 		}
 		if let Some(parent) = ploc.rel.parent()
-			&& !parent.as_os_str().is_empty()
+			&& !parent.is_empty()
 		{
 			let _ = ploc.tree.rmdir(parent);
 		}

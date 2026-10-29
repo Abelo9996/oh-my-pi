@@ -400,7 +400,7 @@ impl Gen<'_> {
 
 		if self.inc() {
 			let gnum = self.gnum(key);
-			let name = self.file(key).map(|f| f.name()).unwrap_or_default();
+			let name = self.file(key).map_or_default(|f| f.name());
 			let mut matcher = lock(&self.flists.hlinks());
 			match matcher.prior(gnum).cloned() {
 				None => {

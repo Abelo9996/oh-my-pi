@@ -515,20 +515,15 @@ fn expand_connect_prog(prog: &str, host: &str) -> String {
 	let mut out = String::with_capacity(prog.len() + host.len());
 	let mut chars = prog.chars().peekable();
 	while let Some(c) = chars.next() {
-		if c == '%' {
-			match chars.peek() {
-				Some('%') => {
-					chars.next();
-					out.push('%');
-					continue;
-				}
-				Some('H') => {
-					chars.next();
-					out.push_str(host);
-					continue;
-				}
-				_ => {}
-			}
+		if c == '%'
+			&& let Some(expansion) = chars.next_if_map(|next| match next {
+				'%' => Ok("%"),
+				'H' => Ok(host),
+				_ => Err(next),
+			})
+		{
+			out.push_str(expansion);
+			continue;
 		}
 		out.push(c);
 	}

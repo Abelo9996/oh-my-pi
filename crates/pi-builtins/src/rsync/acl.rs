@@ -271,22 +271,23 @@ mod posix {
 
 /// Parses a `system.posix_acl_*` value; None when malformed (the kernel's EINVAL).
 pub(super) fn parse_posix_acl_xattr(buf: &[u8]) -> Option<Vec<PosixEntry>> {
-	if buf.len() < ACL_EA_HDR_LEN || (buf.len() - ACL_EA_HDR_LEN) % ACL_EA_ENT_LEN != 0 {
+	let (&version, entries) = buf.split_first_chunk::<ACL_EA_HDR_LEN>()?;
+	let (entries, []) = entries.as_chunks::<ACL_EA_ENT_LEN>() else {
+		return None;
+	};
+	if u32::from_le_bytes(version) != ACL_EA_VERSION {
 		return None;
 	}
-	if u32::from_le_bytes(buf[..4].try_into().ok()?) != ACL_EA_VERSION {
-		return None;
-	}
-	buf[ACL_EA_HDR_LEN..]
-		.chunks_exact(ACL_EA_ENT_LEN)
-		.map(|e| {
-			Some(PosixEntry {
-				tag: u16::from_le_bytes(e[0..2].try_into().ok()?),
-				perm: u16::from_le_bytes(e[2..4].try_into().ok()?),
-				id: u32::from_le_bytes(e[4..8].try_into().ok()?),
+	Some(
+		entries
+			.iter()
+			.map(|&[t0, t1, p0, p1, i0, i1, i2, i3]| PosixEntry {
+				tag: u16::from_le_bytes([t0, t1]),
+				perm: u16::from_le_bytes([p0, p1]),
+				id: u32::from_le_bytes([i0, i1, i2, i3]),
 			})
-		})
-		.collect()
+			.collect(),
+	)
 }
 
 /// Serializes entries in the kernel's canonical order (tag, then id).
@@ -394,16 +395,17 @@ pub(crate) fn encode_fake_acl(acl: &RsyncAcl) -> Vec<u8> {
 
 /// Parses a fake-super ACL attribute, filling absent user/group/other from `mode`.
 pub(crate) fn decode_fake_acl(buf: &[u8], mode: u32) -> Option<RsyncAcl> {
-	if buf.len() < 16 || (buf.len() - 16) % 8 != 0 {
+	let (_, entries) = buf.split_first_chunk::<16>()?;
+	let (entries, []) = entries.as_chunks::<8>() else {
 		return None;
-	}
+	};
 	let word = |at: usize| u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]);
 	let fill = |v: u8, bits: u32| if v == NO_ENTRY { (bits & 7) as u8 } else { v };
-	let names = buf[16..]
-		.chunks_exact(8)
-		.map(|c| IdAccess {
-			id: u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
-			access: u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+	let names = entries
+		.iter()
+		.map(|&[i0, i1, i2, i3, a0, a1, a2, a3]| IdAccess {
+			id: u32::from_le_bytes([i0, i1, i2, i3]),
+			access: u32::from_le_bytes([a0, a1, a2, a3]),
 		})
 		.collect();
 	Some(RsyncAcl {

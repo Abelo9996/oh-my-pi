@@ -216,7 +216,7 @@ pub(crate) fn open_batch_files(
 		let file = paths::open_operator_file_with(fs, &path, &operator)
 			.map_err(|e| open_error(cwd, &name_bytes, &e, RERR_FILEIO, 271))?;
 		if !paths::batch_input_ok(&file).unwrap_or(true) {
-			let shown = String::from_utf8_lossy(&paths::full_fname(cwd, &name_bytes)).into_owned();
+			let shown = String::from_utf8_lossy_owned(paths::full_fname(cwd, &name_bytes));
 			return Err(RsyncError::new(
 				RERR_FILEIO,
 				format!("Batch file {shown} is neither a regular file nor a FIFO"),
@@ -375,7 +375,7 @@ pub(crate) fn write_shell_file(
 	let res = paths::create_operator_file_with(fs, script, false, 0o700, &operator)
 		.and_then(|mut f| f.write_all(text).and_then(|()| f.flush()));
 	res.map_err(|e| {
-		let text = format!("Batch file {}.sh write error", batch_name.to_string_lossy());
+		let text = format!("Batch file {}.sh write error", batch_name.display());
 		RsyncError::new(RERR_FILEIO, syserr_text(Role::Client, &e, &text)).at("batch.c", 345)
 	})
 }

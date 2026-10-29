@@ -307,7 +307,6 @@ webrtc = "0.17.2"
 # System & Platform
 # ──────────────────────────────────────────────────────────────────────────────
 libc = "0.2"
-os_pipe = "1"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",
    "Win32_Globalization",

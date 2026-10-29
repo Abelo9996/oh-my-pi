@@ -314,7 +314,7 @@ impl Excludes {
 		let relative = path
 			.strip_prefix(base_dir)
 			.map_or_else(|_| absolute.clone(), normalize_display_path);
-		let name = path.file_name().map(normalize_os_str).unwrap_or_default();
+		let name = path.file_name().map_or_default(normalize_os_str);
 		self.0.iter().any(|pattern| {
 			pattern.is_match(&absolute) || pattern.is_match(&relative) || pattern.is_match(&name)
 		})
@@ -1489,10 +1489,9 @@ fn normalize_os_str(value: &OsStr) -> String {
 }
 
 fn format_path(template: &str, path: &Path, display: &str) -> String {
-	let basename = pi_vfs::file_name(path).map(|name| normalize_os_str(&name)).unwrap_or_default();
+	let basename = pi_vfs::file_name(path).map_or_default(|name| normalize_os_str(&name));
 	let parent = pi_vfs::parent_path(path)
-		.map(normalize_display_path)
-		.unwrap_or_default();
+		.map_or_default(normalize_display_path);
 	let without_extension = remove_extension(display);
 	let basename_without_extension = remove_extension(&basename);
 	let mut output = String::new();
@@ -1631,7 +1630,7 @@ mod tests {
 		let result = walk_request(tree.path()).for_each_entry_with_heartbeat(
 			host.cancel_heartbeat(),
 			|_entry| {
-				visited.set(visited.get() + 1);
+				visited.update(|v| v + 1);
 				Ok::<_, std::io::Error>(pi_walker::WalkDecision::Include)
 			},
 			|_error| Ok::<_, std::io::Error>(pi_walker::WalkDecision::Include),
