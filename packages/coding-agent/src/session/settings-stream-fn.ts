@@ -12,6 +12,7 @@
  */
 import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { isFactoryDroidModel } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Settings } from "../config/settings";
@@ -154,7 +155,7 @@ export function createSettingsAwareStreamFn(
 			tokenizers.set(tokenizerKey, tokenizer);
 		}
 		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);
-		const merged: SimpleStreamOptions = {
+		const merged: SimpleStreamOptions & { disableServerSideFallback?: boolean } = {
 			...streamOptions,
 			maxTokens,
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
@@ -175,6 +176,10 @@ export function createSettingsAwareStreamFn(
 			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 			...(storeResponses !== undefined ? { storeResponses } : {}),
+			// The Factory transport attaches its own refusal chain, so a per-call switch must reach it.
+			...(slowModeContext?.disableServerSideFallback && isFactoryDroidModel(model)
+				? { disableServerSideFallback: true }
+				: {}),
 			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};
 		return base(model, context, merged);

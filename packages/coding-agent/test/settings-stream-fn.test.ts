@@ -536,3 +536,26 @@ describe("createSettingsAwareStreamFn", () => {
 		});
 	});
 });
+
+describe("per-call Factory server-side fallback switch", () => {
+	it("forwards disableServerSideFallback to Factory models only", () => {
+		const settings = Settings.isolated({});
+		const factory = captureBase();
+		const factoryWrapped = createSettingsAwareStreamFn(settings, factory.fn, { disableServerSideFallback: true });
+		factoryWrapped(
+			{ api: "factory-droid-agent", provider: "factory-droid", id: "claude-fable-5" } as unknown as Model,
+			stubContext,
+			{ apiKey: "k" },
+		);
+		expect(factory.calls[0]!.options).toMatchObject({ disableServerSideFallback: true });
+
+		const anthropic = captureBase();
+		const anthropicWrapped = createSettingsAwareStreamFn(settings, anthropic.fn, { disableServerSideFallback: true });
+		anthropicWrapped(
+			{ api: "anthropic-messages", provider: "anthropic", id: "claude-fable-5" } as unknown as Model,
+			stubContext,
+			{ apiKey: "k" },
+		);
+		expect(anthropic.calls[0]!.options).not.toHaveProperty("disableServerSideFallback");
+	});
+});

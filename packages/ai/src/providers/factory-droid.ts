@@ -87,6 +87,8 @@ const FACTORY_DROID_RUNTIME_VERSION = "v26.3.0";
 const FACTORY_DROID_COMPLETIONS_TEMPERATURE = 1;
 
 export interface FactoryDroidOptions extends StreamOptions {
+	/** Per-call workers only: send no refusal fallbacks or fallback-credit beta. Approval must have refused a chain-bearing route before dispatch. */
+	disableServerSideFallback?: boolean;
 	reasoning?: Effort;
 	disableReasoning?: boolean;
 	toolChoice?: ToolChoice;
@@ -441,7 +443,10 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 				? "high"
 				: effort;
 	const fallbackModels = a.route.serverSideFallbackModels;
-	const refusalFallbacks = fallbackModels?.length ? fallbackModels.map(model => ({ model })) : undefined;
+	const refusalFallbacks =
+		options?.disableServerSideFallback || !fallbackModels?.length
+			? undefined
+			: fallbackModels.map(model => ({ model }));
 	return streamAnthropic(inner, a.context, {
 		...a.forwarded,
 		// The non-OAuth client keeps Factory's system channel intact and sends

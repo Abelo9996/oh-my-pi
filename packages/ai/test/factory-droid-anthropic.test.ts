@@ -62,7 +62,7 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")) },
 		).result();
 
-		// Callers cannot opt out, so approval must see exactly what the request carries.
+		// Session callers cannot opt out, so approval must see exactly what a session request carries. Per-call workers may opt out (disableServerSideFallback), and approval refuses such routes before dispatch.
 		expect((captured[0]!.body.fallbacks as { model: string }[] | undefined)?.map(entry => entry.model) ?? []).toEqual(
 			expected,
 		);
@@ -85,6 +85,24 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 
 		const request = captured[0]!;
 		expect(request.headers["x-api-provider"]).toBe("vertex_anthropic");
+		expect(request.body.fallbacks).toBeUndefined();
+		expect(request.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
+		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
+	});
+
+	it("omits refusal fallbacks and the fallback-credit beta when a per-call request disables server-side fallback", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel("claude-fable-5"),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunks("OK")),
+				disableServerSideFallback: true,
+			},
+		).result();
+
+		const request = captured[0]!;
 		expect(request.body.fallbacks).toBeUndefined();
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
