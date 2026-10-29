@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/stats` and `omp stats` failing with "not identifiable as an omp stats dashboard" while another dashboard was busy syncing sessions: a busy dashboard is now reused, and when anything else holds the port the dashboard starts on a free port instead of failing or stopping that process
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed
