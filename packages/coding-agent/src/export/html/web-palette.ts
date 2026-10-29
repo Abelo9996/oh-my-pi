@@ -122,6 +122,15 @@ export const WEB_EXPORT_PALETTES = {
 	},
 } as const satisfies Record<WebExportScheme, Record<string, string>>;
 
+/** Wrap export palette declarations with the shared dark, light, and auto selectors. */
+export function exportThemeStyles(dark: string, light: string): string {
+	return [
+		`:root, :root[data-theme="dark"] { color-scheme: dark; ${dark} }`,
+		`:root[data-theme="light"] { color-scheme: light; ${light} }`,
+		`@media (prefers-color-scheme: light) { :root:not([data-theme]) { color-scheme: light; ${light} } }`,
+	].join("\n");
+}
+
 /** Serialize one web color scheme as CSS custom-property declarations. */
 export function webExportThemeVars(scheme: WebExportScheme): string {
 	return Object.entries({ ...COMMON_EXPORT_PALETTE, ...WEB_EXPORT_PALETTES[scheme] })

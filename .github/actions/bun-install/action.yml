@@ -19,7 +19,7 @@ runs:
            # either exact ("bun@1.4.2") or a floor ("bun@>=1.4"): an exact pin
            # installs that build on mismatch, a floor installs latest when the
            # preloaded bun is older than the floor. A lagging preloaded bun skews
-           # version-sensitive codegen (gen:tool-views) and test-runner behavior.
+           # version-sensitive codegen (gen:export-viewer) and test-runner behavior.
            want="$(sed -n 's/.*"packageManager": *"bun@\([^"]*\)".*/\1/p' package.json)"
            if [ -z "$want" ]; then
              echo "::error::could not read pinned bun version from package.json packageManager"

@@ -17,7 +17,8 @@
 - OpenAI live steering (`providers.openaiLiveSteering`) is now off by default for GPT models; typed messages wait for the next tool boundary unless you enable it, avoiding `unsupported_native_inflight_message` errors
 
 - Sub-session collector now determines compression from filename extension instead of a boolean flag
-- HTML exports now match the `/stats` design, with a higher-contrast light theme, offline timeline drawer, full trace view, and sidebar navigation for nested subagents and advisors
+- HTML exports now match the `/stats` design, with a higher-contrast light theme, timeline drawer, full trace view, and sidebar navigation for nested subagents and advisors
+- Packaged HTML exports load an integrity-pinned viewer and shared Markdown/highlighting libraries from `build.stencil.so` and `stencil.so`; source checkouts inline their generated viewer for local development. Session data stays in the file, but viewing needs network access
 - `tui.autoGraph` defaults to the new `auto`: charts are refined by the judge whenever the judge role resolves to a native TypeSafe jev model, and drawn from the built-in guess otherwise
 - Removed manual scan cache invalidation triggers after file modifications; filesystem changes are now automatically detected via timestamp validation in the new `pi-walker` architecture
 - A muted `/live` call now stays shown as muted when the voice model starts a task or the session starts, instead of switching to "working" or "listening" while the microphone is still off ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))

@@ -5,8 +5,9 @@ import { Marked } from "@oh-my-pi/pi-utils/marked";
 import type { SessionEntry } from "../src/session/session-entries";
 import type { SubSession } from "../src/session/sub-sessions";
 
-const [templateHtml, templateJs] = await Promise.all([
-	Bun.file(new URL("../src/export/html/template.html", import.meta.url)).text(),
+const [templateHtml, shellHtml, templateJs] = await Promise.all([
+	Bun.file(new URL("../src/export/html/template.html.txt", import.meta.url)).text(),
+	Bun.file(new URL("../src/export/html/shell.html", import.meta.url)).text(),
 	Bun.file(new URL("../src/export/html/template.js", import.meta.url)).text(),
 ]);
 const originalScrollIntoView = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
@@ -38,7 +39,7 @@ interface RenderedSession {
 }
 
 function renderSession(entries: unknown[], leafId: string, subSessions?: Record<string, SubSession>): RenderedSession {
-	const { document, window } = parseHTML(templateHtml);
+	const { document, window } = parseHTML(templateHtml.replace("</body>", `${shellHtml}</body>`));
 	let lastScrolledId: string | null = null;
 	Object.defineProperty(Element.prototype, "scrollIntoView", {
 		value(this: Element) {
@@ -85,7 +86,7 @@ function renderSession(entries: unknown[], leafId: string, subSessions?: Record<
 	const context = vm.createContext({
 		window,
 		document,
-		marked: new Marked(),
+		ompMarkdown: { Marked },
 		hljs: {
 			getLanguage: () => false,
 			highlight: () => ({ value: "" }),

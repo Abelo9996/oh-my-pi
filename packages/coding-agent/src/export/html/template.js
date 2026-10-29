@@ -1,6 +1,7 @@
     (function() {
       'use strict';
 
+      const marked = new globalThis.ompMarkdown.Marked();
       const THEME_STORAGE_KEY = 'omp-export-theme';
       const themeSelect = document.getElementById('theme-select');
       let themePreference = 'auto';
@@ -911,8 +912,8 @@
       // TOOL CALL RENDERING
       // ============================================================
       //
-      // Tool calls render through the bundled <omp-tool-view> web component
-      // (tool-views.generated.js — the same React renderers collab-web uses).
+      // Tool calls use the hosted viewer's <omp-tool-view> web component,
+      // shared with collab-web.
       // Payloads are handed over via a global store keyed by data-key, which
       // survives innerHTML serialization and cloneNode round trips.
 

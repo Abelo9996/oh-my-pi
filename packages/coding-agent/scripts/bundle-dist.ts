@@ -10,7 +10,8 @@ import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 const packageDir = path.join(import.meta.dir, "..");
 const defaultOutDir = path.join(packageDir, "dist");
 const shebang = "#!/usr/bin/env bun\n";
-const htmlExportAssetPattern =
+// Remove old inline-viewer sidecars left in an existing output directory.
+const obsoleteHtmlExportAssetPattern =
 	/^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js|(?:marked|highlight)\.min-[^.]+\.js)$/;
 
 // Native / optional / platform-specific deps are loaded from installed files.
@@ -81,7 +82,7 @@ async function cleanBundleOutputs(outDir: string): Promise<void> {
 					entry.endsWith(".js.map") ||
 					/\.json-[^/]+\.zst$/.test(entry) ||
 					(entry.startsWith("CHANGELOG-") && entry.endsWith(".md")) ||
-					htmlExportAssetPattern.test(entry),
+					obsoleteHtmlExportAssetPattern.test(entry),
 			)
 			.map(entry => fs.rm(path.join(outDir, entry), { force: true })),
 	);

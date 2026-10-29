@@ -13,7 +13,7 @@ VENDORED SOURCE AND DATA
 ========================
 
 -------------------------------------------------------------------------------
-marked, highlight.js — packages/coding-agent/src/export/html/vendor
+HTML export viewer dependencies hosted at stencil.so/assets/omp
 
 marked 15.0.4 (https://github.com/markedjs/marked)
 ---------------------------------------------------
@@ -143,7 +143,7 @@ Bundled into the stats dashboard (dist/client in @oh-my-pi/omp-stats, embedded i
 - react-dom 19.2.7 — MIT
 - scheduler 0.27.0 — MIT
 
-Embedded in HTML session exports (packages/coding-agent/src/export/html/tool-views.generated.js):
+Bundled in the shared HTML export viewer (build.stencil.so/web/omp, generated from packages/collab-web):
 
 - katex 0.18.7 — MIT
 - react 19.2.7 — MIT

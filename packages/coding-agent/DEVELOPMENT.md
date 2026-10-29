@@ -23,8 +23,18 @@ Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
 | Build the `dist/omp` binary    | `bun run build`       |
 
 Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate. After
-changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them
-with `bun run gen:tool-views`.
+changing export HTML/CSS/JS, web themes, or the shared tool/trace renderers, run
+`bun run gen:export-viewer` and include `src/export/html/viewer.generated.json`
+with the change. The generated JS lives in ignored `export-assets/`; CI verifies
+the committed metadata (`--check`, also implied by `CI=true`) and publishes the
+exact asset from the Linux binary build alongside the release binaries.
+
+Exports from a source checkout inline the generated viewer, so `bun gen:export-viewer`
+followed by `/export` exercises local changes without publishing or a local
+server. Packaged releases reference their versioned `build.stencil.so` viewer.
+Both load Markdown and Highlight.js from immutable content-addressed
+`stencil.so/assets/omp/` files. Keep those files on the site permanently: older
+exports reference them directly.
 
 Scope fake timers to the deadline a test exercises, then restore real timers
 before real socket listeners are started. Bun's mocked clock can defer
