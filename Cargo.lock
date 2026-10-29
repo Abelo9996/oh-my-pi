@@ -119,11 +119,11 @@ dependencies = [
 
 [[package]]
 name = "ansi-width"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "219e3ce6f2611d83b51ec2098a12702112c29e57203a6b0a0929b2cddb486608"
+checksum = "90759a65f5178dbbd1b0eecc97b187996401bced0eb4a943d9ac6d7a6304d111"
 dependencies = [
- "unicode-width 0.1.14",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -2443,17 +2443,6 @@ checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
 
 [[package]]
 name = "fancy-regex"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
-dependencies = [
- "bit-set",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
-name = "fancy-regex"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
@@ -4318,12 +4307,6 @@ dependencies = [
 
 [[package]]
 name = "html-escape"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
-
-[[package]]
-name = "html-escape"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "491194d601b4fa9fac3c9571e014070a0ad1bc3392d1bc10419695196a8b3cc3"
@@ -4338,7 +4321,7 @@ dependencies = [
  "astral-tl",
  "base64 0.23.1",
  "bitflags 2.13.2",
- "html-escape 0.3.0",
+ "html-escape",
  "html5ever",
  "memchr",
  "once_cell",
@@ -7029,7 +7012,7 @@ dependencies = [
  "clipboard-win",
  "core-graphics",
  "enigo",
- "fancy-regex 0.16.2",
+ "fancy-regex 0.17.0",
  "find-msvc-tools",
  "flume",
  "fontdue",
@@ -7037,7 +7020,7 @@ dependencies = [
  "futures",
  "grep-matcher",
  "heapless 0.9.3",
- "html-escape 0.2.15",
+ "html-escape",
  "html-to-markdown-rs",
  "icy_sixel",
  "image",
