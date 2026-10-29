@@ -3497,15 +3497,10 @@ export class Settings {
 			const web = chains?.web;
 			if (chains && Array.isArray(web)) {
 				const index = web.findIndex(
-					(selector, i) =>
-						selector === "openai-codex/gpt-5.6" && web[i + 1] === "openai-codex/gpt-5.5",
+					(selector, i) => selector === "openai-codex/gpt-5.6" && web[i + 1] === "openai-codex/gpt-5.5",
 				);
 				if (index !== -1) {
-					chains.web = [
-						...web.slice(0, index),
-						"openai-codex/gpt-5.6-sol",
-						...web.slice(index + 2),
-					];
+					chains.web = [...web.slice(0, index), "openai-codex/gpt-5.6-sol", ...web.slice(index + 2)];
 				}
 			}
 		}
