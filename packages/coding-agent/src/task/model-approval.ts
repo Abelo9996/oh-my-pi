@@ -207,7 +207,7 @@ function globGrants(pattern: string, model: Model<Api>): boolean {
 	);
 }
 
-/** Whether the operator's current configuration names this available chat model itself. */
+/** Whether the configuration grants this model; the caller has already checked chat availability. */
 function isGranted(model: Model<Api>, grants: PerCallModelGrants, chat: Model<Api>[], catalog: Model<Api>[]): boolean {
 	const settings = grants.settings.grantAuthority();
 	const target = formatModelStringWithRouting(model);

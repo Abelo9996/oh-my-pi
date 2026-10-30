@@ -29,7 +29,7 @@ const DEFERRED_LEVELS: Array<ThinkingLevel | undefined> = [undefined, ThinkingLe
 
 describe("clampThinkingLevelToCeiling", () => {
 	it.each(DEFERRED_LEVELS)("preserves %s under a ceiling that clamps explicit efforts", level => {
-		// Each deferred selector has its own documented meaning; none is clamped, even by the lowest ceiling.
+		// Deferred selectors keep their documented meaning; the ceiling only applies to explicit efforts.
 		expect(clampThinkingLevelToCeiling(customReasoner(), level, Effort.Low)).toBe(level);
 	});
 

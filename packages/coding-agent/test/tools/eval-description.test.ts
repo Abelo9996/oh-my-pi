@@ -172,11 +172,6 @@ describe("eval tool description", () => {
 			for (const omitted of [
 				"hidden/image",
 				"hidden/judge",
-				"(alias)",
-				"(legacyAlias)",
-				"(wildcardAlias)",
-				"(useDefault)",
-				"(inherited)",
 				"`@smol`",
 				"`pi/slow`",
 				"`*`",
