@@ -8,11 +8,13 @@ import { createNativeJudge } from "@oh-my-pi/pi-ai/judgment";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	cursorModelManagerOptions,
 	resolveModelCacheProviderId,
@@ -3145,6 +3147,138 @@ describe("ModelRegistry runtime discovery", () => {
 			{ apiKey: "TEST_KEY", fetch: chatFetch, reasoning: "high" },
 		).result();
 		expect(requestPayload?.reasoning_effort).toBe("high");
+	});
+
+	test("openai-models-list discovery carries advertised effort aliases and mandatory reasoning", async () => {
+		writeRawModelsJson({
+			"example-gateway": {
+				baseUrl: "http://127.0.0.1:9995",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		// `example-route` serves only low/high/max. Its row names the tier an
+		// unsupported request lands on (`reasoning_effort_map`, `minimal`
+		// included) and states that reasoning cannot be turned off
+		// (`reasoning_required`); unknown alias names must not survive into the
+		// model. `example-optional-route` says reasoning can be turned off.
+		// `acme-locked-thinking` is a thinking-variant id, which the identity
+		// rules lock to mandatory reasoning; `acme-unlocked-thinking` carries the
+		// same identity but states `reasoning_required: false`, which must win.
+		// `acme-plain-think` advertises a ladder and nothing else, so it must
+		// keep the plain ladder shape.
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9995/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "example-route",
+								object: "model",
+								owned_by: "example-gateway",
+								supported_reasoning_levels: ["low", "high", "max"],
+								default_reasoning_level: "high",
+								reasoning_effort_map: {
+									minimal: "high",
+									medium: "high",
+									xhigh: "max",
+									turbo: "low",
+									ultra: "max",
+								},
+								reasoning_required: true,
+							},
+							{
+								id: "example-optional-route",
+								object: "model",
+								owned_by: "example-gateway",
+								supported_reasoning_levels: ["low", "high"],
+								reasoning_required: false,
+							},
+							{
+								id: "acme-locked-thinking",
+								object: "model",
+								owned_by: "example-gateway",
+								supported_reasoning_levels: ["low", "high"],
+							},
+							{
+								id: "acme-unlocked-thinking",
+								object: "model",
+								owned_by: "example-gateway",
+								supported_reasoning_levels: ["low", "high"],
+								reasoning_required: false,
+							},
+							{
+								id: "acme-plain-think",
+								object: "model",
+								owned_by: "example-gateway",
+								supported_reasoning_levels: ["low", "high"],
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("example-gateway", "example-route");
+		expect(model?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.High,
+			effortMap: { minimal: "high", medium: "high", xhigh: "max" },
+			requiresEffort: true,
+		});
+		const optional = registry.find("example-gateway", "example-optional-route");
+		expect(optional?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High],
+			defaultLevel: Effort.Low,
+			requiresEffort: false,
+		});
+		expect(registry.find("example-gateway", "acme-locked-thinking")?.thinking?.requiresEffort).toBe(true);
+		expect(registry.find("example-gateway", "acme-unlocked-thinking")?.thinking?.requiresEffort).toBe(false);
+		const plain = registry.find("example-gateway", "acme-plain-think");
+		expect(plain?.thinking).toEqual({ mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.Low });
+
+		if (!model || !optional) throw new Error("expected both discovered routes");
+		// The alias outranks clamping by distance: `minimal` and `medium` land on
+		// `high`, the tier the row names, not on `low`.
+		expect(clampThinkingLevelForModel(model, Effort.Minimal)).toBe(Effort.High);
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.High);
+
+		async function sendThroughStreamSimple(
+			target: Model,
+			options: { reasoning?: Effort },
+		): Promise<Record<string, unknown>> {
+			let payload: Record<string, unknown> | undefined;
+			const fetch: FetchImpl = async (_input, init) => {
+				payload = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
+				const events = [
+					{ id: "chatcmpl-alias-fixture", choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }] },
+					{ id: "chatcmpl-alias-fixture", choices: [{ index: 0, finish_reason: "stop", delta: {} }] },
+				];
+				const body = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
+				return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+			};
+			await streamSimple(
+				target,
+				{ messages: [{ role: "user", content: "Reply with exactly OK.", timestamp: Date.now() }] },
+				{ apiKey: "TEST_KEY", fetch, ...options },
+			).result();
+			if (!payload) throw new Error("stream fixture did not make a request");
+			return payload;
+		}
+		expect((await sendThroughStreamSimple(model, { reasoning: Effort.Minimal })).reasoning_effort).toBe("high");
+		expect((await sendThroughStreamSimple(model, { reasoning: Effort.Medium })).reasoning_effort).toBe("high");
+		// A request with no effort is where the flag decides the wire: the
+		// mandatory route still sends its lowest tier, while the route that can
+		// turn reasoning off sends no effort at all.
+		expect((await sendThroughStreamSimple(model, {})).reasoning_effort).toBe("low");
+		expect((await sendThroughStreamSimple(optional, {})).reasoning_effort).toBeUndefined();
 	});
 
 	test("openai-models-list discovery reads server-advertised input modalities for ids absent from the catalog", async () => {
