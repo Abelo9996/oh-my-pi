@@ -366,6 +366,39 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(session.sessionManager.getSessionName()).toBe("🧪 FLAKY: Stabilize park test timing");
 	});
 
+	it("refreshes a generated title once title.refreshAfterPrompts operator prompts have run", async () => {
+		await recreateSession({ "title.refreshAfterPrompts": 2, "title.icons": "boring" }, { autoTitle: true });
+		await session.setSessionName("Fix parser recovery", "auto");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
+		} as never);
+
+		await session.prompt("now draft the release notes for 2.0");
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+
+		const titleApplied = waitForSessionName("Ship release notes");
+		await session.prompt("publish the release notes to the changelog");
+		await titleApplied;
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		// The mocked completeSimple's request argument, as the replan test reads it.
+		const request = completeSimpleMock.mock.calls[0]?.[1] as { messages?: Array<{ content?: string }> } | undefined;
+		const titleInput = request?.messages?.[0]?.content;
+		expect(titleInput).toContain("publish the release notes to the changelog");
+	});
+
+	it("does not refresh a user-set title after title.refreshAfterPrompts operator prompts", async () => {
+		await recreateSession({ "title.refreshAfterPrompts": 1 }, { autoTitle: true });
+		await session.setSessionName("Manual parser title", "user");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+
+		await session.prompt("now draft the release notes for 2.0");
+
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe("Manual parser title");
+	});
+
 	it("forwards the configured title system prompt to the replan refresh path", async () => {
 		// Issue #3734: TITLE_SYSTEM.md must apply on todo-init replan refresh,
 		// not just first-input titling. Without the threaded override, the
