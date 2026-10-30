@@ -285,7 +285,12 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		staticNames: options.keepStaticNames ? new Map(staticModels.map(model => [model.id, model.name])) : undefined,
 	};
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
-	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, dynamicModelsAuthoritative);
+	// Additive mode is cache identity: a snapshot written while shared-catalog
+	// rows could replace bundled metadata must not match an additive resolver.
+	const staticCatalogFingerprint = fingerprintStaticModels(
+		staticModels,
+		dynamicModelsAuthoritative ? "authoritative" : modelsDevAdditiveStaticModelIds ? "additive" : undefined,
+	);
 	// Endpoint-migration policy is cache identity: adding an id must invalidate
 	// matching-static-catalog caches written by the prior resolver.
 	const staticFingerprint =
@@ -293,10 +298,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			? `${staticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
 			: staticCatalogFingerprint;
 	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
-	// A cache written against this static catalog already merged live discovery
-	// over the bundled rows, so its same-id rows are the corrected models
-	// (#17481). Strip them only across a static-catalog change, where additive
-	// shared-catalog rows must not replace the new bundled metadata.
+	// A matching cache was written against this static catalog under the same
+	// additive policy, so its same-id rows are live discovery merged over the
+	// bundled rows, never shared-catalog overrides (#17481). Strip them only on
+	// a mismatch: a static-catalog upgrade or a cache written before additive
+	// semantics were enabled.
 	const cacheAdditiveStaticModelIds =
 		isAuthoritativeDynamicCache || cacheFingerprintMatches ? undefined : modelsDevAdditiveStaticModelIds;
 	const cacheNeedsModelMigration =
@@ -320,8 +326,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// Cold-start fast path: when a fresh, authoritative cache exists, the network
 	// fetch is skipped, AND the static catalog slice is byte-identical to what
 	// was merged in last time, the cache row IS the authoritative merge result.
-	// Additive caches still need same-id rows stripped because an older binary
-	// may have written the snapshot before additive semantics were enabled.
+	// A mismatched additive cache never reaches here; its same-id rows are
+	// stripped below.
 	if (
 		!shouldFetchFromNetwork &&
 		cache?.fresh &&
@@ -663,18 +669,24 @@ function retainModelIds<TApi extends Api>(
 const MODEL_CACHE_FINGERPRINT_VERSION = `merge-v5:${VERSION}`;
 
 /**
+ * Cache-identity mode for {@link fingerprintStaticModels}: `authoritative`
+ * when dynamic discovery owns the catalog, `additive` when the shared catalog
+ * may only add ids. Snapshots written under different modes never match.
+ */
+export type StaticFingerprintMode = "authoritative" | "additive";
+
+/**
  * Return the versioned content identity for a static provider slice. Callers
  * may mutate or freeze their arrays, so every call observes current content
  * and never attaches a stale sidecar fingerprint to caller-owned data.
  */
 export function fingerprintStaticModels<TApi extends Api>(
 	models: readonly (ModelSpec<TApi> | Model<TApi>)[],
-	dynamicModelsAuthoritative = false,
+	mode?: StaticFingerprintMode,
 ): string {
 	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}:empty`;
-	if (dynamicModelsAuthoritative)
-		return `${MODEL_CACHE_FINGERPRINT_VERSION}:authoritative:${fingerprintStaticModels(models)}`;
-	return `${MODEL_CACHE_FINGERPRINT_VERSION}:${Bun.hash(JSON.stringify(models)).toString(36)}`;
+	const content = `${MODEL_CACHE_FINGERPRINT_VERSION}:${Bun.hash(JSON.stringify(models)).toString(36)}`;
+	return mode ? `${MODEL_CACHE_FINGERPRINT_VERSION}:${mode}:${content}` : content;
 }
 
 function mergeDynamicModel<TApi extends Api>(
