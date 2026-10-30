@@ -6,6 +6,10 @@
 
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
 
+### Fixed
+
+- Fixed IME composition text in the BTW history `Follow up:` input appearing at the left edge instead of at the caret when the hardware cursor is enabled ([#17427](https://github.com/can1357/oh-my-pi/issues/17427))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes
