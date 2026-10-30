@@ -167,15 +167,33 @@ export async function finalizeErrorMessage(
 	capturedErrorResponse?: CapturedHttpErrorResponse,
 ): Promise<string> {
 	let message = formatErrorMessageWithRetryAfter(error, capturedErrorResponse?.headers);
-	const capturedMessage = formatCapturedHttpError(capturedErrorResponse);
-	if (capturedMessage) {
+	const captured = formatCapturedHttpErrorParts(capturedErrorResponse);
+	if (captured) {
 		if (/\bstatus code\s*\(no body\)/i.test(message)) {
-			message = `${capturedErrorResponse?.status ?? "HTTP"} status code: ${capturedMessage}`;
-		} else if (!message.includes(capturedMessage)) {
-			message = `${message}\n${capturedMessage}`;
+			message = `${capturedErrorResponse?.status ?? "HTTP"} status code: ${captured.text}`;
+		} else {
+			const truncated = truncatedBodySlice(message, captured.core);
+			if (truncated || message.includes(captured.core)) {
+				if (truncated) message = message.replace(truncated, () => captured.core);
+				if (captured.suffix && !message.includes(captured.suffix)) {
+					message = `${message}${captured.suffix}`;
+				}
+			} else {
+				message = `${message}\n${captured.text}`;
+			}
 		}
 	}
 	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
+}
+
+/**
+ * The leading slice of `core` carried by the thrown message, when the message
+ * holds only a prefix of the provider body: OpenAI-family errors cap the
+ * detail they interpolate, so the captured body is the fuller copy.
+ */
+function truncatedBodySlice(message: string, core: string): string | undefined {
+	const body = message.replace(/^\s*\d{3}\s+/, "").trimEnd();
+	return body.length > 0 && body.length < core.length && core.startsWith(body) ? body : undefined;
 }
 
 /**
@@ -285,18 +303,29 @@ export function redactHeaders<T>(headers: Record<string, T> | undefined): Record
 	return redacted;
 }
 
-function formatCapturedHttpError(captured: CapturedHttpErrorResponse | undefined): string | undefined {
+interface CapturedHttpErrorText {
+	/** Provider-supplied message with the envelope's structured fields removed. */
+	core: string;
+	/** `core` followed by the `(type=… param=… code=…)` suffix when the payload carries one. */
+	text: string;
+	/** Suffix alone, leading space included; absent when the payload has no type/param/code. */
+	suffix?: string;
+}
+
+function formatCapturedHttpErrorParts(
+	captured: CapturedHttpErrorResponse | undefined,
+): CapturedHttpErrorText | undefined {
 	if (!captured) return undefined;
 	const bodyText = captured.bodyText?.trim();
 	if (!bodyText) return undefined;
 	const payload = parseCapturedErrorPayload(captured);
-	if (!payload) return bodyText;
+	if (!payload) return { core: bodyText, text: bodyText };
 
 	const errorPayload = getObjectProperty(payload, "error") ?? payload;
 	// {"error": "string"} — the error value is a plain string, not a nested object.
 	// Fall back to it when the structured fields ("message", etc.) are absent.
 	const stringError = errorPayload === payload ? getStringProperty(payload, "error") : undefined;
-	const message =
+	const core =
 		getStringProperty(errorPayload, "message") ?? getStringProperty(payload, "message") ?? stringError ?? bodyText;
 	const extras = [
 		getStringProperty(errorPayload, "type") ?? getStringProperty(payload, "type"),
@@ -309,7 +338,9 @@ function formatCapturedHttpError(captured: CapturedHttpErrorResponse | undefined
 			if (index === 1) return `param=${value}`;
 			return `code=${value}`;
 		});
-	return extras.length > 0 ? `${message} (${extras.join(" ")})` : message;
+	if (extras.length === 0) return { core, text: core };
+	const suffix = ` (${extras.join(" ")})`;
+	return { core, text: `${core}${suffix}`, suffix };
 }
 
 function parseCapturedErrorPayload(captured: CapturedHttpErrorResponse): Record<string, unknown> | undefined {
