@@ -65,10 +65,12 @@ describe("cross-project session bucket isolation", () => {
 		expect((await listRecentProjects(10, sessionsRoot)).map(project => project.latest.id)).toEqual([SESSION_ID]);
 	});
 
-	it.each(["EPERM", "ENOENT", "ENOTDIR"])("skips a bucket that becomes unavailable with %s", async code => {
+	it.each(["EACCES", "EPERM", "ENOENT", "ENOTDIR"])("discards a bucket's partial matches on %s", async code => {
+		await fs.promises.copyFile(sessionFile, path.join(blockedBucket, SESSION_NAME));
 		const scan = Bun.Glob.prototype.scan;
 		vi.spyOn(Bun.Glob.prototype, "scan").mockImplementation(async function* (this: Bun.Glob, options) {
 			if (typeof options === "object" && options.cwd === blockedBucket) {
+				yield SESSION_NAME;
 				throw Object.assign(new Error("bucket unavailable"), { code });
 			}
 			yield* scan.call(this, options);

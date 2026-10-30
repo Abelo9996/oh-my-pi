@@ -1223,12 +1223,16 @@ async function scanBucketFiles(root: string, pattern: string): Promise<string[]>
 	for (const entry of entries) {
 		if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
 		const dir = path.join(root, entry.name);
+		const bucketStart = out.length;
 		try {
 			for await (const name of new Bun.Glob(pattern).scan({ cwd: dir, followSymlinks: true })) {
 				out.push(path.join(dir, name));
 			}
 		} catch (err) {
-			if (isEnoent(err) || isEacces(err) || hasFsCode(err, "EPERM") || isEnotdir(err)) continue;
+			if (isEnoent(err) || isEacces(err) || hasFsCode(err, "EPERM") || isEnotdir(err)) {
+				out.length = bucketStart;
+				continue;
+			}
 			throw err;
 		}
 	}
