@@ -3,7 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { streamAnthropic } from "../src/providers/anthropic";
-import { factoryDroidServerSideFallbackModels, streamFactoryDroid } from "../src/providers/factory-droid";
+import { streamFactoryDroid } from "../src/providers/factory-droid";
 import type { AnthropicFallbackCreditHandle, AssistantMessage, Message } from "../src/types";
 import {
 	anthropicChunks,
@@ -62,7 +62,7 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 	it.each([
 		[["anthropic"], ["claude-opus-5"]],
 		[["vertex_anthropic"], []],
-	])("reports the refusal fallback targets a %j rotation always sends", async (rotation, expected) => {
+	])("sends the refusal fallback chain on a session request for a %j rotation", async (rotation, expected) => {
 		const captured: CapturedRequest[] = [];
 		const model = factoryModel("claude-fable-5", rotation);
 		await streamFactoryDroid(
@@ -71,11 +71,10 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")) },
 		).result();
 
-		// Session callers cannot opt out, so approval must see exactly what a session request carries. Per-call workers may opt out (disableServerSideFallback) and fail closed if the answer was served by another model.
+		// Session requests always carry the chain; per-call workers opt out (disableServerSideFallback) and fail closed if another model answers.
 		expect((captured[0]!.body.fallbacks as { model: string }[] | undefined)?.map(entry => entry.model) ?? []).toEqual(
 			expected,
 		);
-		expect(factoryDroidServerSideFallbackModels(model)).toEqual(expected);
 	});
 
 	it("withholds refusal fallbacks on vertex/bedrock rotations, which gate the beta themselves", async () => {

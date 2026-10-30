@@ -103,7 +103,10 @@ export function parentModelGrantPattern(model: Model<Api>): string | undefined {
 export interface PerCallModelAdvertisement {
 	roles: { role: string; patterns: string[] }[];
 	allowlist: string[];
-	/** True when the caller's live model cannot be written as one selector, so the own-model clause never grants. */
+	/**
+	 * True when the caller's live model cannot be written as one selector, or a non-empty allowlist does not list it,
+	 * so the own-model clause would name a model dispatch refuses.
+	 */
 	parentModelWithheld: boolean;
 }
 
@@ -169,10 +172,14 @@ export function getPerCallModelAdvertisement(settings: Settings, parentModel?: M
 					: patterns.filter(pattern => allow.some(entry => allowEntryCouldAdmitPattern(pattern, entry))),
 		}))
 		.filter(({ patterns }) => patterns.length > 0);
+	const parentPattern = parentModel && parentModelGrantPattern(parentModel);
 	return {
 		roles,
 		allowlist: [...new Set(allow.map(entry => entry.trim()))],
-		parentModelWithheld: parentModel !== undefined && parentModelGrantPattern(parentModel) === undefined,
+		// Same literal comparison dispatch applies to the allowlist.
+		parentModelWithheld:
+			parentModel !== undefined &&
+			(parentPattern === undefined || (allow.length > 0 && !allow.some(entry => entry.trim() === parentPattern))),
 	};
 }
 

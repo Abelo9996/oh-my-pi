@@ -383,6 +383,13 @@ describe("per-call model advertisement", () => {
 		expect(getPerCallModelAdvertisement(settings).parentModelWithheld).toBe(false);
 	});
 
+	it("withholds the own-model clause when a non-empty allowlist does not list the parent's model", () => {
+		const listed = Settings.isolated({ "task.perCallModelAllow": ["openrouter/anthropic/claude-sonnet-4.5"] });
+		const unlisted = Settings.isolated({ "task.perCallModelAllow": ["mock/target"] });
+		expect(getPerCallModelAdvertisement(listed, sonnet).parentModelWithheld).toBe(false);
+		expect(getPerCallModelAdvertisement(unlisted, sonnet).parentModelWithheld).toBe(true);
+	});
+
 	it("reads live grant authority, excluding derived settings but honoring host overlays", () => {
 		const root = Settings.isolated({
 			modelRoles: { smol: "mock/target" },

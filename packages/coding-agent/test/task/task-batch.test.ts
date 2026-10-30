@@ -403,6 +403,9 @@ describe("task.batch validation", () => {
 		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "model" },
 		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "model" },
 		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: false, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: false, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "sourceSession" },
 		{ form: "batch", seance: "advertised", batch: true, structured: false, isolation: false, field: "model" },
 		{ form: "flat", seance: "hidden", batch: false, structured: false, isolation: false, field: "model" },
 	])(

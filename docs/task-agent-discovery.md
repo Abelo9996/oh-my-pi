@@ -235,7 +235,7 @@ A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`;
 
 | Value           | Behavior                                                                                                                                                                                                    |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `off` (default) | A task item, flat call, `agent()` or `workpool()` that passes `model` fails preflight. The field stays in the task schema.                                                                                  |
+| `off` (default) | A task item, flat call, `agent()` or `workpool()` that passes `model` fails preflight (the bundled seance agent's own `model` is separate; see below). The field stays in the task schema.                  |
 | `eval`          | Accepted by eval `agent()` and `workpool()` only; task items behave as `off`. Use it to route a specialist (e.g. a pinned `reviewer`) from a script while ordinary delegation keeps its configured routing. |
 | `on`            | Accepted everywhere.                                                                                                                                                                                        |
 
