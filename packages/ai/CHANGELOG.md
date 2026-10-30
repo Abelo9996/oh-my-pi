@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `configureCodexAccessPrograms()` to turn off the automatic Daybreak Blue `access_programs` request on Codex
+
 - Added `waitForSibling` to `RotateCredentialOptions`; set it to `false` to skip the short sibling-unblock wait in `limits.rotate()` while still blocking the failed credential ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Changed

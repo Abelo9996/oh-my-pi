@@ -8,7 +8,8 @@
  * `access_program_not_enabled`, or a 403 `{"detail": …}` for models such as
  * Astra) instead of downgrading it, so a rejection drops the program for that
  * (account, model) pair for the rest of the process and the caller replays
- * the request without it.
+ * the request without it. Hosts can switch the automatic request off
+ * process-wide with {@link configureCodexAccessPrograms}.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
@@ -25,6 +26,18 @@ const REJECTION_PATTERN = /\baccess[ _]programs?\b|\breduced refusals\b/i;
 /** `${accountId}\0${modelId}` pairs whose program the backend rejected this process. */
 const droppedPrograms = new Set<string>();
 
+/** Host switch for the automatic Daybreak Blue request; see {@link configureCodexAccessPrograms}. */
+let accessProgramsEnabled = true;
+
+/**
+ * Enable or disable the automatic Daybreak Blue request process-wide. Hosts
+ * call this from their settings so every Codex request follows it, including
+ * side calls that do not go through a session stream function.
+ */
+export function configureCodexAccessPrograms(enabled: boolean): void {
+	accessProgramsEnabled = enabled;
+}
+
 /**
  * Request Daybreak Blue on `body` when `accountId` may use it on `model` and
  * no earlier rejection dropped it.
@@ -34,7 +47,7 @@ export function applyCodexAccessPrograms(
 	model: Model<"openai-codex-responses">,
 	accountId: string | undefined,
 ): void {
-	if (!accountId) return;
+	if (!accessProgramsEnabled || !accountId) return;
 	if (!model.accountAccess?.[accountId]?.cyberPrograms?.includes(DAYBREAK_BLUE)) return;
 	if (droppedPrograms.has(`${accountId}\0${model.id}`)) return;
 	body.access_programs = { cyber: DAYBREAK_BLUE };
