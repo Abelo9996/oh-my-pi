@@ -8,8 +8,9 @@
  * `access_program_not_enabled`, or a 403 `{"detail": …}` for models such as
  * Astra) instead of downgrading it, so a rejection drops the program for that
  * (account, model) pair for the rest of the process and the caller replays
- * the request without it. Hosts can switch the automatic request off
- * process-wide with {@link configureCodexAccessPrograms}.
+ * the request without it. A request's `codexAccessPrograms` option switches
+ * the automatic request off; unset falls back to the process-wide default
+ * from {@link configureCodexAccessPrograms}.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
@@ -26,28 +27,31 @@ const REJECTION_PATTERN = /\baccess[ _]programs?\b|\breduced refusals\b/i;
 /** `${accountId}\0${modelId}` pairs whose program the backend rejected this process. */
 const droppedPrograms = new Set<string>();
 
-/** Host switch for the automatic Daybreak Blue request; see {@link configureCodexAccessPrograms}. */
-let accessProgramsEnabled = true;
+/** Process-wide default for requests without `codexAccessPrograms`; see {@link configureCodexAccessPrograms}. */
+let accessProgramsDefault = true;
 
 /**
- * Enable or disable the automatic Daybreak Blue request process-wide. Hosts
- * call this from their settings so every Codex request follows it, including
- * side calls that do not go through a session stream function.
+ * Set the process-wide default for requests that leave `codexAccessPrograms`
+ * unset. Hosts call this from their settings so side calls that bypass a
+ * session stream function still follow it; session requests pass their own
+ * value, so concurrent sessions with different settings stay independent.
  */
 export function configureCodexAccessPrograms(enabled: boolean): void {
-	accessProgramsEnabled = enabled;
+	accessProgramsDefault = enabled;
 }
 
 /**
- * Request Daybreak Blue on `body` when `accountId` may use it on `model` and
- * no earlier rejection dropped it.
+ * Request Daybreak Blue on `body` when `requested` (else the process default)
+ * allows it, `accountId` may use it on `model`, and no earlier rejection
+ * dropped it.
  */
 export function applyCodexAccessPrograms(
 	body: RequestBody,
 	model: Model<"openai-codex-responses">,
 	accountId: string | undefined,
+	requested: boolean | undefined,
 ): void {
-	if (!accessProgramsEnabled || !accountId) return;
+	if (!(requested ?? accessProgramsDefault) || !accountId) return;
 	if (!model.accountAccess?.[accountId]?.cyberPrograms?.includes(DAYBREAK_BLUE)) return;
 	if (droppedPrograms.has(`${accountId}\0${model.id}`)) return;
 	body.access_programs = { cyber: DAYBREAK_BLUE };

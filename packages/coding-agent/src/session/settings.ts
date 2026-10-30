@@ -1210,10 +1210,11 @@ export const cfgProvidersOpenaiCodexDaybreak = register({
 		group: "Protocol",
 		label: "Codex Daybreak Blue",
 		description:
-			"Request the Daybreak Blue cyber access program on ChatGPT accounts eligible for it. OpenAI may use content from Daybreak Blue sessions to improve its models.",
+			"Automatically request the Daybreak Blue cyber access program on ChatGPT accounts eligible for it. OpenAI may use content from Daybreak Blue sessions to improve its models. Does not cover dedicated Daybreak Blue models (gpt-daybreak-blue-*), which may still run as Daybreak sessions.",
 	},
 });
-// Process-wide so every Codex request (main loop, advisors, compaction, side calls) follows it.
+// Sessions pass their own value per request; this process-wide default covers
+// callers without a session stream function (titles, commit messages, memories).
 effect(cfgProvidersOpenaiCodexDaybreak, enabled => configureCodexAccessPrograms(enabled));
 
 export const cfgProvidersCacheRetention = register({
