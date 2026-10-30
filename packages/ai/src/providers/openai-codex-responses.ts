@@ -2230,8 +2230,8 @@ class CodexStreamProcessor {
 			} catch (error) {
 				// The failed attempt's response no longer takes input; a retry
 				// steers its own response.
-				await this.#retireSteering();
-				const recovered = await this.#recoverStreamError(error);
+				const steered = await this.#retireSteering();
+				const recovered = await this.#recoverStreamError(error, steered);
 				if (!recovered) {
 					await this.#settleSteering(false);
 					throw error;
@@ -2466,7 +2466,7 @@ class CodexStreamProcessor {
 			this.requestContext.url,
 			this.model.id,
 			this.requestContext.transformedBody.model,
-			this.requestContext.accountId,
+			getCodexCredentialKey(this.requestContext.accountId, this.requestContext.apiKey),
 			this.requestContext.responsesLite,
 		]);
 	}
@@ -2497,12 +2497,13 @@ class CodexStreamProcessor {
 	}
 
 	/** Stop steering an attempt that is being replaced; anything it delivered taints its socket. */
-	async #retireSteering(): Promise<void> {
+	async #retireSteering(): Promise<boolean> {
 		const pump = this.#steerPump;
-		if (!pump) return;
+		if (!pump) return false;
 		this.#steerPump = undefined;
 		const outcome = await pump.finish();
 		if (outcome.accepted.length > 0 || outcome.uncertain) this.#steerTainted = true;
+		return outcome.submitted;
 	}
 
 	/**
@@ -2762,11 +2763,11 @@ class CodexStreamProcessor {
 	}
 
 	/**
-	 * The native turn lane rejected our steering and dropped the response with
-	 * its socket: stop steering this session and remember the refusal for other
-	 * sessions on this lane. Forget the dead socket so retries use a fresh one.
+	 * The native turn lane dropped the response with its socket: stop steering
+	 * this session. Only share the refusal with other sessions when this attempt
+	 * submitted a steer, not when a chained create encountered a busy lane.
 	 */
-	#stopSteeringOnNativeLaneRejection(error: unknown): void {
+	#stopSteeringOnNativeLaneRejection(error: unknown, steered: boolean): void {
 		const state = this.runtime.websocketState;
 		if (
 			!state ||
@@ -2776,14 +2777,14 @@ class CodexStreamProcessor {
 			return;
 		}
 		state.steeringUnsupported = true;
-		unsupportedSteeringLanes.set(this.#steeringLaneKey, true);
+		if (steered) unsupportedSteeringLanes.set(this.#steeringLaneKey, true);
 		state.connection?.close("native-lane-steer-rejected");
 		state.connection = undefined;
 		resetCodexWebSocketAppendState(state);
 	}
 
-	async #recoverStreamError(error: unknown): Promise<boolean> {
-		this.#stopSteeringOnNativeLaneRejection(error);
+	async #recoverStreamError(error: unknown, steered: boolean): Promise<boolean> {
+		this.#stopSteeringOnNativeLaneRejection(error, steered);
 		if (
 			error instanceof CodexSteerCommitError &&
 			this.runtime.websocketState &&
@@ -3458,6 +3459,10 @@ export async function prewarmOpenAICodexResponses(
 	state.prewarmed = true;
 }
 
+function getCodexCredentialKey(accountId: string | undefined, apiKey: string): string {
+	return accountId ? `account:${accountId}` : `token:${Bun.hash(apiKey).toString(36)}`;
+}
+
 function getCodexWebSocketSessionKey(
 	normalizedSessionId: string | undefined,
 	model: Model<"openai-codex-responses">,
@@ -3467,7 +3472,7 @@ function getCodexWebSocketSessionKey(
 	responsesLite: boolean,
 ): string | undefined {
 	if (!normalizedSessionId) return undefined;
-	const credentialKey = accountId ? `account:${accountId}` : `token:${Bun.hash(apiKey).toString(36)}`;
+	const credentialKey = getCodexCredentialKey(accountId, apiKey);
 	// Responses Lite is connection-scoped on the WebSocket upgrade, so lite and
 	// non-lite turns must never share a pooled socket or append state.
 	const liteSuffix = responsesLite ? ":lite" : "";

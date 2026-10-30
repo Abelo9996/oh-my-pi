@@ -499,97 +499,173 @@ describe("codex live steering", () => {
 		expect(creates()).toHaveLength(3);
 	});
 
-	it.each(["same lane", "endpoint", "model", "wire model", "account", "Responses Lite", "expired refusal"])(
-		"remembers a native-lane steering rejection across independent provider sessions (%s)",
-		async lane => {
-			installSocket((frame, socket) => {
-				if (frame.type === "response.steer") {
-					socket.emit({
-						type: "error",
-						error: {
-							type: "invalid_request_error",
-							code: "unsupported_native_inflight_message",
-							message: "The experimental native turn lane cannot accept stateful WebSocket messages.",
-						},
-					});
-					queueMicrotask(() => {
-						socket.readyState = ScriptedWebSocket.CLOSED;
-						socket.onclose?.(new CloseEvent("close", { code: 1000 }));
-					});
-					return;
-				}
-				if (frame.type !== "response.create") return;
-				const id = `resp_${creates().length}`;
-				socket.emit({ type: "response.created", response: { id } });
-				if (creates().length === 1) return;
-				socket.emit(...messageFrames(`msg_${id}`, "Hi"));
-				// The second session stays in flight until its text reaches the consumer.
-				if (creates().length === 3) return;
-				socket.emit({ type: "response.completed", response: { id, status: "completed", usage: USAGE } });
-			});
-			const model = createGpt6Model();
-			const user: UserMessage = { role: "user", content: "Hello", timestamp: Date.now() };
-			const firstSteering = oneShotSteering("first session follow-up");
-			const first = await streamOpenAICodexResponses(
-				model,
-				{ systemPrompt: SYSTEM, messages: [user] },
-				{ ...options(new Map(), firstSteering.source), sessionId: "first-session" },
-			).result();
-			expect(first.stopReason).toBe("stop");
-			expect(firstSteering.settled()).toBe("rejected");
-			const secondModel = { ...model };
-			if (lane === "endpoint") secondModel.baseUrl = "https://other.example/backend-api";
-			if (lane === "model") secondModel.id = "gpt-6.1-sol";
-			if (lane === "wire model") secondModel.requestModelId = "gpt-6.1-sol";
-			if (lane === "account") accountId = crypto.randomUUID();
-			if (lane === "expired refusal") {
-				vi.spyOn(performance, "now").mockReturnValue(performance.now() + 4 * 60 * 60 * 1000 + 1);
-			}
-
-			const secondState = new Map<string, ProviderSessionState>();
-			const secondSteering = oneShotSteering("second session follow-up");
-			const secondOptions = {
-				...options(secondState, secondSteering.source),
-				sessionId: "second-session",
-				responsesLite: lane === "Responses Lite",
-			};
-			const secondStream = streamOpenAICodexResponses(
-				secondModel,
-				{ systemPrompt: SYSTEM, messages: [user] },
-				secondOptions,
-			);
-			for await (const event of secondStream) {
-				if (event.type !== "text_delta") continue;
-				ScriptedWebSocket.instances.at(-1)!.emit({
-					type: "response.completed",
-					response: { id: "resp_3", status: "completed", usage: USAGE },
+	it.each([
+		"same lane",
+		"endpoint",
+		"model",
+		"wire model",
+		"account",
+		"token-only credentials",
+		"Responses Lite",
+		"expired refusal",
+	])("remembers a native-lane steering rejection across independent provider sessions (%s)", async lane => {
+		installSocket((frame, socket) => {
+			if (frame.type === "response.steer") {
+				socket.emit({
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						code: "unsupported_native_inflight_message",
+						message: "The experimental native turn lane cannot accept stateful WebSocket messages.",
+					},
 				});
-			}
-			const second = await secondStream.result();
-			if (lane !== "same lane") {
-				expect(steers()).toHaveLength(2);
-				expect(secondSteering.settled()).toBe("rejected");
-				expect(AIError.isCodexSteerRejection(second)).toBe(true);
+				queueMicrotask(() => {
+					socket.readyState = ScriptedWebSocket.CLOSED;
+					socket.onclose?.(new CloseEvent("close", { code: 1000 }));
+				});
 				return;
 			}
-			expect(steers()).toHaveLength(1);
-			expect(second.stopReason).toBe("stop");
-			expect(secondSteering.settled()).toBeUndefined();
+			if (frame.type !== "response.create") return;
+			const id = `resp_${creates().length}`;
+			socket.emit({ type: "response.created", response: { id } });
+			if (creates().length === 1) return;
+			socket.emit(...messageFrames(`msg_${id}`, "Hi"));
+			// The second session stays in flight until its text reaches the consumer.
+			if (creates().length === 3) return;
+			socket.emit({ type: "response.completed", response: { id, status: "completed", usage: USAGE } });
+		});
+		const model = createGpt6Model();
+		const user: UserMessage = { role: "user", content: "Hello", timestamp: Date.now() };
+		const firstSteering = oneShotSteering("first session follow-up");
+		const firstOptions = { ...options(new Map(), firstSteering.source), sessionId: "first-session" };
+		if (lane === "token-only credentials") firstOptions.apiKey = `first-${crypto.randomUUID()}`;
+		const first = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user] },
+			firstOptions,
+		).result();
+		expect(first.stopReason).toBe("stop");
+		expect(firstSteering.settled()).toBe("rejected");
+		const secondModel = { ...model };
+		if (lane === "endpoint") secondModel.baseUrl = "https://other.example/backend-api";
+		if (lane === "model") secondModel.id = "gpt-6.1-sol";
+		if (lane === "wire model") secondModel.requestModelId = "gpt-6.1-sol";
+		if (lane === "account") accountId = crypto.randomUUID();
+		if (lane === "expired refusal") {
+			vi.spyOn(performance, "now").mockReturnValue(performance.now() + 4 * 60 * 60 * 1000 + 1);
+		}
 
-			const queued: UserMessage = { role: "user", content: "second session follow-up", timestamp: Date.now() };
-			const next = await streamOpenAICodexResponses(
-				model,
-				{ systemPrompt: SYSTEM, messages: [user, second, queued] },
-				{ ...secondOptions, liveSteering: undefined },
-			).result();
-			expect(next.stopReason).toBe("stop");
-			expect(creates()).toHaveLength(4);
-			expect(creates()[3]?.previous_response_id).toBe("resp_3");
-			expect(creates()[3]?.input).toEqual([
-				{ role: "user", content: [{ type: "input_text", text: "second session follow-up" }] },
-			]);
-		},
-	);
+		const secondState = new Map<string, ProviderSessionState>();
+		const secondSteering = oneShotSteering("second session follow-up");
+		const secondOptions = {
+			...options(secondState, secondSteering.source),
+			sessionId: "second-session",
+			responsesLite: lane === "Responses Lite",
+		};
+		if (lane === "token-only credentials") secondOptions.apiKey = `second-${crypto.randomUUID()}`;
+		const secondStream = streamOpenAICodexResponses(
+			secondModel,
+			{ systemPrompt: SYSTEM, messages: [user] },
+			secondOptions,
+		);
+		for await (const event of secondStream) {
+			if (event.type !== "text_delta") continue;
+			ScriptedWebSocket.instances.at(-1)!.emit({
+				type: "response.completed",
+				response: { id: "resp_3", status: "completed", usage: USAGE },
+			});
+		}
+		const second = await secondStream.result();
+		if (lane !== "same lane") {
+			expect(steers()).toHaveLength(2);
+			expect(secondSteering.settled()).toBe("rejected");
+			expect(AIError.isCodexSteerRejection(second)).toBe(true);
+			return;
+		}
+		expect(steers()).toHaveLength(1);
+		expect(second.stopReason).toBe("stop");
+		expect(secondSteering.settled()).toBeUndefined();
+
+		const queued: UserMessage = { role: "user", content: "second session follow-up", timestamp: Date.now() };
+		const next = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user, second, queued] },
+			{ ...secondOptions, liveSteering: undefined },
+		).result();
+		expect(next.stopReason).toBe("stop");
+		expect(creates()).toHaveLength(4);
+		expect(creates()[3]?.previous_response_id).toBe("resp_3");
+		expect(creates()[3]?.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "second session follow-up" }] },
+		]);
+	});
+
+	it("does not disable live steering in another session after a chained create rejection", async () => {
+		installSocket((frame, socket) => {
+			if (frame.type === "response.steer") {
+				socket.emit({
+					type: "response.steer.accepted",
+					steer: { id: "steer_1", previous_response_id: "resp_4" },
+				});
+				return;
+			}
+			if (frame.type !== "response.create") return;
+			if (creates().length === 2) {
+				expect(frame.previous_response_id).toBe("resp_1");
+				socket.emit({
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						code: "unsupported_native_inflight_message",
+						message: "The experimental native turn lane cannot accept stateful WebSocket messages.",
+					},
+				});
+				queueMicrotask(() => {
+					socket.readyState = ScriptedWebSocket.CLOSED;
+					socket.onclose?.(new CloseEvent("close", { code: 1000 }));
+				});
+				return;
+			}
+			const id = `resp_${creates().length}`;
+			socket.emit({ type: "response.created", response: { id } }, ...messageFrames(`msg_${id}`, "Hi"));
+			if (creates().length === 4) return;
+			socket.emit({ type: "response.completed", response: { id, status: "completed", usage: USAGE } });
+		});
+		const model = createGpt6Model();
+		const user: UserMessage = { role: "user", content: "Hello", timestamp: Date.now() };
+		const state = new Map<string, ProviderSessionState>();
+		const first = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user] },
+			options(state),
+		).result();
+		const followUp: UserMessage = { role: "user", content: "Continue", timestamp: Date.now() };
+		const recovered = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user, first, followUp] },
+			options(state),
+		).result();
+		expect(recovered.stopReason).toBe("stop");
+		expect(creates()[2]?.previous_response_id).toBeUndefined();
+		expect(steers()).toHaveLength(0);
+
+		const steering = oneShotSteering("new session follow-up");
+		const fresh = streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: SYSTEM, messages: [user] },
+			{ ...options(new Map(), steering.source), sessionId: "fresh-session" },
+		);
+		for await (const event of fresh) {
+			if (event.type !== "text_delta") continue;
+			ScriptedWebSocket.instances.at(-1)!.emit({
+				type: "response.completed",
+				response: { id: "resp_4", status: "completed", usage: USAGE },
+			});
+		}
+		expect((await fresh.result()).stopReason).toBe("stop");
+		expect(steers()).toHaveLength(1);
+		expect(steering.settled()).toBe("accepted");
+	});
 
 	it("leaves a native-lane rejection after streamed reasoning to the agent retry, which no longer steers", async () => {
 		installSocket((frame, socket) => {
