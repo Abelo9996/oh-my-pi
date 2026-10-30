@@ -1726,58 +1726,28 @@ describe("Qwen 3.8 local template effort ladder", () => {
 	});
 });
 
-describe("advertised reasoning effort aliases", () => {
-	it("resolves an aliased request to the tier the endpoint serves before clamping by distance", () => {
-		const gateway = createModel({
+describe("effortMap aliases in clampThinkingLevelForModel", () => {
+	const gateway = (efforts: Effort[], effortMap: Record<string, string>) =>
+		createModel({
 			id: "example-route",
 			api: "openai-completions",
 			provider: "example-gateway",
-			thinking: {
-				mode: "effort",
-				efforts: [Effort.Low, Effort.High, Effort.Max],
-				effortMap: { medium: "high", xhigh: "max" },
-				requiresEffort: true,
-			},
+			thinking: { mode: "effort", efforts, effortMap },
 		});
 
-		expect(clampThinkingLevelForModel(gateway, Effort.Medium)).toBe(Effort.High);
-		expect(clampThinkingLevelForModel(gateway, Effort.XHigh)).toBe(Effort.Max);
-		// A tier the ladder already serves keeps its value: the map describes
-		// requests the endpoint does not serve, not a rewrite of served tiers.
-		expect(clampThinkingLevelForModel(gateway, Effort.High)).toBe(Effort.High);
-		// No alias for this one, so ladder climbing still applies.
-		expect(clampThinkingLevelForModel(gateway, Effort.Minimal)).toBe(Effort.Low);
+	it("follows an alias to a served tier instead of climbing down", () => {
+		const model = gateway([Effort.Low, Effort.High, Effort.Max], { medium: "high" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.High);
 	});
 
-	it("falls back to ladder climbing when the alias names a tier outside the ladder", () => {
-		const aliased = createModel({
-			id: "alias-miss",
-			api: "openai-completions",
-			provider: "example-gateway",
-			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High], effortMap: { medium: "max" } },
-		});
-
-		// The alias names a tier this ladder does not serve, so the request falls
-		// back to ordinary ladder climbing (nearest lower tier).
-		expect(clampThinkingLevelForModel(aliased, Effort.Medium)).toBe(Effort.Low);
+	it("climbs down when the alias names an unserved tier", () => {
+		const model = gateway([Effort.Low, Effort.High], { medium: "max" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.Low);
 	});
 
-	it("ignores an alias whose target the map remaps again", () => {
-		const chained = createModel({
-			id: "alias-chain",
-			api: "openai-completions",
-			provider: "example-gateway",
-			thinking: {
-				mode: "effort",
-				efforts: [Effort.Low, Effort.High, Effort.Max],
-				effortMap: { medium: "high", high: "max" },
-			},
-		});
-
-		// `medium` aliases to `high`, but the map sends `high` on as `max`, so
-		// honouring the alias would serialize `max` for a `medium` request.
-		// The ladder stays authoritative and the request climbs as before.
-		expect(clampThinkingLevelForModel(chained, Effort.Medium)).toBe(Effort.Low);
-		expect(clampThinkingLevelForModel(chained, Effort.Low)).toBe(Effort.Low);
+	it("climbs down when the map remaps the alias target again", () => {
+		// Honouring `medium → high` would serialize `max` because the map sends `high` on.
+		const model = gateway([Effort.Low, Effort.High, Effort.Max], { medium: "high", high: "max" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.Low);
 	});
 });

@@ -928,16 +928,6 @@ function advertisedReasoningEffort(value: unknown): Effort | undefined {
 	return (ADVERTISED_REASONING_EFFORTS as readonly string[]).includes(normalized) ? (normalized as Effort) : undefined;
 }
 
-/**
- * Parse the requested side of an advertised alias. Any omp level can be
- * requested, `minimal` included, so this reads the full thinking vocabulary;
- * the served side stays on the ladder vocabulary ({@link advertisedReasoningEffort}).
- */
-function requestedReasoningEffort(value: string): Effort | undefined {
-	const normalized = value.toLowerCase();
-	return THINKING_EFFORTS.find(effort => effort === normalized);
-}
-
 function extractReasoningLevels(value: unknown): Effort[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	const efforts: Effort[] = [];
@@ -967,10 +957,7 @@ function advertisedReasoningEnabled(providerConfig: DiscoveryProviderConfig): bo
 type AdvertisedReasoning =
 	/** The row states it does not reason. */
 	| { kind: "none" }
-	/**
-	 * The row advertises an effort ladder, whether it also accepts `none`, and
-	 * the aliases/lock facts that describe how requests land on it.
-	 */
+	/** The row advertises an effort ladder, whether it accepts `none`, its aliases, and whether thinking can be off. */
 	| {
 			kind: "ladder";
 			efforts: Effort[];
@@ -984,11 +971,10 @@ type AdvertisedReasoning =
  * Read server-advertised reasoning support from an OpenAI-compatible
  * `/v1/models` row. codex-lb nests the Codex registry fields under `metadata`
  * (`supported_reasoning_levels: [{ effort }]`, `default_reasoning_level`);
- * other gateways may advertise the same fields top-level. A gateway that serves
- * a reduced tier set can also name where an unserved request lands
- * (`reasoning_effort_map: { medium: "high" }`) and state that reasoning cannot
- * be turned off (`reasoning_required: true`). Returns undefined when the row
- * says nothing usable about reasoning.
+ * other gateways may advertise the same fields top-level, along with
+ * `reasoning_effort_map` (where an unserved request lands) and
+ * `reasoning_required`. Returns undefined when the row says nothing usable
+ * about reasoning.
  *
  * An explicit non-reasoning declaration is reported as `{ kind: "none" }`
  * rather than `undefined`: the caller must be able to tell "this endpoint says
@@ -1026,10 +1012,7 @@ function extractAdvertisedReasoning(item: {
 		acceptsNone: advisoryEffortEntries(raw).includes("none"),
 		...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
 		...(effortMap !== undefined ? { effortMap } : {}),
-		// Whether the endpoint rejects disabled or omitted thinking. `true` makes a
-		// thinking-off request clamp to a real tier instead of dropping the field;
-		// an explicit `false` is kept as well, so it outranks an identity default
-		// (thinking-variant ids) that would otherwise lock reasoning on.
+		// An explicit `false` is kept so it outranks an identity default that locks reasoning on.
 		...(typeof requiresEffort === "boolean" ? { requiresEffort } : {}),
 	};
 }
@@ -1044,23 +1027,18 @@ function advisoryEffortEntries(value: unknown): string[] {
 }
 
 /**
- * Read a row's requested-effort → served-effort aliases. A gateway that serves a
- * reduced tier set states where an unsupported request lands (`{"medium":
- * "high"}` for a route that only accepts low/high/max), which is news neither
- * the ladder nor numeric clamping can produce. Requested keys use the full omp
- * vocabulary (`minimal` included); served values must be ladder tiers. `none` is
- * the off-switch rather than a tier and unknown names (`ultra`) have no omp
- * equivalent, so entries naming them are dropped.
+ * A row's requested → served aliases (`{"medium": "high"}` for a low/high/max
+ * route). Any omp effort may be requested; served values must be ladder tiers.
  */
 function extractReasoningEffortMap(value: unknown): Partial<Record<Effort, Effort>> | undefined {
 	if (!isRecord(value)) return undefined;
-	const effortMap: Partial<Record<Effort, Effort>> = {};
+	let effortMap: Partial<Record<Effort, Effort>> | undefined;
 	for (const [rawRequested, rawServed] of Object.entries(value)) {
-		const requested = requestedReasoningEffort(rawRequested);
+		const requested = rawRequested.toLowerCase() as Effort;
 		const served = advertisedReasoningEffort(rawServed);
-		if (requested !== undefined && served !== undefined) effortMap[requested] = served;
+		if (served !== undefined && THINKING_EFFORTS.includes(requested)) (effortMap ??= {})[requested] = served;
 	}
-	return Object.keys(effortMap).length > 0 ? effortMap : undefined;
+	return effortMap;
 }
 
 /**
@@ -1102,12 +1080,7 @@ function withAdvertisedEfforts(
 		preferredDefault !== undefined && advertised.efforts.includes(preferredDefault)
 			? preferredDefault
 			: advertised.efforts[0];
-	// `effortMap` / `requiresEffort` travel with the ladder because they are also
-	// facts about this row's wire: the map says where an effort the endpoint does
-	// not serve lands (a route that only accepts low/high/max answers `medium` as
-	// `high`), and the flag says whether the endpoint rejects a thinking-off request.
-	// `clampThinkingLevelForModel` reads the map before clamping by distance, and
-	// the stream honours the flag.
+	// The alias map and the thinking-off lock are wire facts of this row too.
 	const thinking: ThinkingConfig = {
 		mode: "effort",
 		efforts: advertised.efforts,

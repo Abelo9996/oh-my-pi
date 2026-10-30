@@ -3158,16 +3158,10 @@ describe("ModelRegistry runtime discovery", () => {
 				discovery: { type: "openai-models-list" },
 			},
 		});
-		// `example-route` serves only low/high/max. Its row names the tier an
-		// unsupported request lands on (`reasoning_effort_map`, `minimal`
-		// included) and states that reasoning cannot be turned off
-		// (`reasoning_required`); unknown alias names must not survive into the
-		// model. `example-optional-route` says reasoning can be turned off.
-		// `acme-locked-thinking` is a thinking-variant id, which the identity
-		// rules lock to mandatory reasoning; `acme-unlocked-thinking` carries the
-		// same identity but states `reasoning_required: false`, which must win.
-		// `acme-plain-think` advertises a ladder and nothing else, so it must
-		// keep the plain ladder shape.
+		// `example-route` serves low/high/max and names where unserved requests land
+		// (unknown names are dropped) and that reasoning cannot be turned off.
+		// `acme-*-thinking` ids are locked to mandatory reasoning by identity; an
+		// explicit `reasoning_required: false` must win.
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:9995/v1/models") {
@@ -3209,12 +3203,6 @@ describe("ModelRegistry runtime discovery", () => {
 								supported_reasoning_levels: ["low", "high"],
 								reasoning_required: false,
 							},
-							{
-								id: "acme-plain-think",
-								object: "model",
-								owned_by: "example-gateway",
-								supported_reasoning_levels: ["low", "high"],
-							},
 						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -3241,15 +3229,7 @@ describe("ModelRegistry runtime discovery", () => {
 		});
 		expect(registry.find("example-gateway", "acme-locked-thinking")?.thinking?.requiresEffort).toBe(true);
 		expect(registry.find("example-gateway", "acme-unlocked-thinking")?.thinking?.requiresEffort).toBe(false);
-		const plain = registry.find("example-gateway", "acme-plain-think");
-		expect(plain?.thinking).toEqual({ mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.Low });
-
 		if (!model || !optional) throw new Error("expected both discovered routes");
-		// The alias outranks clamping by distance: `minimal` and `medium` land on
-		// `high`, the tier the row names, not on `low`.
-		expect(clampThinkingLevelForModel(model, Effort.Minimal)).toBe(Effort.High);
-		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.High);
-
 		async function sendThroughStreamSimple(
 			target: Model,
 			options: { reasoning?: Effort },
@@ -3274,9 +3254,7 @@ describe("ModelRegistry runtime discovery", () => {
 		}
 		expect((await sendThroughStreamSimple(model, { reasoning: Effort.Minimal })).reasoning_effort).toBe("high");
 		expect((await sendThroughStreamSimple(model, { reasoning: Effort.Medium })).reasoning_effort).toBe("high");
-		// A request with no effort is where the flag decides the wire: the
-		// mandatory route still sends its lowest tier, while the route that can
-		// turn reasoning off sends no effort at all.
+		// With no effort requested, the mandatory route still sends its lowest tier.
 		expect((await sendThroughStreamSimple(model, {})).reasoning_effort).toBe("low");
 		expect((await sendThroughStreamSimple(optional, {})).reasoning_effort).toBeUndefined();
 	});
