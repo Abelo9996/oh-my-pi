@@ -27,7 +27,7 @@ import { isKindRole } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { cfgTaskDisabledAgents, cfgTaskPerCallModelAllow } from "./settings";
 
-/** A per-call model was rejected: not an available chat model, or not approved by the operator's configuration. */
+/** A per-call model request could not be dispatched or restored. */
 export class PerCallModelError extends Error {
 	constructor(message: string) {
 		super(message);
