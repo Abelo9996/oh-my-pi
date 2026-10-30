@@ -109,20 +109,26 @@ const DEFAULT_LINK_THRESHOLD = 0.35;
 const LIVE_MEMORY_SQL = "superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)";
 
 /** Clause connector that ends a fact object, so the next clause is never swallowed into it. */
-const CLAUSE_BREAK = String.raw`(?:and|but|or|because|so|while|which|that|who|whom|whose|when|where|if|since|although|though|unless|until|whereas)\b`;
+const CLAUSE_BREAK = String.raw`(?:and|but|or|nor|yet|then|because|so|while|which|that|who|whom|whose|when|where|if|since|although|though|unless|until|whereas)\b`;
 /** Optional leading article; must be a whole word, so `active` never loses its `a` and `an` never splits. */
 const ARTICLE = String.raw`(?:(?:an?|the)\s+)?`;
 /** Fact subject: from the first capitalized word up to the predicate. */
 const SUBJECT = String.raw`\b([A-Z][a-zA-Z\s]+?)`;
+/**
+ * Start of another extractable clause (`Bob is …`, `the runtime has …`). Catches clauses joined by a
+ * connector missing from {@link CLAUSE_BREAK}, so their subject is left for the next match.
+ */
+const NEXT_CLAUSE = String.raw`${ARTICLE}[a-zA-Z\d]+\s+(?:is|has|uses?|using|used|works?)\b`;
 
 /**
- * Captures a whole phrase of `word`s up to punctuation, a line break, or a clause connector.
- * Connectors may start an object (for example, `that permission`) but terminate it after the first token.
+ * Captures a whole phrase of `word`s up to punctuation, a line break, a clause connector, or the
+ * subject of another clause. Connectors may start an object (for example, `that permission`) but
+ * terminate it after the first token.
  * Each word must end on a token boundary; a phrase whose first word does not yields no match.
  */
 function phrase(word: string): string {
 	const token = String.raw`${word}(?:['-]${word})*\b`;
-	return String.raw`(${token}(?:[ \t]+(?!${CLAUSE_BREAK})${token})*)`;
+	return String.raw`(${token}(?:[ \t]+(?!${CLAUSE_BREAK}|${NEXT_CLAUSE})${token})*)`;
 }
 
 const IS_FACT = new RegExp(String.raw`${SUBJECT}\s+is\s+${ARTICLE}${phrase("[a-zA-Z]+")}`, "g");
