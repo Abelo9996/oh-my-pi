@@ -18,10 +18,7 @@ function spawnScript(tempDir: TempDir, name: string, body: string[], args: strin
 	const script = tempDir.join(name);
 	return Bun.write(
 		script,
-		[
-			`import { FileSessionStorage, tryAcquireSessionLease } from ${JSON.stringify(SESSION_STORAGE_MODULE)};`,
-			...body,
-		].join("\n"),
+		[`import { FileSessionStorage } from ${JSON.stringify(SESSION_STORAGE_MODULE)};`, ...body].join("\n"),
 	).then(() =>
 		Bun.spawn([process.execPath, script, ...args], {
 			stdin: "pipe",
@@ -56,26 +53,22 @@ async function spawnOwner(tempDir: TempDir, sessionId: string) {
  * it `rounds` times. Returns that process's failed claims and how often the
  * probe saw the lease held (proving the two actually overlapped).
  */
-async function raceProbeAgainstClaims(tempDir: TempDir, sessionId: string, mode: "claim" | "raw", rounds: number) {
+async function raceProbeAgainstClaims(tempDir: TempDir, sessionId: string, rounds: number) {
 	const child = await spawnScript(
 		tempDir,
-		`claimer-${mode}.ts`,
+		"claimer.ts",
 		[
-			"const [id, sessionPath, mode, rounds] = process.argv.slice(2);",
+			"const [id, sessionPath, rounds] = process.argv.slice(2);",
 			"const storage = new FileSessionStorage();",
 			"let failures = 0;",
 			"for (let i = 0; i < Number(rounds); i++) {",
-			"	let release;",
-			'	if (mode === "raw") {',
-			"		const lease = tryAcquireSessionLease(id);",
-			"		release = lease && (() => lease.release());",
-			"	} else release = storage.claimSession(id, sessionPath);",
+			"	const release = storage.claimSession(id, sessionPath);",
 			"	if (release) release();",
 			"	else failures++;",
 			"}",
 			'process.stdout.write(JSON.stringify({ failures }) + "\\n");',
 		],
-		[sessionId, tempDir.join(`${sessionId}.jsonl`), mode, String(rounds)],
+		[sessionId, tempDir.join("claimer-session.jsonl"), String(rounds)],
 	);
 	const output = new Response(child.stdout).text();
 	let probes = 0;
@@ -125,23 +118,11 @@ describe("session lease probe", () => {
 
 	it("never makes a concurrent claim fail", async () => {
 		using tempDir = TempDir.createSync("@omp-lease-race-");
-		const { failures, probes, sawHeld } = await raceProbeAgainstClaims(tempDir, uniqueId("claim"), "claim", 3000);
+		const { failures, probes, sawHeld } = await raceProbeAgainstClaims(tempDir, uniqueId("claim"), 3000);
 		expect(failures).toBe(0);
 		expect(sawHeld).toBeGreaterThan(0);
 		expect(probes).toBeGreaterThan(sawHeld);
 	}, 60_000);
-
-	// Windows' probe can keep a just-released mutex alive for an instant; there only the claim retry above holds.
-	it.skipIf(process.platform === "win32")(
-		"never makes even a single raw acquisition fail",
-		async () => {
-			using tempDir = TempDir.createSync("@omp-lease-race-raw-");
-			const { failures, sawHeld } = await raceProbeAgainstClaims(tempDir, uniqueId("raw"), "raw", 3000);
-			expect(failures).toBe(0);
-			expect(sawHeld).toBeGreaterThan(0);
-		},
-		60_000,
-	);
 
 	it("`omp session lease --json` lists held ids and treats free and garbage ids as not held", async () => {
 		using tempDir = TempDir.createSync("@omp-lease-cli-");

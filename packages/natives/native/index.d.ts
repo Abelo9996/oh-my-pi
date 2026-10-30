@@ -255,12 +255,9 @@ export declare class FileLock {
   /**
    * Whether any handle, in any process including this one, holds `path`.
    *
-   * Observes without locking anything: a `connect(2)` probe on Linux, an
-   * `F_GETLK` query on other Unix platforms, opening the existing mutex on
-   * Windows. Only on Windows can it affect an acquirer: while the probe's
-   * handle is open it keeps a just-released mutex alive, so a `tryAcquire()`
-   * racing that release fails. Acquirers that must not lose such a race retry
-   * briefly.
+   * Observes without locking or opening the lock: a `connect(2)` probe on
+   * Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
+   * directory listing on Windows. A concurrent `tryAcquire()` never meets it.
    */
   static isHeld(path: string): boolean
   /** Whether this handle owns the requested lock. */

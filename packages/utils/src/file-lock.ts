@@ -46,9 +46,7 @@ export function tryAcquireFileLock(filePath: string): FileLockHandle | null {
 
 /**
  * Whether any holder, including this process, owns the lease, observed without
- * taking it. Only on Windows can the probe affect an acquirer: its handle keeps
- * a just-released mutex alive for an instant, so a `tryAcquireFileLock` racing
- * that release fails. Acquirers that must not lose that race retry briefly.
+ * taking it, so a concurrent `tryAcquireFileLock` never meets the probe.
  * Throws when the lock cannot be probed.
  */
 export function isFileLockHeld(filePath: string): boolean {

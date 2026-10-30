@@ -654,7 +654,7 @@ export function tryAcquireSessionLease(sessionId: string): FileLockHandle | null
 /**
  * Whether a process, this one included, holds a session's ownership lease,
  * observed without taking it, so it never makes a concurrent claim fork the
- * session (see `isFileLockHeld` and the retry in `claimSession`). `null` when
+ * session (see `isFileLockHeld`). `null` when
  * the lease cannot be probed. Never throws.
  */
 export function isSessionLeaseHeld(sessionId: string): boolean | null {
@@ -682,15 +682,6 @@ export function probeSessionLeases(sessionIds: readonly string[]): SessionLeaseR
 	}
 	return report;
 }
-
-/**
- * Claim attempts before a contended lease counts as owned elsewhere. On
- * Windows a probe (`isSessionLeaseHeld`) racing the owner's release keeps the
- * lease alive for an instant, so retry briefly; a real owner fails every
- * attempt. Elsewhere the probe never affects a claim.
- */
-const SESSION_CLAIM_ATTEMPTS = process.platform === "win32" ? 5 : 1;
-const SESSION_CLAIM_RETRY_MS = 5;
 
 /** Approximate size (UTF-16 units synchronously, bytes through a sink) buffered per staging-file write when streaming a body. */
 const LINE_STREAM_CHUNK = 1 << 20;
@@ -1358,10 +1349,6 @@ export class FileSessionStorage implements SessionStorage {
 			let lease: FileLockHandle | null;
 			try {
 				lease = tryAcquireSessionLease(sessionId);
-				for (let attempt = 1; !lease && attempt < SESSION_CLAIM_ATTEMPTS; attempt++) {
-					Bun.sleepSync(SESSION_CLAIM_RETRY_MS);
-					lease = tryAcquireSessionLease(sessionId);
-				}
 			} catch (err) {
 				logger.debug("Session ownership lease unavailable", { sessionId, error: toError(err).message });
 				return () => {};
