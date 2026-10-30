@@ -1,5 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, Context, ImageContent, Message, Model, ModelSpec, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	ModelSpec,
+	TextContent,
+	Tool,
+} from "@oh-my-pi/pi-ai";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamFactoryDroid } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -821,6 +830,92 @@ describe("provider context image budgets", () => {
 		const body = await factoryRequestBody(gpt, context);
 		expect(body.split(answer)).toHaveLength(2);
 		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
+	it("charges Factory Gemini tool schemas as the dereferenced definitions the route sends", async () => {
+		const gemini = factoryModel("gemini-3.5-flash");
+		const fresh = "C".repeat(3_400_000);
+		// One 100 KB definition referenced twelve times: compact in the context, inlined at every use on the wire.
+		const properties: Record<string, unknown> = {};
+		for (let index = 0; index < 12; index++) properties[`field${index}`] = { $ref: "#/$defs/shared" };
+		const context: Context = {
+			systemPrompt: [],
+			tools: [
+				{
+					name: "configure",
+					description: "configure",
+					parameters: {
+						type: "object",
+						properties,
+						$defs: { shared: { type: "string", description: "d".repeat(100_000) } },
+					} as Tool["parameters"],
+				},
+			],
+			messages: [{ role: "user", content: [text("look"), image(fresh)], timestamp: 0 }],
+		};
+		const clamped = clampProviderContextImageBytes(context, gemini);
+		expect(imageData(clamped)).toEqual([]);
+		// Kept, the image would have pushed the body past the route limit.
+		expect(Buffer.byteLength(await factoryRequestBody(gemini, context))).toBeGreaterThan(
+			FACTORY_DROID_ROUTE_BODY_LIMIT,
+		);
+	});
+
+	it("does not charge Factory Gemini for another model's thinking, which its replay drops", async () => {
+		const gemini = factoryModel("gemini-3.5-flash");
+		const fresh = "C".repeat(3_400_000);
+		const claudeTurn: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "t".repeat(1_200_000), thinkingSignature: "sig" }, text("done")],
+			api: "anthropic-messages",
+			provider: "factory-droid",
+			model: "claude-haiku-4-5-20251001",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("think")], timestamp: 0 },
+				claudeTurn,
+				{ role: "user", content: [text("look"), image(fresh)], timestamp: 2 },
+			],
+		};
+		expect(clampProviderContextImageBytes(context, gemini)).toBe(context);
+		const body = await factoryRequestBody(gemini, context);
+		expect(body).toContain(fresh);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		// Factory Claude replays its own thinking, which leaves the image no room.
+		const claude = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, claude))).toEqual([]);
+	});
+
+	it("charges inactive tool definitions only on the Anthropic wire that re-declares them", () => {
+		const fresh = "C".repeat(3_400_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			inactiveTools: [
+				{
+					name: "mcp_withdrawn",
+					description: "d".repeat(1_200_000),
+					parameters: { type: "object", properties: {} } as Tool["parameters"],
+				},
+			],
+			messages: [{ role: "user", content: [text("look"), image(fresh)], timestamp: 0 }],
+		};
+		expect(clampProviderContextImageBytes(context, factoryGptModel())).toBe(context);
+		const claude = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, claude))).toEqual([]);
 	});
 
 	it("evicts more computer screenshots when the text the evicted ones send crowds the rest", async () => {
