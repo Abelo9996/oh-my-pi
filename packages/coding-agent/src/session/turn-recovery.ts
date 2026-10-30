@@ -2854,6 +2854,7 @@ export class TurnRecovery {
 						error: errorMessage,
 						modelId: currentModel.id,
 						signal: rotateAbortController.signal,
+						waitForSibling: rotationsRemaining > 0,
 					})
 				).switched;
 				// Rotation is advisory: expired blocks or a repeatedly offered sibling
