@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import type { Context, ImageContent, Message, Model, ModelSpec, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, ImageContent, Message, Model, ModelSpec, TextContent } from "@oh-my-pi/pi-ai";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamFactoryDroid } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
@@ -93,6 +94,8 @@ function factoryDroidModel(baseUrl: string) {
 const FACTORY_DROID_ROUTE_BODY_LIMIT = 4_500_000;
 // A base64 character occupies one byte in Anthropic's JSON request body.
 const HALF_ANTHROPIC_IMAGE_BUDGET = "A".repeat(60_000_000);
+// Anthropic's Messages API refuses request bodies over 128 MB (HTTP 413).
+const ANTHROPIC_BODY_LIMIT = 128_000_000;
 
 function image(data: string): ImageContent {
 	return { type: "image", data, mimeType: "image/png" };
@@ -206,6 +209,19 @@ async function factoryRequestBody(model: Model<"factory-droid-agent">, context: 
 	}).result();
 	if (!body) throw new Error("Factory request was not sent");
 	return body;
+}
+
+/** The Anthropic request body `context` produces on `model`, captured before it is sent. */
+async function anthropicRequestBody(model: Model<"anthropic-messages">, context: Context): Promise<string> {
+	const { promise, resolve } = Promise.withResolvers<unknown>();
+	const controller = new AbortController();
+	controller.abort();
+	streamAnthropic(model, context, {
+		apiKey: "sk-ant-api-test",
+		signal: controller.signal,
+		onPayload: payload => resolve(payload),
+	});
+	return JSON.stringify(await promise);
 }
 
 describe("provider context image budgets", () => {
@@ -477,11 +493,11 @@ describe("provider context image budgets", () => {
 	});
 
 	it("removes oldest live screenshots before Anthropic's 128 MB request cap", () => {
-		const screenshot = "A".repeat(2_670_000);
+		const screenshot = "A".repeat(534_000);
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
-			messages: Array.from({ length: 62 }, (_, index) => ({
+			messages: Array.from({ length: 240 }, (_, index) => ({
 				role: "toolResult",
 				toolCallId: `call-${index}`,
 				toolName: "screenshot",
@@ -492,12 +508,54 @@ describe("provider context image budgets", () => {
 		};
 		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		const keptImages = imageData(clamped);
-		expect(keptImages).toHaveLength(44);
-		expect(keptImages.reduce((size, data) => size + data.length, 0)).toBe(117_480_000);
-		expect(clamped.messages.slice(0, 18).every(message => message.content.length === 1)).toBe(true);
-		expect(clamped.messages.slice(18).every(message => message.content.length === 2)).toBe(true);
-		expect(textData(clamped)).toEqual(Array.from({ length: 62 }, (_, index) => `result-${index}`));
-		expect(imageData(context)).toHaveLength(62);
+		expect(keptImages).toHaveLength(224);
+		expect(keptImages.reduce((size, data) => size + data.length, 0)).toBe(119_616_000);
+		expect(clamped.messages.slice(0, 16).every(message => message.content.length === 1)).toBe(true);
+		expect(clamped.messages.slice(16).every(message => message.content.length === 2)).toBe(true);
+		expect(textData(clamped)).toEqual(Array.from({ length: 240 }, (_, index) => `result-${index}`));
+		expect(imageData(context)).toHaveLength(240);
+	});
+
+	it("keeps the newest Anthropic user message's images past the image budget while they fit the body limit", () => {
+		// The first-party API takes images of up to 10 MB of base64 each.
+		const pasted = "A".repeat(9_500_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("old"), image("O".repeat(1_000_000))], timestamp: 0 },
+				{ role: "user", content: [text("new"), ...Array.from({ length: 13 }, () => image(pasted))], timestamp: 1 },
+			],
+		};
+		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
+		// 123.5 MB of newest images: over the 120 MB image budget, under the body limit; the older image goes instead.
+		expect(imageData(clamped)).toEqual(Array.from({ length: 13 }, () => pasted));
+		expect(textData(clamped)).toEqual(["old", "new"]);
+	});
+
+	it("drops Anthropic images under the image budget when long text leaves them no room under the body limit", async () => {
+		const screenshot = "A".repeat(9_500_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				// Whitespace runs are cheap in tokens and full price in bytes.
+				{ role: "user", content: [text(`start${" ".repeat(20_000_000)}end`)], timestamp: 0 },
+				...Array.from({ length: 12 }, (_, index) => ({
+					role: "user" as const,
+					content: [text(`shot-${index}`), image(screenshot)],
+					timestamp: index + 1,
+				})),
+				{ role: "user", content: [text("next")], timestamp: 13 },
+			],
+		};
+		// 114 MB of images fit the 120 MB image budget, but not beside 20 MB of text.
+		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
+		expect(imageData(clamped)).toHaveLength(11);
+		expect(clamped.messages[1]?.content).toHaveLength(1);
+		const body = await anthropicRequestBody(ANTHROPIC_MODEL, clamped);
+		expect(Buffer.byteLength(body)).toBeLessThan(ANTHROPIC_BODY_LIMIT);
+		expect(body.split(screenshot)).toHaveLength(12);
 	});
 
 	it("keeps a Factory-hosted request's inline images under the route body limit, but not a custom gateway's", () => {
@@ -553,6 +611,67 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImageBytes(counted, hosted);
 		expect(imageData(clamped)).toHaveLength(3);
 		expect(clamped.messages.slice(2).every(message => message.content.length === 2)).toBe(true);
+	});
+
+	it("trims Factory screenshots under the image budget when text leaves them less of the route body limit", () => {
+		const screenshot = "A".repeat(1_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("x".repeat(2_000_000))], timestamp: 0 },
+				...Array.from({ length: 3 }, (_, index) => ({
+					role: "user" as const,
+					content: [text(`shot-${index}`), image(screenshot)],
+					timestamp: index + 1,
+				})),
+				{ role: "user", content: [text("next")], timestamp: 4 },
+			],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		// 3 MB of images fit the 3.5 MB budget, but not beside 2 MB of text under 4.5 MB.
+		const clamped = clampProviderContextImageBytes(context, hosted);
+		expect(imageData(clamped)).toHaveLength(2);
+		expect(clamped.messages[1]?.content).toHaveLength(1);
+		expect(JSON.stringify(clamped).length).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
+	it("does not charge a Factory GPT turn's Responses history once the session moves to a Factory Claude model", () => {
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		const gptTurn: AssistantMessage = {
+			role: "assistant",
+			content: [text("here it is")],
+			api: hosted.api,
+			provider: hosted.provider,
+			model: "gpt-5.6-terra",
+			// The generated image rides in the native history the Claude wire never replays.
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: hosted.provider,
+				items: [{ type: "image_generation_call", result: "B".repeat(3_000_000) }],
+			},
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const prompt: Message = { role: "user", content: [text("draw a cat")], timestamp: 0 };
+		const fresh: Message = {
+			role: "user",
+			content: [text("now look at this"), image("A".repeat(2_000_000))],
+			timestamp: 2,
+		};
+		const context: Context = { systemPrompt: [], tools: [], messages: [prompt, gptTurn, fresh] };
+		expect(clampProviderContextImageBytes(context, hosted)).toBe(context);
+		// On the model that produced it, the history is replayed and leaves the fresh image no room.
+		const replayed: Context = { ...context, messages: [prompt, { ...gptTurn, model: hosted.id }, fresh] };
+		expect(imageData(clampProviderContextImageBytes(replayed, hosted))).toEqual([]);
 	});
 
 	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {
@@ -939,13 +1058,14 @@ describe("provider context image budgets", () => {
 					role: "toolResult",
 					toolCallId: "call-1",
 					toolName: "screenshot",
-					content: [image("A".repeat(120_000_004))],
+					content: [image("A".repeat(FACTORY_DROID_ROUTE_BODY_LIMIT + 1))],
 					isError: false,
 					timestamp: 0,
 				},
 			],
 		};
-		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		const clamped = clampProviderContextImageBytes(context, hosted);
 		expect(clamped.messages[0]?.content).toEqual([text("[image omitted: provider image limit]")]);
 		expect(imageData(context)).toHaveLength(1);
 	});
@@ -954,14 +1074,15 @@ describe("provider context image budgets", () => {
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
-			messages: [{ role: "user", content: [image("A".repeat(140_000_000))], timestamp: 0 }],
+			messages: [{ role: "user", content: [image("A".repeat(FACTORY_DROID_ROUTE_BODY_LIMIT + 1))], timestamp: 0 }],
 		};
-		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		const clamped = clampProviderContextImageBytes(context, hosted);
 		expect(clamped.messages[0]?.content).toEqual([text("[image omitted: provider image limit]")]);
 	});
 
 	it("does not charge URL or Anthropic file references for inline bytes", () => {
-		const referenceData = "A".repeat(61_000_000);
+		const referenceData = HALF_ANTHROPIC_IMAGE_BUDGET;
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
@@ -971,6 +1092,7 @@ describe("provider context image budgets", () => {
 					content: [
 						{ ...image(referenceData), url: "https://example.com/picture.png" },
 						{ ...image(referenceData), providerFile: { provider: "anthropic", id: "file_123" } },
+						{ ...image(referenceData), providerFile: { provider: "anthropic", id: "file_456" } },
 					],
 					timestamp: 0,
 				},
@@ -981,7 +1103,7 @@ describe("provider context image budgets", () => {
 
 	it("keeps older external references while removing later inline bytes, but still counts references", () => {
 		const reference = { ...image(""), url: "https://example.com/old.png" };
-		const oversized = image("A".repeat(120_000_004));
+		const oversized = image("A".repeat(ANTHROPIC_BODY_LIMIT + 1));
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
@@ -1109,18 +1231,18 @@ describe("provider context image budgets", () => {
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
-			messages: Array.from({ length: 62 }, (_, index) => ({
+			messages: Array.from({ length: 240 }, (_, index) => ({
 				role: "toolResult",
 				toolCallId: `call-${index}`,
 				toolName: "screenshot",
-				content: [image("A".repeat(2_670_000))],
+				content: [image("A".repeat(534_000))],
 				isError: false,
 				timestamp: index,
 			})),
 		};
 		const decorated = decorateContextImages(context, () => "https://images.example/frame.png");
 
-		expect(imageData(clampProviderContextImageBytes(context, ANTHROPIC_MODEL))).toHaveLength(44);
+		expect(imageData(clampProviderContextImageBytes(context, ANTHROPIC_MODEL))).toHaveLength(224);
 		expect(clampProviderContextImageBytes(decorated, ANTHROPIC_MODEL)).toBe(decorated);
 	});
 

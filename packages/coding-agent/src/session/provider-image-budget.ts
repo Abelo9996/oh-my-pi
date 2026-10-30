@@ -256,8 +256,15 @@ function newestImageMessages(
 	return kept;
 }
 
+/** `content` with each image's base64 emptied, for measuring the request bytes around the images. */
+function withoutImageData<T extends { type: string }>(content: readonly T[]): readonly T[] {
+	if (!content.some(part => part.type === "image")) return content;
+	return content.map(part => (part.type === "image" ? { ...part, data: "" } : part));
+}
+
 /**
- * Drops oldest inline image blocks so their base64 fits the deployment's request-body budget.
+ * Drops oldest inline image blocks so their base64 fits the deployment's request-body budget: its inline-image byte
+ * budget and, where the host sets a `request-body-byte-limit`, what the request's other bytes leave of that limit.
  * Runs after URL/provider-file decoration: blocks the provider receives as references carry no inline bytes.
  */
 export function clampProviderContextImageBytes(context: Context, model: Model): Context {
@@ -267,40 +274,59 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	if (byteBudget === undefined) return context;
 	const metadataWire = sendsComputerScreenshotMetadata(model);
 	let inlineBytes = 0;
-	// Assistant images are model outputs no serializer replays (see countImages): never charged or reserved.
-	let unsentBytes = 0;
+	// Assistant images are model outputs no serializer replays (see countImages): never charged.
 	for (const message of context.messages) {
-		if (message.role !== "assistant") {
-			inlineBytes += sentImageBytes(message, model, metadataWire);
-			continue;
-		}
-		for (const part of message.content) {
-			if (part.type === "image") unsentBytes += part.data.length;
-		}
+		if (message.role !== "assistant") inlineBytes += sentImageBytes(message, model, metadataWire);
 	}
-	if (inlineBytes <= byteBudget) return context;
+	if (inlineBytes === 0) return context;
 	const bodyLimit = resolveRequestBodyByteLimit(model, budgetedHost);
-	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
-	// images. Base64 is ASCII, so its characters are its bytes. Never sent: tool-result `details` (UI-only) and
-	// another provider's native payload (assistant turns, compaction summaries), which this request does not replay.
-	// A computer result carries its screenshot twice and sends one copy (sentScreenshotBytes); where that is the
-	// metadata copy, none of its content is sent.
-	const wire = context.messages.map(message => {
-		if (message.role === "toolResult") {
-			return sentScreenshotBytes(message, metadataWire) === undefined
-				? { ...message, details: undefined, providerMetadata: undefined }
-				: { ...message, details: undefined, content: [] };
-		}
-		const payload = message.providerPayload;
-		if (!payload) return message;
-		const owner =
-			message.role === "assistant" ? message.provider : "provider" in payload ? payload.provider : undefined;
-		return owner !== undefined && owner !== model.provider ? { ...message, providerPayload: undefined } : message;
-	});
-	const otherBytes = Buffer.byteLength(JSON.stringify({ ...context, messages: wire })) - inlineBytes - unsentBytes;
-	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - REQUEST_ENVELOPE_BYTES - otherBytes;
+	if (bodyLimit === undefined && inlineBytes <= byteBudget) return context;
+	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave of the body limit may
+	// hold images, whatever the image budget allows. They are measured with every image's base64 emptied, so the
+	// cost follows the text rather than the images. Never sent: tool-result `details` (UI-only), another provider's
+	// native payload (assistant turns, compaction summaries), and an assistant's Responses or Cursor history from
+	// another model, which those wires replay only on the model that produced it. A computer result carries its
+	// screenshot twice and sends one copy (sentScreenshotBytes); where that is the metadata copy, none of its
+	// content is sent.
+	let imageRoom: number | undefined;
+	if (bodyLimit !== undefined) {
+		const wire = context.messages.map(message => {
+			if (message.role === "toolResult") {
+				const metadata = message.providerMetadata;
+				if (!metadata || sentScreenshotBytes(message, metadataWire) === undefined) {
+					return {
+						...message,
+						content: withoutImageData(message.content),
+						details: undefined,
+						providerMetadata: undefined,
+					};
+				}
+				const screenshot =
+					metadata.screenshot.image_url === undefined
+						? metadata.screenshot
+						: { ...metadata.screenshot, image_url: "" };
+				return { ...message, details: undefined, content: [], providerMetadata: { ...metadata, screenshot } };
+			}
+			const content = Array.isArray(message.content) ? withoutImageData(message.content) : message.content;
+			const payload = message.providerPayload;
+			if (!payload) return { ...message, content };
+			const owner =
+				message.role === "assistant" ? message.provider : "provider" in payload ? payload.provider : undefined;
+			const otherModelHistory =
+				message.role === "assistant" &&
+				(payload.type === "openaiResponsesHistory" || payload.type === "cursorHistory") &&
+				(message.api !== model.api || message.model !== model.id);
+			return (owner !== undefined && owner !== model.provider) || otherModelHistory
+				? { ...message, content, providerPayload: undefined }
+				: { ...message, content };
+		});
+		imageRoom =
+			bodyLimit - REQUEST_ENVELOPE_BYTES - Buffer.byteLength(JSON.stringify({ ...context, messages: wire }));
+	}
+	const budget = imageRoom === undefined ? byteBudget : Math.min(byteBudget, imageRoom);
+	if (inlineBytes <= budget) return context;
 	const kept = newestImageMessages(context, model, metadataWire, imageRoom);
-	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, metadataWire, kept });
+	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget: budget, model, metadataWire, kept });
 }
 
 /**
