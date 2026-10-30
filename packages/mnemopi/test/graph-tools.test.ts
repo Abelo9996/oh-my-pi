@@ -68,6 +68,16 @@ describe("EpisodicGraph heuristic fact extraction", () => {
 		});
 	});
 
+	it("preserves demonstratives at the start of objects without swallowing later clauses", () => {
+		withGraph(graph => {
+			expect(triples(graph, "Alice has that permission.")).toEqual([["Alice", "has", "that permission"]]);
+			expect(triples(graph, "Alice uses that tool.")).toEqual([["Alice", "uses", "that tool"]]);
+			expect(triples(graph, "Alice has that permission and can approve it.")).toEqual([
+				["Alice", "has", "that permission"],
+			]);
+		});
+	});
+
 	it("ends an object at a clause connector so the next clause still yields its own fact", () => {
 		withGraph(graph => {
 			expect(triples(graph, "Bob is active and Alice is idle.")).toEqual([

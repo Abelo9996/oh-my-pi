@@ -117,11 +117,12 @@ const SUBJECT = String.raw`\b([A-Z][a-zA-Z\s]+?)`;
 
 /**
  * Captures a whole phrase of `word`s up to punctuation, a line break, or a clause connector.
+ * Connectors may start an object (for example, `that permission`) but terminate it after the first token.
  * Each word must end on a token boundary; a phrase whose first word does not yields no match.
  */
 function phrase(word: string): string {
-	const token = String.raw`(?!${CLAUSE_BREAK})${word}(?:['-]${word})*\b`;
-	return String.raw`(${token}(?:[ \t]+${token})*)`;
+	const token = String.raw`${word}(?:['-]${word})*\b`;
+	return String.raw`(${token}(?:[ \t]+(?!${CLAUSE_BREAK})${token})*)`;
 }
 
 const IS_FACT = new RegExp(String.raw`${SUBJECT}\s+is\s+${ARTICLE}${phrase("[a-zA-Z]+")}`, "g");
