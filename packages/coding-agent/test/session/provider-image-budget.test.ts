@@ -638,12 +638,14 @@ describe("provider context image budgets", () => {
 
 	it("does not charge a Factory GPT turn's Responses history once the session moves to a Factory Claude model", () => {
 		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		const gpt = factoryGptModel();
+		// A Factory turn is recorded under its upstream wire's api.
 		const gptTurn: AssistantMessage = {
 			role: "assistant",
 			content: [text("here it is")],
-			api: hosted.api,
-			provider: hosted.provider,
-			model: "gpt-5.6-terra",
+			api: "openai-responses",
+			provider: gpt.provider,
+			model: gpt.id,
 			// The generated image rides in the native history the Claude wire never replays.
 			providerPayload: {
 				type: "openaiResponsesHistory",
@@ -670,8 +672,7 @@ describe("provider context image budgets", () => {
 		const context: Context = { systemPrompt: [], tools: [], messages: [prompt, gptTurn, fresh] };
 		expect(clampProviderContextImageBytes(context, hosted)).toBe(context);
 		// On the model that produced it, the history is replayed and leaves the fresh image no room.
-		const replayed: Context = { ...context, messages: [prompt, { ...gptTurn, model: hosted.id }, fresh] };
-		expect(imageData(clampProviderContextImageBytes(replayed, hosted))).toEqual([]);
+		expect(imageData(clampProviderContextImageBytes(context, gpt))).toEqual([]);
 	});
 
 	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {

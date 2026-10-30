@@ -290,6 +290,8 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	// content is sent.
 	let imageRoom: number | undefined;
 	if (bodyLimit !== undefined) {
+		// Factory Droid replays a turn on its upstream wire, and records the turn under that wire's api.
+		const replayApi = model.api === "factory-droid-agent" ? resolveFactoryDroidPolicy(model)?.wire : model.api;
 		const wire = context.messages.map(message => {
 			if (message.role === "toolResult") {
 				const metadata = message.providerMetadata;
@@ -315,7 +317,7 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 			const otherModelHistory =
 				message.role === "assistant" &&
 				(payload.type === "openaiResponsesHistory" || payload.type === "cursorHistory") &&
-				(message.api !== model.api || message.model !== model.id);
+				(message.api !== replayApi || message.model !== model.id);
 			return (owner !== undefined && owner !== model.provider) || otherModelHistory
 				? { ...message, content, providerPayload: undefined }
 				: { ...message, content };
