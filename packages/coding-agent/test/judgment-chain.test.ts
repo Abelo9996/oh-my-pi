@@ -5,7 +5,7 @@ import type { ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, ChoiceQuestion, ImageContent, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgJudgmentAttemptTimeoutMs, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChainJudge, hasNativeJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
@@ -117,7 +117,11 @@ function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): 
 	return registry;
 }
 
-function nativeLoopback(hangBody = false) {
+function nativeLoopback({
+	hangBody = false,
+	attemptTimeoutMs = 3_000,
+	delayPrimaryMs = 0,
+}: { hangBody?: boolean; attemptTimeoutMs?: number | null; delayPrimaryMs?: number } = {}) {
 	const attempted: string[] = [];
 	const started = Promise.withResolvers<void>();
 	const pending = Promise.withResolvers<Response>();
@@ -134,6 +138,10 @@ function nativeLoopback(hangBody = false) {
 				return hangBody
 					? new Response(new ReadableStream(), { headers: { "Content-Type": "application/json" } })
 					: pending.promise;
+			}
+			if (model === "loopback-primary" && delayPrimaryMs > 0) {
+				// Exercise the real HTTP/platform deadline, not a simulated timer.
+				await Bun.sleep(delayPrimaryMs);
 			}
 			return Response.json({
 				model,
@@ -160,6 +168,7 @@ function nativeLoopback(hangBody = false) {
 		modelRoles: { judge: "openrouter/loopback-primary" },
 		"retry.fallbackChains": { judge: ["openrouter/loopback-backup"] },
 	});
+	if (attemptTimeoutMs !== null) cfgJudgmentAttemptTimeoutMs.override(settings, attemptTimeoutMs);
 	const registry = makeRegistry(models, { openrouter: "loopback-key" });
 	return {
 		deps: { settings, registry, purpose: "test", sessionId: "loopback-session" },
@@ -903,8 +912,42 @@ describe("ChainJudge", () => {
 		expect(fixture.attempted.slice(-2)).toEqual(["loopback-primary", "loopback-primary"]);
 	}, 7_000);
 
+	it("does not share an anonymous judge's cooldown with unrelated callers using the same registry", async () => {
+		using fixture = nativeLoopback();
+		const deps = { ...fixture.deps, sessionId: undefined };
+		const judge = new ChainJudge(deps);
+		const request = { state: "locate the scheduler", questions: { level: TIER_QUESTION } };
+		const first = await judge.judge(request, { signal: AbortSignal.timeout(4_500) });
+		expect(first.model).toBe("loopback-backup");
+		fixture.recover();
+		const sameJudge = await judge.judge(request);
+		expect(sameJudge.model).toBe("loopback-backup");
+		const unrelated = await new ChainJudge(deps).judge(request);
+		expect(unrelated.model).toBe("loopback-primary");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup", "loopback-backup", "loopback-primary"]);
+	}, 7_000);
+
+	it("keeps a healthy native response taking over three seconds under the default deadline", async () => {
+		using fixture = nativeLoopback({ attemptTimeoutMs: null, delayPrimaryMs: 3_100 });
+		fixture.recover();
+		const result = await new ChainJudge(fixture.deps).judge({
+			state: "locate the scheduler",
+			questions: { level: TIER_QUESTION },
+		});
+		expect(result.model).toBe("loopback-primary");
+		expect(fixture.attempted).toEqual(["loopback-primary"]);
+	}, 7_000);
+
+	it.each([0, 1.5])("rejects an invalid native attempt deadline of %d before contacting a judge", timeoutMs => {
+		using fixture = nativeLoopback();
+		expect(() => cfgJudgmentAttemptTimeoutMs.override(fixture.deps.settings, timeoutMs)).toThrow(
+			"must be a positive safe integer",
+		);
+		expect(fixture.attempted).toEqual([]);
+	});
+
 	it("bounds native response bodies that stop arriving after the headers", async () => {
-		using fixture = nativeLoopback(true);
+		using fixture = nativeLoopback({ hangBody: true });
 		const result = await new ChainJudge(fixture.deps).judge(
 			{ state: "locate the scheduler", questions: { level: TIER_QUESTION } },
 			{ signal: AbortSignal.timeout(4_500) },

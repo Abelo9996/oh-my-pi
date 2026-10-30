@@ -467,6 +467,16 @@ Existing configs are migrated automatically when loaded. Retired backend selecto
 
 See [Models](./models.md) for the `models.yml` schema and custom-provider definitions.
 
+### Judgments
+
+| Key                         | Type   | Default | Notes |
+| --------------------------- | ------ | ------- | ----- |
+| `judgment.attemptTimeoutMs` | number | `10000` | Positive integer milliseconds allowed for one native judge candidate, including credentials, headers, retries, and response-body reading. Local image preparation is excluded; prompted and on-device judges are unchanged. |
+
+A timed-out candidate is cancelled before the next eligible judge is tried. Its route is skipped for 30 seconds in the same session and model registry; judges without a session ID keep their own cooldown instead of sharing one with unrelated callers. The caller's own cancellation always ends the judgment without failover.
+
+For a shorter interactive budget, run `omp config set judgment.attemptTimeoutMs 3000`. Raising the setting does not extend an enclosing tool or caller deadline.
+
 ### Advisor
 
 Advisors review primary turns on a configurable cadence and can inject advice. Enable them with `advisor.enabled`, `/advisor on`, or `--advisor`. For the default single advisor, `modelRoles.advisor` selects its model; when unset, resolution uses a configured `slow` role or the built-in slow-model priorities. An unavailable explicit advisor assignment does not silently select another model.

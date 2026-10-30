@@ -54,6 +54,7 @@ import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { type FittedImage, fitImage } from "../utils/image-resize";
 import type { ModelRegistry } from "../config/model-registry";
+import { cfgJudgmentAttemptTimeoutMs } from "../config/model-settings";
 import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -155,8 +156,6 @@ const LOCAL_REASONING_MAX_TOKENS = 1024;
  * credential-rotation round trip before reaching the next candidate.
  */
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
-/** Bound one native candidate's credentials, headers, retries, and response body. */
-const NATIVE_ATTEMPT_TIMEOUT_MS = 3_000;
 /** A transient hang should not consume the next judgment's budget in the same session. */
 const CANDIDATE_TIMEOUT_COOLDOWN_MS = 30_000;
 /** Registries can outlive sessions; retain only a bounded set of recent timed-out routes. */
@@ -382,6 +381,8 @@ export class ChainJudge implements Judge {
 	readonly #telemetry: AgentTelemetry | undefined;
 	/** Text-judgment candidates memoized per resolved chain; image candidates depend on each request's images. */
 	#candidates: { chain: RoleChainCandidate[]; list: RoleChainCandidate[] } | undefined;
+	/** Without a session id, cooldowns belong to this judge, not every anonymous caller of the registry. */
+	#anonymousTimeouts: Map<string, number> | undefined;
 
 	constructor(deps: JudgeDeps) {
 		this.#deps = deps;
@@ -445,6 +446,7 @@ export class ChainJudge implements Judge {
 	): Promise<T> {
 		const requiresImages = (request?.images?.length ?? 0) > 0;
 		const signal = options.signal;
+		const timeoutMs = cfgJudgmentAttemptTimeoutMs.get(this.#deps.settings);
 		let lastFailure: string | undefined;
 		let lastUnavailable: string | undefined;
 		let compatibleCandidate = false;
@@ -477,7 +479,7 @@ export class ChainJudge implements Judge {
 			try {
 				// Image fitting is local work, not evidence that a provider route has stalled.
 				const prepared = prepare ? await untilAborted(signal, () => prepare(candidate.model, kind)) : undefined;
-				timeout = kind === "native" ? AbortSignal.timeout(NATIVE_ATTEMPT_TIMEOUT_MS) : undefined;
+				timeout = kind === "native" ? AbortSignal.timeout(timeoutMs) : undefined;
 				const candidateSignal = timeout ? (signal ? AbortSignal.any([signal, timeout]) : timeout) : signal;
 				const judge = await untilAborted(candidateSignal, () => this.#createJudge(candidate, candidateSignal));
 				if (!judge) {
@@ -563,7 +565,10 @@ export class ChainJudge implements Judge {
 
 	#timeouts(): Map<string, number> {
 		const registry: RegistryWithRejections = this.#deps.registry;
-		const timeouts = (registry[kTimeouts] ??= new Map());
+		const timeouts =
+			this.#deps.sessionId === undefined
+				? (this.#anonymousTimeouts ??= new Map())
+				: (registry[kTimeouts] ??= new Map());
 		const now = Date.now();
 		for (const [identity, expiresAt] of timeouts) {
 			if (expiresAt <= now) timeouts.delete(identity);
