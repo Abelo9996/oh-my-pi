@@ -385,7 +385,15 @@ describe("session tree picker", () => {
 				label: value,
 			} as TreeSelectorNode,
 		];
-		const selector = new TreeSelectorComponent(nodes, null, 40, () => {}, () => {}, undefined, "all");
+		const selector = new TreeSelectorComponent(
+			nodes,
+			null,
+			40,
+			() => {},
+			() => {},
+			undefined,
+			"all",
+		);
 		const p = treeProps(selector);
 		for (const id of ["tool0", "marker0"]) {
 			const item = p.items?.find(item => item.id === id);
