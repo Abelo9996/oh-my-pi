@@ -675,7 +675,7 @@ describe("provider context image budgets", () => {
 		expect(imageData(clampProviderContextImageBytes(context, gpt))).toEqual([]);
 	});
 
-	it("charges tool arguments as the escaped string Factory's Responses route sends", async () => {
+	it("charges tool arguments as the escaped string Factory's Responses route sends, and as the object on Claude", async () => {
 		const gpt = factoryGptModel();
 		const fresh = "C".repeat(3_400_000);
 		const claudeTurn: AssistantMessage = {
@@ -718,6 +718,9 @@ describe("provider context image budgets", () => {
 		expect(Buffer.byteLength(await factoryRequestBody(gpt, clamped))).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 		// Kept, the image would have pushed the body past the route limit.
 		expect(Buffer.byteLength(await factoryRequestBody(gpt, context))).toBeGreaterThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		// Factory Claude sends the arguments as an object (two bytes a quote), which leaves the image room.
+		const claude = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, claude))).toEqual([fresh]);
 	});
 
 	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {

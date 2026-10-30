@@ -257,15 +257,15 @@ function newestImageMessages(
 }
 
 /**
- * `content` as measured for the request bytes around its images: each image's base64 emptied, and each tool call's
- * arguments as the JSON string the Responses wire sends, whose quotes and backslashes the body escapes again. The
- * Anthropic wire sends arguments as an object, so there the string slightly overcounts.
+ * `content` as measured for the request bytes around its images: each image's base64 emptied and, where
+ * `stringArguments` (the Responses wires), each tool call's arguments as the JSON string that wire sends, whose quotes
+ * and backslashes the body escapes again. The Anthropic wire sends arguments as an object.
  */
-function measuredContent<T extends { type: string }>(content: readonly T[]): readonly T[] {
-	if (!content.some(part => part.type === "image" || part.type === "toolCall")) return content;
+function measuredContent<T extends { type: string }>(content: readonly T[], stringArguments: boolean): readonly T[] {
+	if (!content.some(part => part.type === "image" || (stringArguments && part.type === "toolCall"))) return content;
 	return content.map(part => {
 		if (part.type === "image") return { ...part, data: "" };
-		if (part.type === "toolCall" && "arguments" in part)
+		if (stringArguments && part.type === "toolCall" && "arguments" in part)
 			return { ...part, arguments: JSON.stringify(part.arguments) };
 		return part;
 	});
@@ -301,13 +301,17 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	if (bodyLimit !== undefined) {
 		// Factory Droid replays a turn on its upstream wire, and records the turn under that wire's api.
 		const replayApi = model.api === "factory-droid-agent" ? resolveFactoryDroidPolicy(model)?.wire : model.api;
+		const stringArguments =
+			replayApi === "openai-responses" ||
+			replayApi === "azure-openai-responses" ||
+			replayApi === "openai-codex-responses";
 		const wire = context.messages.map(message => {
 			if (message.role === "toolResult") {
 				const metadata = message.providerMetadata;
 				if (!metadata || sentScreenshotBytes(message, metadataWire) === undefined) {
 					return {
 						...message,
-						content: measuredContent(message.content),
+						content: measuredContent(message.content, stringArguments),
 						details: undefined,
 						providerMetadata: undefined,
 					};
@@ -318,7 +322,9 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 						: { ...metadata.screenshot, image_url: "" };
 				return { ...message, details: undefined, content: [], providerMetadata: { ...metadata, screenshot } };
 			}
-			const content = Array.isArray(message.content) ? measuredContent(message.content) : message.content;
+			const content = Array.isArray(message.content)
+				? measuredContent(message.content, stringArguments)
+				: message.content;
 			const payload = message.providerPayload;
 			if (!payload) return { ...message, content };
 			const owner =
