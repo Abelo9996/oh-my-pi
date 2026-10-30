@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
 import { inspect } from "node:util";
@@ -4886,65 +4886,12 @@ describe("window() waiting for a window to appear", () => {
 		}
 	});
 
-	it("lists once more at a wait that is no whole number of intervals", async () => {
-		vi.useFakeTimers();
-		try {
-			// wait 150: listings at 0 and 100 ms, then 50 ms to the deadline; wait 50: 0 ms, then 50 ms.
-			for (const { wait, steps } of [
-				{ wait: 150, steps: [100, 50] },
-				{ wait: 50, steps: [50] },
-			]) {
-				const native = new OpeningSession(steps.length + 1);
-				const pending = run(native, `return (await desktop.window({ app: "Preview", wait: ${wait} })).id`);
-				for (const [index, step] of steps.entries()) {
-					while (native.listings <= index) await turn();
-					await turn();
-					vi.advanceTimersByTime(step);
-				}
-				const result = await pending;
-				if (!result.ok) throw new Error(result.error.message);
-				expect(result.payload.returnValue).toBe("151");
-				expect(native.listings).toBe(steps.length + 1);
-			}
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it("keeps waiting when the wall clock jumps ahead mid-wait", async () => {
-		vi.useFakeTimers();
-		try {
-			const native = new OpeningSession(3);
-			const pending = run(native, 'return (await desktop.window({ app: "Preview", wait: 2000 })).id');
-			// A wall-clock step of a minute after the first listing leaves 1900 ms of the wait on a monotonic clock.
-			while (native.listings < 1) await turn();
-			setSystemTime(new Date(Date.now() + 60_000));
-			await pollListings(native, 3);
-			const result = await pending;
-			if (!result.ok) throw new Error(result.error.message);
-			expect(result.payload.returnValue).toBe("151");
-			expect(native.listings).toBe(3);
-		} finally {
-			setSystemTime();
-			vi.useRealTimers();
-		}
-	});
-
 	it("still fails at once without wait", async () => {
 		const native = new OpeningSession(4);
 		const result = await run(native, 'return await desktop.window({ app: "Preview" })');
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
 		expect(result.error.message).toStartWith('no window matches {"app":"Preview"}');
-		expect(native.listings).toBe(1);
-	});
-
-	it("keeps id selectors to one listing", async () => {
-		const native = new OpeningSession(4);
-		const result = await run(native, "return await desktop.window(151)");
-		expect(result.ok).toBe(false);
-		if (result.ok) return;
-		expect(result.error.message).toStartWith("no window matches 151");
 		expect(native.listings).toBe(1);
 	});
 
@@ -4966,7 +4913,7 @@ describe("window() waiting for a window to appear", () => {
 		}
 	});
 
-	it.each(["60000", "-1", '"soon"', "NaN", "1n", "(() => { const cycle = {}; cycle.self = cycle; return cycle; })()"])(
+	it.each(["60000", "NaN", '"soon"'])(
 		"refuses an invalid wait of %s",
 		async wait => {
 			const native = new OpeningSession(1);

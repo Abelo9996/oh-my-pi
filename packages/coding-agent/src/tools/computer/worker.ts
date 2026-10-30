@@ -348,13 +348,7 @@ function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
 function windowWait(wait: unknown): number {
 	if (wait === undefined) return 0;
 	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
-		let got: string;
-		try {
-			got = JSON.stringify(wait) ?? describeArgument(wait);
-		} catch {
-			// BigInt and cyclic values do not serialize; the type still tells the caller what it passed.
-			got = describeArgument(wait);
-		}
+		const got = typeof wait === "number" ? String(wait) : describeArgument(wait);
 		throw new ToolError(`window({ wait }) takes milliseconds from 0 to ${MAX_WINDOW_WAIT_MS}; got ${got}`);
 	}
 	return wait;
@@ -1852,17 +1846,17 @@ export class ComputerWorkerCore {
 			},
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
+				const id = typeof selector === "string" || typeof selector === "number" ? String(selector) : undefined;
 				const wait = typeof selector === "object" && selector !== null ? windowWait(selector.wait) : 0;
-				// Monotonic, like the run deadline: a wall-clock step (NTP, a manual change) must not end or stretch the wait.
+				// Monotonic, like the run deadline: a wall-clock step must not end or stretch the wait.
 				const deadline = performance.now() + wait;
 				let windows: DesktopWindow[];
 				let matches: DesktopWindow[];
 				for (;;) {
 					windows = await nativeCall(signal, () => session.listWindows());
-					matches =
-						typeof selector === "string" || typeof selector === "number"
-							? windows.filter(window => window.id === String(selector))
-							: windows.filter(window => matchesFilter(window, selector));
+					matches = windows.filter(window =>
+						id !== undefined ? window.id === id : matchesFilter(window, selector as WindowFilter),
+					);
 					// The last interval sleeps only what is left, so the final listing lands at the deadline.
 					const remaining = deadline - performance.now();
 					if (matches.length > 0 || remaining <= 0) break;
