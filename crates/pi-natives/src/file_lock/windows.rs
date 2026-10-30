@@ -159,10 +159,16 @@ pub fn is_held(path: &str) -> io::Result<bool> {
 			return Ok(false);
 		}
 		nt_result(status)?;
+		// Scan no further than the bytes this call wrote (and the buffer), so a
+		// missing terminator can never expose a previous page's stale entries.
+		let written = usize::try_from(returned)
+			.unwrap_or(usize::MAX)
+			.min(buffer.len() * size_of::<u64>());
 		let entries = buffer.as_ptr().cast::<ObjectDirectoryInformation>();
-		for index in 0.. {
-			// SAFETY: the call filled `buffer` with entries ending in an all-zero
-			// one, and their names point into `buffer`, which is still borrowed.
+		for index in 0..written / size_of::<ObjectDirectoryInformation>() {
+			// SAFETY: `index` addresses an entry inside the `written` bytes this
+			// call filled; their names point into `buffer`, which is still
+			// borrowed.
 			let entry = unsafe { &*entries.add(index) };
 			if entry.name.Buffer.is_null() {
 				break;

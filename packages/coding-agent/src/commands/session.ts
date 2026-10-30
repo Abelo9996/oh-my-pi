@@ -99,7 +99,9 @@ export default class Session extends Command {
 			if (flags.cwd !== undefined || flags.to !== undefined) {
 				throw new CliUsageError(`--cwd and --to do not apply to lease. Usage: ${usage}`);
 			}
-			printSessionLeases(argv.slice(1), flags.json === true);
+			const sessionIds = argv.slice(1);
+			if (sessionIds.length === 0) throw new CliUsageError(`Missing session id. Usage: ${usage}`);
+			printSessionLeases(sessionIds, flags.json === true);
 			return;
 		}
 		if (flags.json) throw new CliUsageError(`--json only applies to lease. Usage: ${usage}`);

@@ -99,7 +99,6 @@ describe("session lease probe", () => {
 
 		const owner = await spawnOwner(tempDir, sessionId);
 		expect(isSessionLeaseHeld(sessionId)).toBe(true);
-		expect(isSessionLeaseHeld(sessionId)).toBe(true);
 
 		owner.stdin.end();
 		await owner.exited;
