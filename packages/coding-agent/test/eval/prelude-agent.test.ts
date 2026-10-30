@@ -10,6 +10,8 @@ import {
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { AgentRegistry } from "../../src/registry/agent-registry";
+import type { AgentSession } from "../../src/session/agent-session";
 import { createHelpers } from "../../src/eval/js/shared/helpers";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
 import { callSessionTool } from "../../src/eval/js/tool-bridge";
@@ -307,7 +309,10 @@ describe("eval js read() URI delegation", () => {
 });
 
 describe("eval js output() options (issue #17455)", () => {
-	afterEach(() => resetRegisteredArtifactDirsForTests());
+	afterEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		resetRegisteredArtifactDirsForTests();
+	});
 
 	// Over the 50 KB the read tool pages agent:// at, so only a verbatim read reaches the tail.
 	const rows = Array.from({ length: 4000 }, (_, i) => `ROW ${i + 1} ${"x".repeat(20)}`);
@@ -321,6 +326,7 @@ describe("eval js output() options (issue #17455)", () => {
 			JSON.stringify({ files: [{ path: "a.ts" }, { path: "b.ts" }] }),
 		);
 		await Bun.write(path.join(artifacts, "Shell.md"), "\x1b[31mred\x1b[0m plain\n");
+		await Bun.write(path.join(artifacts, "Wide.md"), `${"w".repeat(60_000)}\nlast\n`);
 		registerArtifactsDir(artifacts);
 		const session: ToolSession = {
 			cwd: tmp.path(),
@@ -350,6 +356,7 @@ describe("eval js output() options (issue #17455)", () => {
 			`${rows[3989]}\n${rows[3990]}`,
 		);
 		expect(await vm.runInContext(`output("Scout")`, sandbox)).toBe(`${rows.join("\n")}\n`);
+		expect(await vm.runInContext(`output("Wide", { offset: 2, limit: 1 })`, sandbox)).toBe("last");
 		expect(await vm.runInContext(`output("Scout", "Shell", { limit: 1 })`, sandbox)).toEqual([
 			{ id: "Scout", content: rows[0] },
 			{ id: "Shell", content: "\x1b[31mred\x1b[0m plain" },
@@ -386,5 +393,27 @@ describe("eval js output() options (issue #17455)", () => {
 			content: rows[1],
 			range: { start_line: 2, end_line: 2, total_lines: 4000 },
 		});
+	});
+
+	it("marks published output as a previous run while the agent streams a follow-up", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-output-superseded-");
+		const sandbox = await loadOutputPrelude(tmp);
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Scout",
+			displayName: "Scout",
+			kind: "sub",
+			session: { isStreaming: true } as AgentSession,
+			status: "running",
+		});
+
+		const superseded = await vm.runInContext(`output("Scout")`, sandbox);
+		expect(superseded).toStartWith("> `Scout` is running a newer turn.");
+		expect(superseded).toContain("PREVIOUS run");
+		expect(superseded).toContain(rows[0]);
+		expect(await vm.runInContext(`output("Scout", { limit: 1 })`, sandbox)).toContain("PREVIOUS run");
+
+		registry.setStatus("Scout", "idle");
+		expect(await vm.runInContext(`output("Scout")`, sandbox)).toBe(`${rows.join("\n")}\n`);
 	});
 });

@@ -148,15 +148,21 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 		return current;
 	};
-	// The `read` tool pages and annotates `agent://<id>`, so a bounded raw read only locates the published
-	// `<id>.md`, which is then read verbatim. An id without one (a running agent's progress view, an
-	// extension's `read`) answers with the tool's own text.
+	// A bounded raw read locates a published `<id>.md`, which the helper can read verbatim past the
+	// read tool's page limit. A protocol resource can also name that file while prepending a warning
+	// (for a superseded run); only bypass the protocol when the preview matches the file's first line.
 	const outputSource = async id => {
 		const path = `agent://${id}`;
 		const located = await globalThis.__omp_call_tool__("read", { path: `${path}:raw:1-1` });
 		const filePath = located?.details?.resolvedPath;
 		const content = typeof filePath === "string" ? await callHelper("read", filePath) : undefined;
-		if (content !== undefined) return { path: filePath, content };
+		if (content !== undefined) {
+			const lineEnd = content.indexOf("\n");
+			const prefixLength = Math.min(lineEnd < 0 ? content.length : lineEnd, 100);
+			if (prefixLength > 0 ? located?.text?.startsWith(content.slice(0, prefixLength)) : located?.text === "") {
+				return { path: filePath, content };
+			}
+		}
 		return { path, content: await readToolText(path) };
 	};
 	// One output's selection; options, results and errors match Python `output()` in `eval/py/prelude.py`.
