@@ -293,7 +293,7 @@ export class JobsSheet implements Component {
 			this.#held = { job: selected, detail, agents: snapshot.agents ?? [] };
 		}
 		const owned = selected?.ownerId === undefined || selected.ownerId === rootId;
-		return { rows, jobs, selected, cancellable: this.#source.cancel !== undefined && owned && !evicted };
+		return { rows, jobs, selected, cancellable: this.#source.cancel !== undefined && owned };
 	}
 
 	/** The job's detail from the source, else the last one seen while it was held. */

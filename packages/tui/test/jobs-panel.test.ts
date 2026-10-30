@@ -323,6 +323,30 @@ describe("JobsSheet", () => {
 			]);
 		});
 
+		it("keeps an evicted subagent job under its subagent after the session drops both", () => {
+			const mainBash = job("main-bash", "Main");
+			let snapshot: JobsPanelSnapshot = {
+				rootId: "Main",
+				agents: [{ id: "Gone", parentId: "Main" }],
+				running: [mainBash],
+				recent: [job("gone-done", "Gone", { status: "completed", endTime: NOW })],
+			};
+			const sheet = new JobsSheet({ load: () => snapshot, inspect: () => undefined, close: vi.fn() });
+			sheet.handleNativeEvent({ type: "select", key: "jobs", item: "gone-done" });
+			sheet.render(120);
+
+			snapshot = { rootId: "Main", agents: [], running: [mainBash], recent: [] };
+			const rows = sheet
+				.render(120)
+				.slice(1, 4)
+				.map(line => line.trimEnd());
+			expect(rows).toEqual([
+				"  Gone",
+				expect.stringMatching(/^> └─ completed {2}bash \S+ {2}gone-done$/),
+				expect.stringMatching(/^ {2}running {2}bash \S+ {2}main-bash$/),
+			]);
+		});
+
 		it("cancels only jobs the root owns", () => {
 			const { sheet, source } = treeSheet();
 			sheet.handleInput(DOWN); // task-sub, owned by Audit
