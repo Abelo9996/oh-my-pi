@@ -471,11 +471,11 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
 
 | Key                         | Type   | Default | Notes |
 | --------------------------- | ------ | ------- | ----- |
-| `judgment.attemptTimeoutMs` | number | `10000` | Positive integer milliseconds allowed for one native judge candidate, including credentials, headers, retries, and response-body reading. Local image preparation is excluded; prompted and on-device judges are unchanged. |
+| `judgment.attemptTimeoutMs` | number | `3000` | Positive integer milliseconds allowed for one native judge candidate, including credentials, headers, retries, and response-body reading. Local image preparation is excluded; prompted and on-device judges are unchanged. |
 
 A timed-out candidate is cancelled before the next eligible judge is tried. Its route is skipped for 30 seconds in the same session and model registry; judges without a session ID keep their own cooldown instead of sharing one with unrelated callers. The caller's own cancellation always ends the judgment without failover.
 
-For a shorter interactive budget, run `omp config set judgment.attemptTimeoutMs 3000`. Raising the setting does not extend an enclosing tool or caller deadline.
+The 3-second default leaves `find`'s 20-second budget room to reach a second and third candidate. A slow but healthy candidate can time out and fall through too; the cooldown does not remove it from the chain. For consistently slower judges, raise the budget with `omp config set judgment.attemptTimeoutMs 10000`. Raising the setting does not extend an enclosing tool or caller deadline.
 
 ### Advisor
 

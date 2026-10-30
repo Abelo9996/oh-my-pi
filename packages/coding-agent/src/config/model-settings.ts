@@ -112,7 +112,7 @@ export const cfgModelRoles = register({ id: "modelRoles", type: "record", defaul
 export const cfgJudgmentAttemptTimeoutMs = register({
 	id: "judgment.attemptTimeoutMs",
 	type: "number",
-	default: 10_000,
+	default: 3_000,
 	validate: raw => {
 		if (raw === undefined || raw === null) return;
 		if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0) {
