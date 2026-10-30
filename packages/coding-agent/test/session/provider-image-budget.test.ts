@@ -183,11 +183,16 @@ function computerTurn(index: number, screenshot: string, shown: ImageContent[] =
 	];
 }
 
+/** A model on Factory Droid's roster, routed on its registry wire. */
+function factoryModel(id: string) {
+	const entry = factoryDroidRegistry().find(model => model.spec.id === id);
+	if (!entry) throw new Error(`Factory registry lost ${id}`);
+	return buildModel(buildFactoryDroidModel(entry));
+}
+
 /** Factory GPT: its requests take the Responses wire, and the model has no native computer use. */
 function factoryGptModel() {
-	const entry = factoryDroidRegistry().find(model => model.spec.id === "gpt-5.6-terra");
-	if (!entry) throw new Error("Factory registry lost gpt-5.6-terra");
-	return buildModel(buildFactoryDroidModel(entry));
+	return factoryModel("gpt-5.6-terra");
 }
 
 /** The request body `context` produces on `model`'s Factory route, as sent. */
@@ -721,6 +726,125 @@ describe("provider context image budgets", () => {
 		// Factory Claude sends the arguments as an object (two bytes a quote), which leaves the image room.
 		const claude = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
 		expect(imageData(clampProviderContextImageBytes(context, claude))).toEqual([fresh]);
+	});
+
+	it("charges tool arguments as the escaped string Factory's Chat Completions route sends", async () => {
+		const kimi = factoryModel("kimi-k3");
+		const fresh = "C".repeat(3_400_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("x".repeat(700_000))], timestamp: 0 },
+				{
+					role: "assistant",
+					// A quote costs two bytes in the arguments object and four once sent as a JSON string inside JSON.
+					content: [
+						{ type: "toolCall", id: "call_1", name: "write", arguments: { content: '"'.repeat(150_000) } },
+					],
+					api: kimi.api,
+					provider: kimi.provider,
+					model: kimi.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "write",
+					content: [text("ok")],
+					isError: false,
+					timestamp: 2,
+				},
+				{ role: "user", content: [text("look"), image(fresh)], timestamp: 3 },
+			],
+		};
+		const clamped = clampProviderContextImageBytes(context, kimi);
+		expect(imageData(clamped)).toEqual([]);
+		// Kept, the image would have pushed the body past the route limit.
+		expect(Buffer.byteLength(await factoryRequestBody(kimi, context))).toBeGreaterThan(
+			FACTORY_DROID_ROUTE_BODY_LIMIT,
+		);
+	});
+
+	it("charges a same-model Factory Responses turn once, as native items or rebuilt content", async () => {
+		const gpt = factoryGptModel();
+		const answer = "y".repeat(600_000);
+		const fresh = "C".repeat(3_400_000);
+		const gptTurn: AssistantMessage = {
+			role: "assistant",
+			content: [text(answer)],
+			api: "openai-responses",
+			provider: gpt.provider,
+			model: gpt.id,
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: gpt.provider,
+				items: [
+					{
+						type: "message",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: answer, annotations: [] }],
+					},
+				],
+			},
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("write it")], timestamp: 0 },
+				gptTurn,
+				{ role: "user", content: [text("look"), image(fresh)], timestamp: 2 },
+			],
+		};
+		expect(clampProviderContextImageBytes(context, gpt)).toBe(context);
+		const body = await factoryRequestBody(gpt, context);
+		expect(body.split(answer)).toHaveLength(2);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
+	it("evicts more computer screenshots when the text the evicted ones send crowds the rest", async () => {
+		// Each result's 20 KB of text stays unsent while the route sends its metadata screenshot; evicted, the result
+		// goes out as a note with up to 16,000 characters of that text.
+		const screenshot = "A".repeat(20_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("x".repeat(1_000_000))], timestamp: 0 },
+				...Array.from({ length: 200 }, (_, index) => {
+					const [call, result] = computerTurn(index, screenshot, []);
+					if (result.role !== "toolResult") throw new Error("computerTurn lost its result");
+					return [call, { ...result, content: [text(`result-${index}${"z".repeat(20_000)}`)] }];
+				}).flat(),
+			],
+		};
+		const hosted = factoryGptModel();
+		const clamped = clampProviderContextImageBytes(context, hosted);
+		const body = await factoryRequestBody(hosted, clamped);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		// The newest screenshots stay.
+		expect(body).toContain(`"[Previous computer result; call_id=call_199]`);
 	});
 
 	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {
