@@ -50,7 +50,7 @@ pub fn is_held(path: &str) -> io::Result<bool> {
 	if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut query) } == -1 {
 		return Err(io::Error::last_os_error());
 	}
-	Ok(query.l_type != libc::F_UNLCK as _)
+	Ok(query.l_type != libc::F_UNLCK as libc::c_short)
 }
 
 /// Android runs a Linux kernel, which keeps `flock` locks apart from `fcntl`
