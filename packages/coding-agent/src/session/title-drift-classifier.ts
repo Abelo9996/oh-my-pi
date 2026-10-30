@@ -7,6 +7,7 @@
  */
 import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { judgeQuestions, type Model } from "@oh-my-pi/pi-ai";
+import { redactSensitiveCredentials } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -71,9 +72,12 @@ export async function classifyTitleDrift(
 			cache: sharedJudgmentCache(),
 			costGate: deps.costGate,
 		});
-		const title = splitCardTitle(check.title)?.title ?? check.title;
+		// Native judges send `state` verbatim, past the message transforms that redact chat requests, so
+		// credentials are redacted here under the caller's `withCredentialRedaction` scope.
+		const title = redactSensitiveCredentials(splitCardTitle(check.title)?.title ?? check.title);
+		const recent = check.recent.map(turn => ({ role: turn.role, text: redactSensitiveCredentials(turn.text) }));
 		const { answers } = await judge.judge(
-			{ state: { title, recent: check.recent }, questions: { fits: QUESTIONS.fits } },
+			{ state: { title, recent }, questions: { fits: QUESTIONS.fits } },
 			{ signal: deps.signal },
 		);
 		return answers.fits.noul < TITLE_FITS_THRESHOLD;

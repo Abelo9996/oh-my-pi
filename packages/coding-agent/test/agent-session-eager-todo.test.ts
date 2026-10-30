@@ -11,6 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { CURRENT_SESSION_VERSION, type SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as titleDriftClassifier from "@oh-my-pi/pi-coding-agent/session/title-drift-classifier";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -533,6 +534,79 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(driftSpy).not.toHaveBeenCalled();
 		expect(completeSimpleMock).not.toHaveBeenCalled();
 		expect(session.sessionManager.getSessionName()).toBe("Manual parser title");
+	});
+
+	it("never checks a title named before sessions recorded who set their title", async () => {
+		const file = path.join(tempDir.path(), "legacy.jsonl");
+		const header: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: "legacy-session",
+			title: "Manual parser title",
+			timestamp: "2026-01-01T00:00:00.000Z",
+			cwd: tempDir.path(),
+		};
+		await Bun.write(file, `${JSON.stringify(header)}\n`);
+		const sessionManager = await SessionManager.open(file);
+		await recreateSession({ "title.refreshAfterPrompts": 1 }, { autoTitle: true, sessionManager });
+		expect(session.sessionManager.titleSource).toBeUndefined();
+		const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+
+		await session.prompt("now draft the release notes for 2.0");
+
+		expect(driftSpy).not.toHaveBeenCalled();
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe("Manual parser title");
+	});
+
+	it("does not regenerate a title the user renames while the judge is deciding", async () => {
+		await recreateSession({ "title.refreshAfterPrompts": 1, "title.icons": "boring" }, { autoTitle: true });
+		await session.setSessionName("Fix parser recovery", "auto");
+		const verdict = Promise.withResolvers<boolean | undefined>();
+		const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockReturnValue(verdict.promise);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
+		} as never);
+
+		await session.prompt("now draft the release notes for 2.0");
+		expect(driftSpy).toHaveBeenCalledTimes(1);
+		await session.setSessionName("Release notes", "user");
+		verdict.resolve(true);
+		// A full run after the verdict gives a regeneration started by it time to reach the title model.
+		await session.prompt("publish the release notes to the changelog");
+
+		expect(driftSpy).toHaveBeenCalledTimes(1);
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe("Release notes");
+	});
+
+	it("checks the title again when another check comes due while the judge is deciding", async () => {
+		await recreateSession({ "title.refreshAfterPrompts": 1, "title.icons": "boring" }, { autoTitle: true });
+		await session.setSessionName("Fix parser recovery", "auto");
+		const firstVerdict = Promise.withResolvers<boolean | undefined>();
+		const driftSpy = vi
+			.spyOn(titleDriftClassifier, "classifyTitleDrift")
+			.mockReturnValueOnce(firstVerdict.promise)
+			.mockResolvedValue(true);
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
+		} as never);
+
+		await session.prompt("add a regression test for parser recovery");
+		await session.prompt("now draft the release notes for 2.0");
+		expect(driftSpy).toHaveBeenCalledTimes(1);
+
+		const titleApplied = waitForSessionName("Ship release notes");
+		firstVerdict.resolve(false);
+		await titleApplied;
+		expect(driftSpy).toHaveBeenCalledTimes(2);
+		expect(driftSpy.mock.calls[1]?.[0].recent).toContainEqual({
+			role: "user",
+			text: "now draft the release notes for 2.0",
+		});
 	});
 
 	it("forwards the configured title system prompt to the replan refresh path", async () => {

@@ -1058,6 +1058,8 @@ export class AgentSession implements SettingsScope {
 	/** Serialized tail of pooled-turn yield contract transitions; never rejects. */
 	#workPoolYieldTransition: Promise<void> = Promise.resolve();
 	#titleRefreshInFlight: Promise<void> | undefined = undefined;
+	/** A title refresh that came due while another ran; served when that one completes. */
+	#pendingTitleRefresh: { sessionId: string; trigger: SessionNameTrigger } | undefined = undefined;
 	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
 	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
 	 *  the session cwd changes. */
@@ -1072,7 +1074,7 @@ export class AgentSession implements SettingsScope {
 	#deferredTitle: { sessionId: string; declined: boolean; replied: boolean; words: number } | undefined;
 	/** What the next automatic title names (see {@link #maybeStartTitle}). */
 	#titleInput: TitleInput | undefined;
-	/** Operator prompts since the title last changed, toward `title.refreshAfterPrompts`. */
+	/** Operator prompts since the title was last refreshed or judged to fit, toward `title.refreshAfterPrompts`. */
 	#titleDrift: { sessionId: string; prompts: number } | undefined;
 	#titleProviderSessionId: string | undefined;
 	#titleProviderParentSessionId: string | undefined;
@@ -10750,8 +10752,8 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Retitle a generated title from recent conversation: after a todo-init
 	 * replan, or once `title.refreshAfterPrompts` operator prompts have run since
-	 * it last changed and the judge finds it no longer fits. A user-set title is
-	 * never replaced.
+	 * it was last refreshed and the judge finds it no longer fits. A title the
+	 * user set is never replaced (see {@link #titleRefreshable}).
 	 */
 	#scheduleTitleRefresh(trigger: SessionNameTrigger): void {
 		if ($env.PI_NO_TITLE) return;
@@ -10762,15 +10764,21 @@ export class AgentSession implements SettingsScope {
 		// session name — so keep the refresh there and only skip subagents when
 		// no focusable UI exists (print/RPC/ACP/eval/SDK/CI).
 		if (this.#agentKind === "sub" && !isInteractiveHost()) return;
-		if (this.#titleRefreshInFlight) return;
+		const sessionId = this.sessionManager.getSessionId();
+		if (this.#titleRefreshInFlight) {
+			// Served once the running refresh completes; a pending replan outranks a prompt-count check.
+			const pending = this.#pendingTitleRefresh;
+			if (pending?.sessionId !== sessionId || pending.trigger !== "replan") {
+				this.#pendingTitleRefresh = { sessionId, trigger };
+			}
+			return;
+		}
 		// The first title is still being named: a refreshed title landing first would
 		// make that request, which carries the card, drop its reply.
-		if (this.#titleGenerationInFlightFor === this.sessionManager.getSessionId()) return;
-		if (!this.#titleRefreshEnabled(trigger)) return;
-		if (this.sessionManager.titleSource === "user") return;
+		if (this.#titleGenerationInFlightFor === sessionId) return;
+		if (!this.#titleRefreshable(sessionId, trigger)) return;
 		const context = this.#buildReplanTitleContext();
 		if (!context) return;
-		const sessionId = this.sessionManager.getSessionId();
 		// Prompts counted so far; a completed refresh settles only these, so prompts sent while it runs still count.
 		const countedPrompts = this.#titleDrift?.sessionId === sessionId ? this.#titleDrift.prompts : 0;
 		const recent = trigger === "drift" ? buildTitleDriftTurns(this.agent.state.messages) : undefined;
@@ -10783,11 +10791,33 @@ export class AgentSession implements SettingsScope {
 				});
 			})
 			.finally(() => {
-				if (this.#titleRefreshInFlight === refresh) {
-					this.#titleRefreshInFlight = undefined;
-				}
+				if (this.#titleRefreshInFlight !== refresh) return;
+				this.#titleRefreshInFlight = undefined;
+				this.#servePendingTitleRefresh();
 			});
 		this.#titleRefreshInFlight = refresh;
+	}
+
+	/** Run the refresh that came due while another ran, if its session is still current. */
+	#servePendingTitleRefresh(): void {
+		const pending = this.#pendingTitleRefresh;
+		this.#pendingTitleRefresh = undefined;
+		if (!pending || this.#isDisposed || pending.sessionId !== this.sessionManager.getSessionId()) return;
+		// A prompt-count check re-reads the count, which the completed refresh may have settled.
+		if (pending.trigger === "drift") this.#maybeRefreshTitleAfterPrompts();
+		else this.#scheduleTitleRefresh(pending.trigger);
+	}
+
+	/**
+	 * Whether a refresh may still replace the title of `sessionId`: it is the
+	 * current session, the trigger's setting is on, and the session is unnamed or
+	 * its title is known to be generated. A title the user set, including one
+	 * named before title sources were recorded, is never replaced.
+	 */
+	#titleRefreshable(sessionId: string, trigger: SessionNameTrigger): boolean {
+		if (this.sessionManager.getSessionId() !== sessionId) return false;
+		if (!this.#titleRefreshEnabled(trigger)) return false;
+		return !this.sessionName || this.sessionManager.titleSource === "auto";
 	}
 
 	#titleRefreshEnabled(trigger: SessionNameTrigger): boolean {
@@ -11151,14 +11181,14 @@ export class AgentSession implements SettingsScope {
 				this.#settleTitleDrift(sessionId, countedPrompts);
 				return;
 			}
+			// A rename, session switch, or setting change while the judge ran leaves nothing to regenerate.
+			if (!this.#titleRefreshable(sessionId, trigger)) return;
 		}
 		const retitled = await this.#retitle(context);
 		if (!retitled) return;
 		// A session first named without a card (a subagent, a title-model title) gets one here.
 		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled) : retitled;
-		if (this.sessionManager.getSessionId() !== sessionId) return;
-		if (!this.#titleRefreshEnabled(trigger)) return;
-		if (this.sessionManager.titleSource === "user") return;
+		if (!this.#titleRefreshable(sessionId, trigger)) return;
 		if (title !== this.sessionName) {
 			const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 			if (!(await setSessionName.call(this.sessionManager, title, "auto", trigger))) return;

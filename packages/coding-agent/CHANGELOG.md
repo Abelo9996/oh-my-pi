@@ -5,7 +5,7 @@
 ### Added
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
-- Added `title.refreshAfterPrompts`: after that many operator prompts since a generated session title last changed (default 5, `0` disables), the `judge` model role checks whether the title still fits the latest conversation and the title is regenerated only when it does not, so titles follow a session that moves to new work without a todo replan. User-set titles are never replaced ([#17443](https://github.com/can1357/oh-my-pi/pull/17443) by [@wolfiesch](https://github.com/wolfiesch))
+- Added `title.refreshAfterPrompts`: after that many operator prompts since a generated session title was last refreshed or judged to fit (default 5, `0` disables), the `judge` model role checks whether the title still fits the latest conversation and the title is regenerated only when it does not, so titles follow a session that moves to new work without a todo replan. A title the user set is never checked or replaced, including one named before sessions recorded who set their title ([#17443](https://github.com/can1357/oh-my-pi/pull/17443) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 

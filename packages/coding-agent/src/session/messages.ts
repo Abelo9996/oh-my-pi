@@ -202,7 +202,8 @@ export type TitleDriftTurn = { role: "user" | "assistant"; text: string };
  * with the session title: operator prompts and assistant reply text (never
  * thinking), newest turns kept until {@link TITLE_DRIFT_CONTEXT_CHARS}. The
  * latest operator prompt leads when the window holds none, since the notes of a
- * long tool loop rarely say what was asked.
+ * long tool loop rarely say what was asked; it displaces the oldest turns it
+ * would push past the window.
  */
 export function buildTitleDriftTurns(messages: readonly AgentMessage[]): TitleDriftTurn[] {
 	const turns: TitleDriftTurn[] = [];
@@ -218,8 +219,13 @@ export function buildTitleDriftTurns(messages: readonly AgentMessage[]): TitleDr
 	turns.reverse();
 	if (turns.some(turn => turn.role === "user")) return turns;
 	for (; i >= 0; i--) {
-		const turn = titleDriftTurn(messages[i]);
-		if (turn?.role === "user") return [turn, ...turns];
+		const anchor = titleDriftTurn(messages[i]);
+		if (anchor?.role !== "user") continue;
+		let start = 0;
+		while (start < turns.length - 1 && chars + anchor.text.length > TITLE_DRIFT_CONTEXT_CHARS) {
+			chars -= turns[start++]!.text.length;
+		}
+		return [anchor, ...turns.slice(start)];
 	}
 	return turns;
 }

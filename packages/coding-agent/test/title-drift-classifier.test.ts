@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { classifyTitleDrift } from "@oh-my-pi/pi-coding-agent/session/title-drift-classifier";
@@ -78,6 +79,34 @@ describe("classifyTitleDrift", () => {
 			{ title: "Draft release notes", recent },
 		]);
 		expect(completeSimpleMock).not.toHaveBeenCalled();
+	});
+
+	it("redacts credentials from the judged conversation under the session's redaction policy", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([jev], { typesafe: "ts-key" });
+		const token = `ghp_${"aB1".repeat(12)}`;
+		const bodies: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				bodies.push(String(init?.body));
+				return Response.json({
+					model: "jev-preview",
+					answers: { fits: { type: "noul", noul: 0.9 } },
+					usage: { input_tokens: 10, output_tokens: 1 },
+				});
+			}),
+		);
+
+		await withCredentialRedaction(true, () =>
+			classifyTitleDrift(
+				{ title: "Rotate the deploy token", recent: [{ role: "user", text: `rotate ${token} for deploys` }] },
+				{ settings, registry, sessionId: "session-redacted" },
+			),
+		);
+
+		expect(bodies).toHaveLength(1);
+		expect(bodies[0]).not.toContain(token);
+		expect(bodies[0]).toContain("[github_token_redacted]");
 	});
 
 	it("returns undefined instead of throwing when every judge fails", async () => {

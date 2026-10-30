@@ -507,7 +507,7 @@ describe("buildTitleDriftTurns", () => {
 		]);
 	});
 
-	it("leads with the latest operator prompt when a long tool loop fills the window", () => {
+	it("leads with the latest operator prompt, still within the window, when a long tool loop fills it", () => {
 		const turns = buildTitleDriftTurns([
 			userMessage("fix parser recovery", 1),
 			userMessage("now draft the release notes", 2),
@@ -517,8 +517,9 @@ describe("buildTitleDriftTurns", () => {
 			settledAssistant("s".repeat(1000)),
 		]);
 
-		expect(turns.map(turn => turn.text[0])).toEqual(["n", "q", "r", "s"]);
+		expect(turns.map(turn => turn.text[0])).toEqual(["n", "r", "s"]);
 		expect(turns[0]).toEqual({ role: "user", text: "now draft the release notes" });
+		expect(turns.reduce((chars, turn) => chars + turn.text.length, 0)).toBeLessThanOrEqual(3000);
 	});
 });
 
