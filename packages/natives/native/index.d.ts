@@ -252,6 +252,17 @@ export declare class EditStore {
 export declare class FileLock {
   /** Try to acquire `path` without blocking. */
   static tryAcquire(path: string): FileLock
+  /**
+   * Whether any handle, in any process including this one, holds `path`.
+   *
+   * Observes without locking anything: a `connect(2)` probe on Linux, an
+   * `F_GETLK` query on other Unix platforms, opening the existing mutex on
+   * Windows. Only on Windows can it affect an acquirer: while the probe's
+   * handle is open it keeps a just-released mutex alive, so a `tryAcquire()`
+   * racing that release fails. Acquirers that must not lose such a race retry
+   * briefly.
+   */
+  static isHeld(path: string): boolean
   /** Whether this handle owns the requested lock. */
   get acquired(): boolean
   /** Release this handle's ownership without affecting a successor. */

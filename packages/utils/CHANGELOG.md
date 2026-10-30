@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it
+
 ## [18.14.0] - 2026-10-29
 
 ### Added

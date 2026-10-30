@@ -44,6 +44,17 @@ export function tryAcquireFileLock(filePath: string): FileLockHandle | null {
 	return tryAcquireLock(getLockPath(filePath));
 }
 
+/**
+ * Whether any holder, including this process, owns the lease, observed without
+ * taking it. Only on Windows can the probe affect an acquirer: its handle keeps
+ * a just-released mutex alive for an instant, so a `tryAcquireFileLock` racing
+ * that release fails. Acquirers that must not lose that race retry briefly.
+ * Throws when the lock cannot be probed.
+ */
+export function isFileLockHeld(filePath: string): boolean {
+	return NativeFileLock.isHeld(getLockPath(filePath));
+}
+
 /** Acquire an exclusive lease; callers must release it when their operation ends. */
 export async function acquireFileLock(filePath: string, options: FileLockOptions = {}): Promise<FileLockHandle> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };

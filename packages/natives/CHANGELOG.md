@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `FileLock.isHeld(path)`, which reports whether a lock is held without acquiring it
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes

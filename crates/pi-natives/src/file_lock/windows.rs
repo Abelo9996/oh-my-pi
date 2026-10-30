@@ -5,8 +5,10 @@ use std::{
 };
 
 use windows_sys::Win32::{
-	Foundation::{ERROR_ALREADY_EXISTS, GetLastError, SetLastError},
-	System::Threading::{CreateMutexExW, SYNCHRONIZATION_SYNCHRONIZE},
+	Foundation::{
+		ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError, SetLastError,
+	},
+	System::Threading::{CreateMutexExW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE},
 };
 
 /// Windows lease held by the exclusive lifetime of a named kernel object.
@@ -14,12 +16,15 @@ pub struct PlatformFileLock {
 	handle: Option<OwnedHandle>,
 }
 
-pub fn try_acquire(path: &str) -> io::Result<Option<PlatformFileLock>> {
-	let name = super::memory_lock_name(path);
-	let wide_name: Vec<u16> = format!(r"Global\{name}")
+fn wide_name(path: &str) -> Vec<u16> {
+	format!(r"Global\{}", super::memory_lock_name(path))
 		.encode_utf16()
 		.chain(std::iter::once(0))
-		.collect();
+		.collect()
+}
+
+pub fn try_acquire(path: &str) -> io::Result<Option<PlatformFileLock>> {
+	let wide_name = wide_name(path);
 
 	// The name's existence, not thread-affine mutex ownership, is the lease.
 	// A handle can therefore be released from a different native worker thread.
@@ -46,6 +51,28 @@ pub fn try_acquire(path: &str) -> io::Result<Option<PlatformFileLock>> {
 		return Ok(None);
 	}
 	Ok(Some(PlatformFileLock { handle: Some(handle) }))
+}
+
+/// Opening the existing object never creates one, so a missing name stays free
+/// for a concurrent `try_acquire`. While open, the handle keeps a releasing
+/// holder's object alive for an instant; acquirers retry briefly to cover that.
+pub fn is_held(path: &str) -> io::Result<bool> {
+	let wide_name = wide_name(path);
+	// SAFETY: `wide_name` is a live, NUL-terminated UTF-16 string for the call.
+	let raw_handle = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, wide_name.as_ptr()) };
+	if !raw_handle.is_null() {
+		// SAFETY: `OpenMutexW` returned a fresh owned handle; dropping closes it.
+		drop(unsafe { OwnedHandle::from_raw_handle(raw_handle) });
+		return Ok(true);
+	}
+	// SAFETY: this immediately observes the last-error value set by
+	// `OpenMutexW`.
+	match unsafe { GetLastError() } {
+		ERROR_FILE_NOT_FOUND => Ok(false),
+		// The object exists; its owner just denies us access.
+		ERROR_ACCESS_DENIED => Ok(true),
+		_ => Err(io::Error::last_os_error()),
+	}
 }
 
 impl PlatformFileLock {
@@ -101,10 +128,7 @@ mod tests {
 			lpSecurityDescriptor: (&raw mut descriptor).cast(),
 			bInheritHandle:       0,
 		};
-		let name: Vec<u16> = format!(r"Global\{}", super::super::memory_lock_name(path))
-			.encode_utf16()
-			.chain(std::iter::once(0))
-			.collect();
+		let name = wide_name(path);
 		// SAFETY: descriptor, ACL, SID, and NUL-terminated name all remain
 		// valid for the call. Zero access is enough to hold the object's
 		// lifetime.
@@ -138,6 +162,16 @@ mod tests {
 			panic!("denied access must remain an error");
 		};
 		assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+	}
+
+	#[test]
+	fn probe_reports_an_owner_that_denies_access_as_held() {
+		let path = format!("oauth-lock-probe-denied-{}", std::process::id());
+		assert!(!is_held(&path).expect("probe free name"));
+		let owner = restricted_mutex(&path, 0);
+		assert!(is_held(&path).expect("probe denied owner"));
+		drop(owner);
+		assert!(!is_held(&path).expect("probe released name"));
 	}
 
 	#[test]
