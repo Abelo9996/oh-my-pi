@@ -65,6 +65,11 @@ const BASE_NAMED_OBJECTS: &str = r"\BaseNamedObjects";
 /// `DIRECTORY_QUERY` access (wdm.h), defined here to avoid the large
 /// `Wdk_System_SystemServices` feature for one constant.
 const DIRECTORY_QUERY: u32 = 0x0001;
+/// First listing buffer, enough for a typical `\BaseNamedObjects` in one call.
+const LISTING_START_BYTES: usize = 64 * 1024;
+/// Largest listing buffer before falling back to paging (tens of thousands of
+/// objects).
+const LISTING_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// One `NtQueryDirectoryObject` entry (`OBJECT_DIRECTORY_INFORMATION`).
 #[repr(C)]
@@ -89,9 +94,11 @@ fn nt_result(status: NTSTATUS) -> io::Result<()> {
 /// no object, so a concurrent `try_acquire` never meets this probe. The listing
 /// needs no access to the mutex itself, so an owner that denies access still
 /// reads as held.
-// shortcut: lists the whole directory per probe (one call for a typical
-// directory); a hit can be missed if an insert reorders the listing between
-// calls, which only misreports a held lease as free and never blocks a claim.
+// shortcut: lists the whole directory per probe. A listing that fits one call
+// is a snapshot taken under the directory's lock, so the buffer grows (up to
+// LISTING_MAX_BYTES) until it does; only a larger directory is read in pages,
+// where an insert between pages can skip the name and misreport a held lease
+// as free (never blocking a claim).
 pub fn is_held(path: &str) -> io::Result<bool> {
 	let name: Vec<u16> = super::memory_lock_name(path).encode_utf16().collect();
 	let directory_name: Vec<u16> = BASE_NAMED_OBJECTS.encode_utf16().collect();
@@ -120,11 +127,11 @@ pub fn is_held(path: &str) -> io::Result<bool> {
 	let directory = unsafe { OwnedHandle::from_raw_handle(raw_directory) };
 
 	// u64 elements keep the buffer aligned for the pointer-bearing entries.
-	let mut buffer = vec![0_u64; 8 * 1024];
-	let buffer_bytes = u32::try_from(buffer.len() * size_of::<u64>()).expect("buffer size");
+	let mut buffer = vec![0_u64; LISTING_START_BYTES / size_of::<u64>()];
 	let mut context = 0_u32;
 	let mut restart = true;
 	loop {
+		let buffer_bytes = u32::try_from(buffer.len() * size_of::<u64>()).expect("buffer size");
 		let mut returned = 0_u32;
 		// SAFETY: `buffer` is writable for `buffer_bytes` and outlives the call;
 		// `context` and `returned` are valid out-parameters.
@@ -139,6 +146,14 @@ pub fn is_held(path: &str) -> io::Result<bool> {
 				&raw mut returned,
 			)
 		};
+		if restart
+			&& status == STATUS_MORE_ENTRIES
+			&& buffer.len() * size_of::<u64>() < LISTING_MAX_BYTES
+		{
+			// Retake the whole listing in one call rather than paging it.
+			buffer = vec![0_u64; buffer.len() * 2];
+			continue;
+		}
 		restart = false;
 		if status == STATUS_NO_MORE_ENTRIES {
 			return Ok(false);
