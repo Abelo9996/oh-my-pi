@@ -1073,6 +1073,9 @@ async function summarizeConversationWindow(
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Summarization failed", response);
 	}
+	if (response.stopReason === "length") {
+		throw new Error("Summarization failed: model output ended incomplete (stopReason: length)");
+	}
 
 	const textContent = response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -1179,6 +1182,9 @@ export async function generateHandoffFromContext(
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Handoff generation failed", response);
+	}
+	if (response.stopReason === "length") {
+		throw new Error("Handoff generation failed: model output ended incomplete (stopReason: length)");
 	}
 
 	return response.content
@@ -1303,8 +1309,13 @@ async function generateShortSummary(
 				case "error":
 					outcome = { kind: "failed", error: response.errorMessage || "Unknown error" };
 					break;
-				case "stop":
 				case "length":
+					outcome = {
+						kind: "failed",
+						error: "Short summary failed: model output ended incomplete (stopReason: length)",
+					};
+					break;
+				case "stop":
 				case "toolUse":
 					outcome = {
 						kind: "text",
@@ -2430,6 +2441,9 @@ async function generateTurnPrefixSummary(
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Turn prefix summarization failed", response);
+	}
+	if (response.stopReason === "length") {
+		throw new Error("Turn prefix summarization failed: model output ended incomplete (stopReason: length)");
 	}
 
 	return response.content
