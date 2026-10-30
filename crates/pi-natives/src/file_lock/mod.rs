@@ -134,7 +134,8 @@ impl Drop for FileLock {
 	}
 }
 
-#[cfg(test)]
+// Android has no probe (`unix::is_held` reports Unsupported).
+#[cfg(all(test, not(target_os = "android")))]
 mod tests {
 	use std::time::{SystemTime, UNIX_EPOCH};
 

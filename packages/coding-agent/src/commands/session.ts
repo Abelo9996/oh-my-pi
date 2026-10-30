@@ -6,7 +6,7 @@
  * directory (printing the session file path as the only stdout line),
  * `omp session moved <session> --to <label>` marks the copy left behind stale
  * so resuming it forks instead of continuing it, and
- * `omp session lease --json <id>...` reports which sessions a running omp owns
+ * `omp session lease --json -- <id>...` reports which sessions a running omp owns
  * without taking their ownership leases.
  */
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -30,7 +30,7 @@ const USAGE: Record<SessionAction, string> = {
 	pack: "omp session pack <session> <out.tar>",
 	unpack: "omp session unpack <archive.tar> --cwd <dir>",
 	moved: "omp session moved <session> --to <label>",
-	lease: "omp session lease [--json] <session-id>...",
+	lease: "omp session lease [--json] -- <session-id>...",
 };
 
 const UNPACK_NOTE: Record<UnpackMode, string> = {
@@ -87,7 +87,7 @@ export default class Session extends Command {
 		"# Pack a session with its artifacts and image blobs\n  omp session pack ~/.omp/agent/sessions/<project>/<file>.jsonl /tmp/session.tar",
 		"# Unpack it on another machine; prints the session file path\n  omp session unpack /tmp/session.tar --cwd ~/src/project",
 		"# Mark the local copy stale; resuming it later forks it\n  omp session moved <file>.jsonl --to cloud",
-		"# List which of these sessions a running omp owns, without taking ownership\n  omp session lease --json <id> <id>",
+		"# List which of these sessions a running omp owns, without taking ownership (`--` keeps ids starting with `-` from parsing as options)\n  omp session lease --json -- <id> <id>",
 	];
 
 	async run(): Promise<void> {

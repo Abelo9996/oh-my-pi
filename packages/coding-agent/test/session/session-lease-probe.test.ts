@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { isSessionLeaseHeld } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, isSessionLeaseHeld } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_STORAGE_MODULE = path.join(import.meta.dir, "../../src/session/session-storage.ts");
@@ -42,7 +42,7 @@ async function spawnOwner(tempDir: TempDir, sessionId: string) {
 			'process.stdout.write(release ? "claimed\\n" : "refused\\n");',
 			"for await (const _ of console) {}",
 		],
-		[sessionId, tempDir.join(`${sessionId}.jsonl`)],
+		[sessionId, tempDir.join("owner-session.jsonl")],
 	);
 	const reader = child.stdout.getReader();
 	const { value } = await reader.read();
@@ -113,6 +113,16 @@ describe("session lease probe", () => {
 		expect(isSessionLeaseHeld(sessionId)).toBe(false);
 	}, 30_000);
 
+	it("counts a lease this process holds as held", () => {
+		using tempDir = TempDir.createSync("@omp-lease-self-");
+		const sessionId = uniqueId("self");
+		const release = new FileSessionStorage().claimSession(sessionId, tempDir.join("self.jsonl"));
+		expect(release).not.toBeNull();
+		expect(isSessionLeaseHeld(sessionId)).toBe(true);
+		release?.();
+		expect(isSessionLeaseHeld(sessionId)).toBe(false);
+	});
+
 	it("never makes a concurrent claim fail", async () => {
 		using tempDir = TempDir.createSync("@omp-lease-race-");
 		const { failures, probes, sawHeld } = await raceProbeAgainstClaims(tempDir, uniqueId("claim"), "claim", 3000);
@@ -136,17 +146,22 @@ describe("session lease probe", () => {
 	it("`omp session lease --json` lists held ids and treats free and garbage ids as not held", async () => {
 		using tempDir = TempDir.createSync("@omp-lease-cli-");
 		const heldId = uniqueId("held");
+		// Not a plain token, so claim and probe must agree on the hashed lease name.
+		const hashedHeldId = `${uniqueId("hashed")} with space/../x`;
 		const owner = await spawnOwner(tempDir, heldId);
+		const hashedOwner = await spawnOwner(tempDir, hashedHeldId);
 		try {
-			const ids = [heldId, uniqueId("free"), "../../etc/passwd", "", "with space", "x".repeat(300)];
-			const result = Bun.spawnSync([process.execPath, CLI, "session", "lease", "--json", ...ids], {
+			const ids = [heldId, uniqueId("free"), "../../etc/passwd", "", "-dash", "x".repeat(300), hashedHeldId];
+			const result = Bun.spawnSync([process.execPath, CLI, "session", "lease", "--json", "--", ...ids], {
 				env: { ...process.env, PI_CODING_AGENT_DIR: tempDir.join("agent") },
 			});
 			expect(result.exitCode, result.stderr.toString()).toBe(0);
-			expect(JSON.parse(result.stdout.toString())).toEqual({ held: [heldId], unknown: [] });
+			expect(JSON.parse(result.stdout.toString())).toEqual({ held: [heldId, hashedHeldId], unknown: [] });
 		} finally {
-			owner.stdin.end();
-			await owner.exited;
+			for (const child of [owner, hashedOwner]) {
+				child.stdin.end();
+				await child.exited;
+			}
 		}
 	}, 60_000);
 });
