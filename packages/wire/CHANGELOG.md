@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `nums` to `code` props (`TspCodeProps`): each line's number, so one block can show non-contiguous lines with `…` gap rows where the numbers jump.
+
 ## [18.14.0] - 2026-10-29
 
 ### Added

@@ -228,7 +228,15 @@ export interface TspCodeProps {
 	lang?: string;
 	/** The file the text comes from: the terminal picks the grammar from it (and heads a block outside a tool card with it). */
 	path?: string;
+	/** The first line's number; later lines count up from it. */
 	start?: number;
+	/**
+	 * Each line's number (one per line of `text`, strictly ascending), for non-contiguous lines: replaces counting from
+	 * `start`, and a `…` gap row is drawn before every line whose number is not the previous one's + 1. Marks' `line` and
+	 * folds' `from`/`to` are in this numbering. Ignored (numbers count from `start`) when its length differs from the
+	 * text's line count or it is not strictly ascending.
+	 */
+	nums?: readonly number[];
 	numbers?: boolean;
 	marks?: readonly { line: number; tone: TspTone }[];
 	wrap?: boolean;
