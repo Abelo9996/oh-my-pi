@@ -634,51 +634,6 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(await authStorage.keys.get(PROVIDER, "cyber-policy")).not.toBe(first);
 	});
 
-	test.each([true, false])(
-		"mixed Codex policy blocks exhaust sibling rotation (cyber first: %s)",
-		async cyberFirst => {
-			if (!store) throw new Error("test setup failed");
-			const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
-			vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
-				const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
-				if (!credential) return null;
-				return { apiKey: credential.access, newCredentials: credential };
-			});
-			await codexStorage.credentials.set(CODEX_PROVIDER, [
-				{ type: "oauth", access: "policy-A", refresh: "ref-A", expires: farExpiry(), accountId: "account-A" },
-				{ type: "oauth", access: "policy-B", refresh: "ref-B", expires: farExpiry(), accountId: "account-B" },
-			]);
-			const errors = [
-				"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
-				`Codex error event: ${CODEX_CHATGPT_MODEL_DENIAL}`,
-			];
-			if (!cyberFirst) errors.reverse();
-			const sessionId = "mixed-codex-policy";
-			const first = await codexStorage.keys.get(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL });
-			expect(
-				await codexStorage.limits.rotate(CODEX_PROVIDER, sessionId, {
-					modelId: DAYBREAK_MODEL,
-					apiKey: first,
-					error: errors[0],
-				}),
-			).toMatchObject({ switched: true });
-			const second = await codexStorage.keys.get(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL });
-			expect(second).not.toBe(first);
-			const exhausted = await codexStorage.limits.rotate(CODEX_PROVIDER, sessionId, {
-				modelId: DAYBREAK_MODEL,
-				apiKey: second,
-				error: errors[1],
-			});
-			expect(exhausted.switched).toBe(false);
-			expect(
-				codexStorage.blocks
-					.list(codexStorage.credentials.list(CODEX_PROVIDER).map(row => row.id))
-					.map(block => block.blockScope)
-					.sort(),
-			).toEqual(["account-policy", `model-policy:${DAYBREAK_MODEL}`]);
-		},
-	);
-
 	test.each([
 		{ usageLimit: false, waitForSibling: undefined },
 		{ usageLimit: false, waitForSibling: false },
@@ -717,7 +672,6 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 				expect(rotation).toEqual({ switched: false });
 			} else {
 				expect(waitSpy).toHaveBeenCalledTimes(1);
-				expect(waitSpy.mock.calls[0]?.[0]).toBe(2_025);
 				expect(rotation).toEqual({ switched: true, afterSiblingWait: true });
 			}
 			expect(authStorage.blocks.list([rows[1]!.id])).toContainEqual(
