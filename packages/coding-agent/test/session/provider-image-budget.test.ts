@@ -675,6 +675,51 @@ describe("provider context image budgets", () => {
 		expect(imageData(clampProviderContextImageBytes(context, gpt))).toEqual([]);
 	});
 
+	it("charges tool arguments as the escaped string Factory's Responses route sends", async () => {
+		const gpt = factoryGptModel();
+		const fresh = "C".repeat(3_400_000);
+		const claudeTurn: AssistantMessage = {
+			role: "assistant",
+			// A quote costs two bytes in the arguments object and four once sent as a JSON string inside JSON.
+			content: [{ type: "toolCall", id: "toolu_1", name: "write", arguments: { content: '"'.repeat(150_000) } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-haiku-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("x".repeat(700_000))], timestamp: 0 },
+				claudeTurn,
+				{
+					role: "toolResult",
+					toolCallId: "toolu_1",
+					toolName: "write",
+					content: [text("ok")],
+					isError: false,
+					timestamp: 2,
+				},
+				{ role: "user", content: [text("look"), image(fresh)], timestamp: 3 },
+			],
+		};
+		const clamped = clampProviderContextImageBytes(context, gpt);
+		expect(imageData(clamped)).toEqual([]);
+		expect(Buffer.byteLength(await factoryRequestBody(gpt, clamped))).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		// Kept, the image would have pushed the body past the route limit.
+		expect(Buffer.byteLength(await factoryRequestBody(gpt, context))).toBeGreaterThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
 	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {
 		// An OpenAI computer-use transcript continued on a Factory GPT model, which has no native computer use: the
 		// Responses wire sends each result's metadata screenshot (in an assistant note), not its content image.

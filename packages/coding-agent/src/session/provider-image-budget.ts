@@ -256,10 +256,19 @@ function newestImageMessages(
 	return kept;
 }
 
-/** `content` with each image's base64 emptied, for measuring the request bytes around the images. */
-function withoutImageData<T extends { type: string }>(content: readonly T[]): readonly T[] {
-	if (!content.some(part => part.type === "image")) return content;
-	return content.map(part => (part.type === "image" ? { ...part, data: "" } : part));
+/**
+ * `content` as measured for the request bytes around its images: each image's base64 emptied, and each tool call's
+ * arguments as the JSON string the Responses wire sends, whose quotes and backslashes the body escapes again. The
+ * Anthropic wire sends arguments as an object, so there the string slightly overcounts.
+ */
+function measuredContent<T extends { type: string }>(content: readonly T[]): readonly T[] {
+	if (!content.some(part => part.type === "image" || part.type === "toolCall")) return content;
+	return content.map(part => {
+		if (part.type === "image") return { ...part, data: "" };
+		if (part.type === "toolCall" && "arguments" in part)
+			return { ...part, arguments: JSON.stringify(part.arguments) };
+		return part;
+	});
 }
 
 /**
@@ -298,7 +307,7 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 				if (!metadata || sentScreenshotBytes(message, metadataWire) === undefined) {
 					return {
 						...message,
-						content: withoutImageData(message.content),
+						content: measuredContent(message.content),
 						details: undefined,
 						providerMetadata: undefined,
 					};
@@ -309,7 +318,7 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 						: { ...metadata.screenshot, image_url: "" };
 				return { ...message, details: undefined, content: [], providerMetadata: { ...metadata, screenshot } };
 			}
-			const content = Array.isArray(message.content) ? withoutImageData(message.content) : message.content;
+			const content = Array.isArray(message.content) ? measuredContent(message.content) : message.content;
 			const payload = message.providerPayload;
 			if (!payload) return { ...message, content };
 			const owner =
