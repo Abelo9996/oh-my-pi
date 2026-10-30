@@ -77,13 +77,10 @@ function validateGitSpec(spec: string): void {
 }
 
 function gitInstallSpec(original: string, source: GitSource): string {
-	// bun accepts GitHub shorthands and URLs, but reads pi's `git:` prefix as
-	// a host named "git". Only that prefix needs normalization.
-	if (source.host === "github.com" && !/^git:(?!\/\/)/i.test(original)) {
-		return original;
-	}
 	const withRef = !source.ref || source.repo.includes("#") ? source.repo : `${source.repo}#${source.ref}`;
-	if (source.host === "github.com") return withRef;
+	// bun accepts GitHub shorthands and URLs verbatim, but reads pi's `git:`
+	// prefix as a host named "git"; only that form takes the parsed URL.
+	if (source.host === "github.com") return /^git:(?!\/\/)/i.test(original) ? withRef : original;
 	if (/^(https?|ssh):\/\//i.test(withRef) && !/^git\+/i.test(withRef)) {
 		// bun auto-detects git only for GitHub-hosted URLs — prefix `git+` so any
 		// git host is cloned via git instead of being misread as an npm tarball
