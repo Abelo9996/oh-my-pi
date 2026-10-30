@@ -10765,8 +10765,9 @@ export class AgentSession implements SettingsScope {
 		const context = this.#buildReplanTitleContext();
 		if (!context) return;
 		const sessionId = this.sessionManager.getSessionId();
-		this.#titleDrift = { sessionId, prompts: 0 };
-		const refresh = this.#refreshTitle(context, sessionId, trigger)
+		// Prompts counted so far; a completed refresh settles only these, so prompts sent while it runs still count.
+		const countedPrompts = this.#titleDrift?.sessionId === sessionId ? this.#titleDrift.prompts : 0;
+		const refresh = this.#refreshTitle(context, sessionId, trigger, countedPrompts)
 			.catch(err => {
 				logger.warn("title-generator: title refresh failed", {
 					sessionId,
@@ -10787,7 +10788,7 @@ export class AgentSession implements SettingsScope {
 		return this.#autoTitle && cfgTitleRefreshAfterPrompts.get(this.settings) > 0;
 	}
 
-	/** Count an operator prompt against an already-named session's `title.refreshAfterPrompts`. */
+	/** Count an operator prompt since the title was last refreshed, toward `title.refreshAfterPrompts`. */
 	#noteTitleDrift(message: AgentMessage): void {
 		if (!this.sessionName) return;
 		const text = operatorTitleText(message);
@@ -10798,7 +10799,7 @@ export class AgentSession implements SettingsScope {
 		this.#titleDrift = drift;
 	}
 
-	/** At a settled run's end, refresh the title once enough operator prompts have run since it last changed. */
+	/** At a settled run's end, refresh the title once enough operator prompts have run since it was last refreshed. */
 	#maybeRefreshTitleAfterPrompts(): void {
 		const drift = this.#titleDrift;
 		if (drift?.sessionId !== this.sessionManager.getSessionId()) return;
@@ -11123,16 +11124,26 @@ export class AgentSession implements SettingsScope {
 		return title && keepTitleCard(this.sessionName, title);
 	}
 
-	async #refreshTitle(context: string, sessionId: string, trigger: SessionNameTrigger): Promise<void> {
+	async #refreshTitle(
+		context: string,
+		sessionId: string,
+		trigger: SessionNameTrigger,
+		countedPrompts: number,
+	): Promise<void> {
 		const retitled = await this.#retitle(context);
-		if (!retitled || retitled === this.sessionName) return;
+		if (!retitled) return;
 		// A session first named without a card (a subagent, a title-model title) gets one here.
 		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled) : retitled;
 		if (this.sessionManager.getSessionId() !== sessionId) return;
 		if (!this.#titleRefreshEnabled(trigger)) return;
 		if (this.sessionManager.titleSource === "user") return;
-		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
-		await setSessionName.call(this.sessionManager, title, "auto", trigger);
+		if (title !== this.sessionName) {
+			const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
+			if (!(await setSessionName.call(this.sessionManager, title, "auto", trigger))) return;
+		}
+		// The title now names the conversation those prompts led to, whether it changed or was confirmed.
+		const drift = this.#titleDrift;
+		if (drift?.sessionId === sessionId) drift.prompts = Math.max(0, drift.prompts - countedPrompts);
 	}
 
 	/** Currently-applied {@link TITLE_SYSTEM.md} override, or undefined when the

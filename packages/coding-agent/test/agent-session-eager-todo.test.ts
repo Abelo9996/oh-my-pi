@@ -388,6 +388,76 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(titleInput).toContain("publish the release notes to the changelog");
 	});
 
+	it("does not count low-signal prompts toward title.refreshAfterPrompts", async () => {
+		await recreateSession({ "title.refreshAfterPrompts": 2, "title.icons": "boring" }, { autoTitle: true });
+		await session.setSessionName("Fix parser recovery", "auto");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
+		} as never);
+
+		await session.prompt("now draft the release notes for 2.0");
+		await session.prompt("ok thanks");
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+
+		const titleApplied = waitForSessionName("Ship release notes");
+		await session.prompt("publish the release notes to the changelog");
+		await titleApplied;
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("never refreshes after operator prompts when title.refreshAfterPrompts is 0", async () => {
+		await recreateSession({ "title.refreshAfterPrompts": 0, "title.icons": "boring" }, { autoTitle: true });
+		await session.setSessionName("Fix parser recovery", "auto");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+
+		await session.prompt("now draft the release notes for 2.0");
+		await session.prompt("publish the release notes to the changelog");
+		await session.prompt("tag the 2.0 release");
+
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe("Fix parser recovery");
+	});
+
+	it("keeps counted prompts when a prompt-count refresh names no title, and retries on the next run", async () => {
+		await recreateSession({ "title.refreshAfterPrompts": 2, "title.icons": "boring" }, { autoTitle: true });
+		await session.setSessionName("Fix parser recovery", "auto");
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({ stopReason: "error", content: [] } as never)
+			.mockResolvedValue({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Ship release notes</title>" }],
+			} as never);
+
+		await session.prompt("now draft the release notes for 2.0");
+		await session.prompt("publish the release notes to the changelog");
+		expect(session.sessionManager.getSessionName()).toBe("Fix parser recovery");
+
+		const titleApplied = waitForSessionName("Ship release notes");
+		await session.prompt("tag the 2.0 release");
+		await titleApplied;
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+	});
+
+	it("adds a missing card when a refresh regenerates the current plain title", async () => {
+		await recreateSession({ "title.refreshAfterPrompts": 1, "title.icons": "emoji" }, { autoTitle: true });
+		await session.setSessionName("Fix parser recovery", "auto");
+		vi.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Fix parser recovery</title>" }],
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>🧪 PARSER</title>" }],
+			} as never);
+
+		const titleApplied = waitForSessionName("🧪 PARSER: Fix parser recovery");
+		await session.prompt("keep fixing parser recovery");
+		await titleApplied;
+	});
+
 	it("does not refresh a user-set title after title.refreshAfterPrompts operator prompts", async () => {
 		await recreateSession({ "title.refreshAfterPrompts": 1 }, { autoTitle: true });
 		await session.setSessionName("Manual parser title", "user");
