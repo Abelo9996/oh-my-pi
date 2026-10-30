@@ -417,7 +417,6 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	sanitizeAssistantForReparentedHistory,
 	USER_INTERRUPT_LABEL,
-	type TitleDriftTurn,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
 import { ModelControls, type ModelControlsHost } from "./model-controls";
@@ -1058,8 +1057,6 @@ export class AgentSession implements SettingsScope {
 	/** Serialized tail of pooled-turn yield contract transitions; never rejects. */
 	#workPoolYieldTransition: Promise<void> = Promise.resolve();
 	#titleRefreshInFlight: Promise<void> | undefined = undefined;
-	/** A title refresh that came due while another ran; served when that one completes. */
-	#pendingTitleRefresh: { sessionId: string; trigger: SessionNameTrigger } | undefined = undefined;
 	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
 	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
 	 *  the session cwd changes. */
@@ -1074,7 +1071,7 @@ export class AgentSession implements SettingsScope {
 	#deferredTitle: { sessionId: string; declined: boolean; replied: boolean; words: number } | undefined;
 	/** What the next automatic title names (see {@link #maybeStartTitle}). */
 	#titleInput: TitleInput | undefined;
-	/** Operator prompts since the title was last refreshed or judged to fit, toward `title.refreshAfterPrompts`. */
+	/** Operator prompts since the last title check, toward `title.refreshAfterPrompts`. */
 	#titleDrift: { sessionId: string; prompts: number } | undefined;
 	#titleProviderSessionId: string | undefined;
 	#titleProviderParentSessionId: string | undefined;
@@ -10753,7 +10750,7 @@ export class AgentSession implements SettingsScope {
 	 * Retitle a generated title from recent conversation: after a todo-init
 	 * replan, or once `title.refreshAfterPrompts` operator prompts have run since
 	 * it was last refreshed and the judge finds it no longer fits. A title the
-	 * user set is never replaced (see {@link #titleRefreshable}).
+	 * user set is never replaced.
 	 */
 	#scheduleTitleRefresh(trigger: SessionNameTrigger): void {
 		if ($env.PI_NO_TITLE) return;
@@ -10764,25 +10761,15 @@ export class AgentSession implements SettingsScope {
 		// session name — so keep the refresh there and only skip subagents when
 		// no focusable UI exists (print/RPC/ACP/eval/SDK/CI).
 		if (this.#agentKind === "sub" && !isInteractiveHost()) return;
+		if (this.#titleRefreshInFlight) return;
 		const sessionId = this.sessionManager.getSessionId();
-		if (this.#titleRefreshInFlight) {
-			// Served once the running refresh completes; a pending replan outranks a prompt-count check.
-			const pending = this.#pendingTitleRefresh;
-			if (pending?.sessionId !== sessionId || pending.trigger !== "replan") {
-				this.#pendingTitleRefresh = { sessionId, trigger };
-			}
-			return;
-		}
 		// The first title is still being named: a refreshed title landing first would
 		// make that request, which carries the card, drop its reply.
 		if (this.#titleGenerationInFlightFor === sessionId) return;
 		if (!this.#titleRefreshable(sessionId, trigger)) return;
-		const context = this.#buildReplanTitleContext();
-		if (!context) return;
-		// Prompts counted so far; a completed refresh settles only these, so prompts sent while it runs still count.
-		const countedPrompts = this.#titleDrift?.sessionId === sessionId ? this.#titleDrift.prompts : 0;
-		const recent = trigger === "drift" ? buildTitleDriftTurns(this.agent.state.messages) : undefined;
-		const refresh = this.#refreshTitle(context, sessionId, trigger, countedPrompts, recent)
+		// A check consumes the prompts that triggered it whatever its verdict; prompts sent while it runs count toward the next.
+		if (trigger === "drift") this.#titleDrift = undefined;
+		const refresh = this.#refreshTitle(sessionId, trigger)
 			.catch(err => {
 				logger.warn("title-generator: title refresh failed", {
 					sessionId,
@@ -10791,33 +10778,18 @@ export class AgentSession implements SettingsScope {
 				});
 			})
 			.finally(() => {
-				if (this.#titleRefreshInFlight !== refresh) return;
-				this.#titleRefreshInFlight = undefined;
-				this.#servePendingTitleRefresh();
+				if (this.#titleRefreshInFlight === refresh) this.#titleRefreshInFlight = undefined;
 			});
 		this.#titleRefreshInFlight = refresh;
 	}
 
-	/** Run the refresh that came due while another ran, if its session is still current. */
-	#servePendingTitleRefresh(): void {
-		const pending = this.#pendingTitleRefresh;
-		this.#pendingTitleRefresh = undefined;
-		if (!pending || this.#isDisposed || pending.sessionId !== this.sessionManager.getSessionId()) return;
-		// A prompt-count check re-reads the count, which the completed refresh may have settled.
-		if (pending.trigger === "drift") this.#maybeRefreshTitleAfterPrompts();
-		else this.#scheduleTitleRefresh(pending.trigger);
-	}
-
-	/**
-	 * Whether a refresh may still replace the title of `sessionId`: it is the
-	 * current session, the trigger's setting is on, and the session is unnamed or
-	 * its title is known to be generated. A title the user set, including one
-	 * named before title sources were recorded, is never replaced.
-	 */
+	/** Whether a `trigger` refresh may still replace the title of `sessionId`. */
 	#titleRefreshable(sessionId: string, trigger: SessionNameTrigger): boolean {
-		if (this.sessionManager.getSessionId() !== sessionId) return false;
-		if (!this.#titleRefreshEnabled(trigger)) return false;
-		return !this.sessionName || this.sessionManager.titleSource === "auto";
+		return (
+			this.sessionManager.getSessionId() === sessionId &&
+			this.#titleRefreshEnabled(trigger) &&
+			this.sessionManager.titleSource !== "user"
+		);
 	}
 
 	#titleRefreshEnabled(trigger: SessionNameTrigger): boolean {
@@ -10825,18 +10797,17 @@ export class AgentSession implements SettingsScope {
 		return this.#autoTitle && cfgTitleRefreshAfterPrompts.get(this.settings) > 0;
 	}
 
-	/** Count an operator prompt since the title was last refreshed, toward `title.refreshAfterPrompts`. */
+	/** Count an operator prompt toward `title.refreshAfterPrompts`. */
 	#noteTitleDrift(message: AgentMessage): void {
-		if (!this.sessionName) return;
+		if (!this.sessionName || !this.#titleRefreshEnabled("drift")) return;
 		const text = operatorTitleText(message);
 		if (!text || isLowSignalTitleInput(text)) return;
 		const sessionId = this.sessionManager.getSessionId();
-		const drift = this.#titleDrift?.sessionId === sessionId ? this.#titleDrift : { sessionId, prompts: 0 };
-		drift.prompts++;
-		this.#titleDrift = drift;
+		if (this.#titleDrift?.sessionId === sessionId) this.#titleDrift.prompts++;
+		else this.#titleDrift = { sessionId, prompts: 1 };
 	}
 
-	/** At a settled run's end, check the title once enough operator prompts have run since it was last refreshed. */
+	/** At a settled run's end, check the title once `title.refreshAfterPrompts` operator prompts have counted. */
 	#maybeRefreshTitleAfterPrompts(): void {
 		const drift = this.#titleDrift;
 		if (drift?.sessionId !== this.sessionManager.getSessionId()) return;
@@ -11162,75 +11133,52 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Regenerate the title for `context`. With `recent` (a prompt-count check), the
-	 * judge first decides whether the title still fits that conversation, and only a
-	 * title it finds stale is regenerated.
+	 * Regenerate the title from recent conversation. A prompt-count check first
+	 * asks the judge, and regenerates only a title it finds stale.
 	 */
-	async #refreshTitle(
-		context: string,
-		sessionId: string,
-		trigger: SessionNameTrigger,
-		countedPrompts: number,
-		recent?: TitleDriftTurn[],
-	): Promise<void> {
-		if (recent) {
-			const drifted = await this.#titleDrifted(recent);
-			// No verdict keeps the counted prompts, so the next settled run asks again.
-			if (drifted === undefined) return;
-			if (!drifted) {
-				this.#settleTitleDrift(sessionId, countedPrompts);
-				return;
-			}
-			// A rename, session switch, or setting change while the judge ran leaves nothing to regenerate.
-			if (!this.#titleRefreshable(sessionId, trigger)) return;
-		}
+	async #refreshTitle(sessionId: string, trigger: SessionNameTrigger): Promise<void> {
+		// A fitting title, one no judge could rate, or a session renamed or switched meanwhile keeps its title.
+		if (trigger === "drift" && !((await this.#titleDrifted()) && this.#titleRefreshable(sessionId, trigger))) return;
+		const context = this.#buildReplanTitleContext();
+		if (!context) return;
 		const retitled = await this.#retitle(context);
 		if (!retitled) return;
 		// A session first named without a card (a subagent, a title-model title) gets one here.
 		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled) : retitled;
-		if (!this.#titleRefreshable(sessionId, trigger)) return;
-		if (title !== this.sessionName) {
-			const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
-			if (!(await setSessionName.call(this.sessionManager, title, "auto", trigger))) return;
-		}
-		this.#settleTitleDrift(sessionId, countedPrompts);
+		if (!this.#titleRefreshable(sessionId, trigger) || title === this.sessionName) return;
+		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
+		await setSessionName.call(this.sessionManager, title, "auto", trigger);
 	}
 
 	/**
-	 * Whether the session title no longer fits `recent`, per the `judge` role;
-	 * undefined when no judge answered. Interruption and disposal cancel the
-	 * judgment as they cancel title generation.
+	 * Whether the session title no longer fits the latest conversation, per the
+	 * `judge` role; undefined when no judge answered. Interruption and disposal
+	 * cancel the judgment as they cancel title generation.
 	 */
-	#titleDrifted(recent: TitleDriftTurn[]): Promise<boolean | undefined> {
+	async #titleDrifted(): Promise<boolean | undefined> {
 		const title = this.sessionName;
-		if (!title) return Promise.resolve(undefined);
+		if (!title) return undefined;
+		const judge = resolveJudge({
+			settings: this.settings,
+			registry: this.#modelRegistry,
+			sessionModel: this.model,
+			sessionId: this.sessionId,
+			metadataResolver: provider => this.agent.metadataForProvider(provider),
+			purpose: "title-drift",
+			onUsage: journalJudgmentUsage(this.sessionManager),
+			telemetry: this.agent.telemetry,
+			cache: sharedJudgmentCache(),
+			costGate: this.#costGate,
+		});
+		const recent = buildTitleDriftTurns(this.agent.state.messages);
 		const signal = AbortSignal.any([
 			this.#titleGenerationAbortController.signal,
 			AbortSignal.timeout(TITLE_DRIFT_JUDGE_TIMEOUT_MS),
 		]);
-		// The judgment carries user text, so it follows the session's credential redaction policy as title requests do.
+		// The judgment carries user text, so it follows this session's credential redaction policy like its title requests.
 		return withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
-			classifyTitleDrift(
-				{ title, recent },
-				{
-					settings: this.settings,
-					registry: this.#modelRegistry,
-					sessionId: this.sessionId,
-					model: this.model,
-					metadataResolver: provider => this.agent.metadataForProvider(provider),
-					onUsage: journalJudgmentUsage(this.sessionManager),
-					telemetry: this.agent.telemetry,
-					costGate: this.#costGate,
-					signal,
-				},
-			),
+			classifyTitleDrift(judge, title, recent, signal),
 		);
-	}
-
-	/** The title names the conversation the counted prompts led to: it changed, was regenerated verbatim, or was judged to still fit. */
-	#settleTitleDrift(sessionId: string, countedPrompts: number): void {
-		const drift = this.#titleDrift;
-		if (drift?.sessionId === sessionId) drift.prompts = Math.max(0, drift.prompts - countedPrompts);
 	}
 
 	/** Currently-applied {@link TITLE_SYSTEM.md} override, or undefined when the

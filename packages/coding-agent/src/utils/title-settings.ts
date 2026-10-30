@@ -69,15 +69,15 @@ export const cfgTitleRefreshOnReplan = register({
 export const cfgTitleRefreshAfterPrompts = register({
 	id: "title.refreshAfterPrompts",
 	type: "number",
-	default: 5,
+	default: 0,
 	ui: {
 		tab: "tasks",
 		group: "Modes",
 		label: "Refresh Title After Prompts",
 		description:
-			"After this many operator prompts since a generated session title was last refreshed or judged to fit, ask the judge model whether it still fits the conversation and refresh it if not",
+			"Every this many operator prompts, ask the judge model whether a generated session title still fits the conversation, and regenerate it if not",
 		options: [
-			{ value: "0", label: "Off" },
+			{ value: "0", label: "Off", description: "Default" },
 			{ value: "1", label: "Every prompt" },
 			{ value: "3", label: "Every 3 prompts" },
 			{ value: "5", label: "Every 5 prompts" },

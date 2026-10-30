@@ -11,7 +11,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { CURRENT_SESSION_VERSION, type SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as titleDriftClassifier from "@oh-my-pi/pi-coding-agent/session/title-drift-classifier";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -368,244 +367,104 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(session.sessionManager.getSessionName()).toBe("🧪 FLAKY: Stabilize park test timing");
 	});
 
-	it("asks the judge about the latest conversation once title.refreshAfterPrompts operator prompts have run, and refreshes a stale title", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 2, "title.icons": "boring" }, { autoTitle: true });
-		await session.setSessionName("Fix parser recovery", "auto");
-		const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "stop",
-			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
-		} as never);
+	describe("title.refreshAfterPrompts", () => {
+		const titleReply = (title: string) =>
+			({ stopReason: "stop", content: [{ type: "text", text: `<title>${title}</title>` }] }) as never;
 
-		await session.prompt("now draft the release notes for 2.0");
-		expect(driftSpy).not.toHaveBeenCalled();
-		expect(completeSimpleMock).not.toHaveBeenCalled();
+		async function autoTitled(settings: Record<string, unknown>): Promise<void> {
+			await recreateSession({ "title.icons": "boring", ...settings }, { autoTitle: true });
+			await session.setSessionName("Fix parser recovery", "auto");
+		}
 
-		const titleApplied = waitForSessionName("Ship release notes");
-		await session.prompt("publish the release notes to the changelog");
-		await titleApplied;
+		it("asks the judge once enough operator prompts have counted, and regenerates a stale title", async () => {
+			await autoTitled({ "title.refreshAfterPrompts": 2 });
+			const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
+			vi.spyOn(ai, "completeSimple").mockResolvedValue(titleReply("Ship release notes"));
 
-		expect(driftSpy).toHaveBeenCalledTimes(1);
-		const check = driftSpy.mock.calls[0]?.[0];
-		expect(check?.title).toBe("Fix parser recovery");
-		expect(check?.recent).toContainEqual({ role: "user", text: "publish the release notes to the changelog" });
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-		// The mocked completeSimple's request argument, as the replan test reads it.
-		const request = completeSimpleMock.mock.calls[0]?.[1] as { messages?: Array<{ content?: string }> } | undefined;
-		const titleInput = request?.messages?.[0]?.content;
-		expect(titleInput).toContain("publish the release notes to the changelog");
-	});
+			await session.prompt("now draft the release notes for 2.0");
+			expect(driftSpy).not.toHaveBeenCalled();
 
-	it("keeps a title the judge finds still fits, and asks again only after another title.refreshAfterPrompts prompts", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 2, "title.icons": "boring" }, { autoTitle: true });
-		await session.setSessionName("Fix parser recovery", "auto");
-		const driftSpy = vi
-			.spyOn(titleDriftClassifier, "classifyTitleDrift")
-			.mockResolvedValueOnce(false)
-			.mockResolvedValue(true);
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "stop",
-			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
-		} as never);
+			const titleApplied = waitForSessionName("Ship release notes");
+			await session.prompt("publish the release notes to the changelog");
+			await titleApplied;
+			expect(driftSpy).toHaveBeenCalledTimes(1);
+			const [, title, recent] = driftSpy.mock.calls[0]!;
+			expect(title).toBe("Fix parser recovery");
+			expect(recent).toContainEqual({ role: "user", text: "publish the release notes to the changelog" });
+		});
 
-		await session.prompt("add a regression test for parser recovery");
-		await session.prompt("run the parser tests");
-		expect(driftSpy).toHaveBeenCalledTimes(1);
-		await session.prompt("now draft the release notes for 2.0");
-		expect(driftSpy).toHaveBeenCalledTimes(1);
-		expect(completeSimpleMock).not.toHaveBeenCalled();
-		expect(session.sessionManager.getSessionName()).toBe("Fix parser recovery");
+		it.each([
+			["still fits", false],
+			["no judge answers", undefined],
+		])("keeps the title when %s, and asks again only after as many prompts", async (_, verdict) => {
+			await autoTitled({ "title.refreshAfterPrompts": 2 });
+			const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(verdict);
+			const completeSimpleMock = vi.spyOn(ai, "completeSimple");
 
-		const titleApplied = waitForSessionName("Ship release notes");
-		await session.prompt("publish the release notes to the changelog");
-		await titleApplied;
-		expect(driftSpy).toHaveBeenCalledTimes(2);
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-	});
+			await session.prompt("add a regression test for parser recovery");
+			await session.prompt("run the parser tests");
+			await session.prompt("fix the failing parser test");
+			expect(driftSpy).toHaveBeenCalledTimes(1);
+			await session.prompt("run the parser tests again");
+			expect(driftSpy).toHaveBeenCalledTimes(2);
+			expect(completeSimpleMock).not.toHaveBeenCalled();
+			expect(session.sessionManager.getSessionName()).toBe("Fix parser recovery");
+		});
 
-	it("keeps counted prompts when no judge answers, and asks again on the next run", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 2, "title.icons": "boring" }, { autoTitle: true });
-		await session.setSessionName("Fix parser recovery", "auto");
-		const driftSpy = vi
-			.spyOn(titleDriftClassifier, "classifyTitleDrift")
-			.mockResolvedValueOnce(undefined)
-			.mockResolvedValue(true);
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "stop",
-			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
-		} as never);
+		it("does not count low-signal prompts", async () => {
+			await autoTitled({ "title.refreshAfterPrompts": 2 });
+			const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(false);
 
-		await session.prompt("now draft the release notes for 2.0");
-		await session.prompt("publish the release notes to the changelog");
-		expect(completeSimpleMock).not.toHaveBeenCalled();
-		expect(session.sessionManager.getSessionName()).toBe("Fix parser recovery");
+			await session.prompt("now draft the release notes for 2.0");
+			await session.prompt("ok thanks");
+			expect(driftSpy).not.toHaveBeenCalled();
+			await session.prompt("publish the release notes to the changelog");
+			expect(driftSpy).toHaveBeenCalledTimes(1);
+		});
 
-		const titleApplied = waitForSessionName("Ship release notes");
-		await session.prompt("tag the 2.0 release");
-		await titleApplied;
-		expect(driftSpy).toHaveBeenCalledTimes(2);
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-	});
+		it("is off by default", async () => {
+			await autoTitled({});
+			const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
 
-	it("does not count low-signal prompts toward title.refreshAfterPrompts", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 2, "title.icons": "boring" }, { autoTitle: true });
-		await session.setSessionName("Fix parser recovery", "auto");
-		const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "stop",
-			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
-		} as never);
+			for (let i = 0; i < 10; i++) await session.prompt(`release step ${i}: draft the notes`);
+			expect(driftSpy).not.toHaveBeenCalled();
+		});
 
-		await session.prompt("now draft the release notes for 2.0");
-		await session.prompt("ok thanks");
-		expect(driftSpy).not.toHaveBeenCalled();
+		it("adds a missing card when the refresh regenerates the current plain title", async () => {
+			await autoTitled({ "title.refreshAfterPrompts": 1, "title.icons": "emoji" });
+			vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
+			vi.spyOn(ai, "completeSimple")
+				.mockResolvedValueOnce(titleReply("Fix parser recovery"))
+				.mockResolvedValueOnce(titleReply("🧪 PARSER"));
 
-		const titleApplied = waitForSessionName("Ship release notes");
-		await session.prompt("publish the release notes to the changelog");
-		await titleApplied;
-		expect(driftSpy).toHaveBeenCalledTimes(1);
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-	});
+			const titleApplied = waitForSessionName("🧪 PARSER: Fix parser recovery");
+			await session.prompt("keep fixing parser recovery");
+			await titleApplied;
+		});
 
-	it("never checks the title after operator prompts when title.refreshAfterPrompts is 0", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 0, "title.icons": "boring" }, { autoTitle: true });
-		await session.setSessionName("Fix parser recovery", "auto");
-		const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		it("never checks a user-set title", async () => {
+			await recreateSession({ "title.refreshAfterPrompts": 1 }, { autoTitle: true });
+			await session.setSessionName("Manual parser title", "user");
+			const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
 
-		await session.prompt("now draft the release notes for 2.0");
-		await session.prompt("publish the release notes to the changelog");
-		await session.prompt("tag the 2.0 release");
+			await session.prompt("now draft the release notes for 2.0");
+			expect(driftSpy).not.toHaveBeenCalled();
+		});
 
-		expect(driftSpy).not.toHaveBeenCalled();
-		expect(completeSimpleMock).not.toHaveBeenCalled();
-		expect(session.sessionManager.getSessionName()).toBe("Fix parser recovery");
-	});
+		it("does not regenerate a title the user renames while the judge is deciding", async () => {
+			await autoTitled({ "title.refreshAfterPrompts": 1 });
+			const verdict = Promise.withResolvers<boolean | undefined>();
+			vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockReturnValue(verdict.promise);
+			const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue(titleReply("Ship release notes"));
 
-	it("keeps counted prompts when a stale title's refresh names no title, and retries on the next run", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 2, "title.icons": "boring" }, { autoTitle: true });
-		await session.setSessionName("Fix parser recovery", "auto");
-		vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
-		const completeSimpleMock = vi
-			.spyOn(ai, "completeSimple")
-			.mockResolvedValueOnce({ stopReason: "error", content: [] } as never)
-			.mockResolvedValue({
-				stopReason: "stop",
-				content: [{ type: "text", text: "<title>Ship release notes</title>" }],
-			} as never);
+			await session.prompt("now draft the release notes for 2.0");
+			await session.setSessionName("Release notes", "user");
+			verdict.resolve(true);
+			// A full run after the verdict gives a regeneration started by it time to reach the title model.
+			await session.prompt("publish the release notes to the changelog");
 
-		await session.prompt("now draft the release notes for 2.0");
-		await session.prompt("publish the release notes to the changelog");
-		expect(session.sessionManager.getSessionName()).toBe("Fix parser recovery");
-
-		const titleApplied = waitForSessionName("Ship release notes");
-		await session.prompt("tag the 2.0 release");
-		await titleApplied;
-		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
-	});
-
-	it("adds a missing card when a refresh regenerates the current plain title", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 1, "title.icons": "emoji" }, { autoTitle: true });
-		await session.setSessionName("Fix parser recovery", "auto");
-		vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
-		vi.spyOn(ai, "completeSimple")
-			.mockResolvedValueOnce({
-				stopReason: "stop",
-				content: [{ type: "text", text: "<title>Fix parser recovery</title>" }],
-			} as never)
-			.mockResolvedValueOnce({
-				stopReason: "stop",
-				content: [{ type: "text", text: "<title>🧪 PARSER</title>" }],
-			} as never);
-
-		const titleApplied = waitForSessionName("🧪 PARSER: Fix parser recovery");
-		await session.prompt("keep fixing parser recovery");
-		await titleApplied;
-	});
-
-	it("does not check a user-set title after title.refreshAfterPrompts operator prompts", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 1 }, { autoTitle: true });
-		await session.setSessionName("Manual parser title", "user");
-		const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
-
-		await session.prompt("now draft the release notes for 2.0");
-
-		expect(driftSpy).not.toHaveBeenCalled();
-		expect(completeSimpleMock).not.toHaveBeenCalled();
-		expect(session.sessionManager.getSessionName()).toBe("Manual parser title");
-	});
-
-	it("never checks a title named before sessions recorded who set their title", async () => {
-		const file = path.join(tempDir.path(), "legacy.jsonl");
-		const header: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: "legacy-session",
-			title: "Manual parser title",
-			timestamp: "2026-01-01T00:00:00.000Z",
-			cwd: tempDir.path(),
-		};
-		await Bun.write(file, `${JSON.stringify(header)}\n`);
-		const sessionManager = await SessionManager.open(file);
-		await recreateSession({ "title.refreshAfterPrompts": 1 }, { autoTitle: true, sessionManager });
-		expect(session.sessionManager.titleSource).toBeUndefined();
-		const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
-
-		await session.prompt("now draft the release notes for 2.0");
-
-		expect(driftSpy).not.toHaveBeenCalled();
-		expect(completeSimpleMock).not.toHaveBeenCalled();
-		expect(session.sessionManager.getSessionName()).toBe("Manual parser title");
-	});
-
-	it("does not regenerate a title the user renames while the judge is deciding", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 1, "title.icons": "boring" }, { autoTitle: true });
-		await session.setSessionName("Fix parser recovery", "auto");
-		const verdict = Promise.withResolvers<boolean | undefined>();
-		const driftSpy = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockReturnValue(verdict.promise);
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "stop",
-			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
-		} as never);
-
-		await session.prompt("now draft the release notes for 2.0");
-		expect(driftSpy).toHaveBeenCalledTimes(1);
-		await session.setSessionName("Release notes", "user");
-		verdict.resolve(true);
-		// A full run after the verdict gives a regeneration started by it time to reach the title model.
-		await session.prompt("publish the release notes to the changelog");
-
-		expect(driftSpy).toHaveBeenCalledTimes(1);
-		expect(completeSimpleMock).not.toHaveBeenCalled();
-		expect(session.sessionManager.getSessionName()).toBe("Release notes");
-	});
-
-	it("checks the title again when another check comes due while the judge is deciding", async () => {
-		await recreateSession({ "title.refreshAfterPrompts": 1, "title.icons": "boring" }, { autoTitle: true });
-		await session.setSessionName("Fix parser recovery", "auto");
-		const firstVerdict = Promise.withResolvers<boolean | undefined>();
-		const driftSpy = vi
-			.spyOn(titleDriftClassifier, "classifyTitleDrift")
-			.mockReturnValueOnce(firstVerdict.promise)
-			.mockResolvedValue(true);
-		vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "stop",
-			content: [{ type: "text", text: "<title>Ship release notes</title>" }],
-		} as never);
-
-		await session.prompt("add a regression test for parser recovery");
-		await session.prompt("now draft the release notes for 2.0");
-		expect(driftSpy).toHaveBeenCalledTimes(1);
-
-		const titleApplied = waitForSessionName("Ship release notes");
-		firstVerdict.resolve(false);
-		await titleApplied;
-		expect(driftSpy).toHaveBeenCalledTimes(2);
-		expect(driftSpy.mock.calls[1]?.[0].recent).toContainEqual({
-			role: "user",
-			text: "now draft the release notes for 2.0",
+			expect(completeSimpleMock).not.toHaveBeenCalled();
+			expect(session.sessionManager.getSessionName()).toBe("Release notes");
 		});
 	});
 
