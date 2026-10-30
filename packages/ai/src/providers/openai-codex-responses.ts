@@ -23,6 +23,7 @@ import {
 	structuredCloneJSON,
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../env-api-key";
@@ -292,6 +293,8 @@ const CODEX_RETRYABLE_EVENT_CODES = new Set([
 	"internal_error",
 	AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
 ]);
+/** Share native-lane refusals across sessions, but periodically rediscover server-side support. */
+const unsupportedSteeringLanes = new LRUCache<string, true>({ max: 256, ttl: 4 * 60 * 60 * 1000 });
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 
@@ -2458,6 +2461,16 @@ class CodexStreamProcessor {
 		return firstTokenTime;
 	}
 
+	get #steeringLaneKey(): string {
+		return JSON.stringify([
+			this.requestContext.url,
+			this.model.id,
+			this.requestContext.transformedBody.model,
+			this.requestContext.accountId,
+			this.requestContext.responsesLite,
+		]);
+	}
+
 	/** Start delivering caller steering into the response `response.created` announced. */
 	#startSteering(rawEvent: Record<string, unknown>): void {
 		const source = this.options?.liveSteering;
@@ -2471,7 +2484,8 @@ class CodexStreamProcessor {
 			this.#steerPump ||
 			typeof responseId !== "string" ||
 			this.runtime.transport !== "websocket" ||
-			!this.model.compat.supportsSteering
+			!this.model.compat.supportsSteering ||
+			unsupportedSteeringLanes.get(this.#steeringLaneKey)
 		) {
 			return;
 		}
@@ -2749,8 +2763,8 @@ class CodexStreamProcessor {
 
 	/**
 	 * The native turn lane rejected our steering and dropped the response with
-	 * its socket: stop steering this session and forget the dead socket so the
-	 * provider retry replays on a fresh one.
+	 * its socket: stop steering this session and remember the refusal for other
+	 * sessions on this lane. Forget the dead socket so retries use a fresh one.
 	 */
 	#stopSteeringOnNativeLaneRejection(error: unknown): void {
 		const state = this.runtime.websocketState;
@@ -2762,6 +2776,7 @@ class CodexStreamProcessor {
 			return;
 		}
 		state.steeringUnsupported = true;
+		unsupportedSteeringLanes.set(this.#steeringLaneKey, true);
 		state.connection?.close("native-lane-steer-rejected");
 		state.connection = undefined;
 		resetCodexWebSocketAppendState(state);
