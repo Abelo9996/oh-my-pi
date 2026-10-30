@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed tool error rates counting skipped tool calls that were explicitly marked as not executed.
+
 ## [18.14.0] - 2026-10-29
 
 ### Changed
