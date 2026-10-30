@@ -285,63 +285,6 @@ describe("Shared models.dev catalog fallback", () => {
 		}
 	});
 
-	test("sanitizes a fresh matching cache when additive mode is enabled", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-additive-fresh-cache-"));
-		try {
-			const bundledModel = getBundledModels("zai")[0];
-			if (!bundledModel) throw new Error("ZAI bundled catalog is empty");
-			const cachedOverride = {
-				...bundledModel,
-				name: "Untrusted cached override",
-				contextWindow: 1,
-				maxTokens: 1,
-			};
-			const cacheDbPath = path.join(tempDir, "models.db");
-			const legacyModelsDev = {
-				fetch: async () => [cachedOverride],
-				map: (payload: Array<typeof cachedOverride>) => payload,
-			};
-			await resolveProviderModels(
-				{
-					providerId: "zai" as const,
-					cacheDbPath,
-					staticModels: [bundledModel],
-					modelsDev: legacyModelsDev,
-				},
-				"online",
-			);
-
-			let additiveFetches = 0;
-			const resolved = await resolveProviderModels(
-				{
-					providerId: "zai" as const,
-					cacheDbPath,
-					staticModels: [bundledModel],
-					modelsDev: {
-						...legacyModelsDev,
-						additiveOnly: true,
-						fetch: async () => {
-							additiveFetches++;
-							return [];
-						},
-					},
-				},
-				"online-if-uncached",
-			);
-
-			expect(additiveFetches).toBe(0);
-			expect(resolved.models.find(model => model.id === bundledModel.id)).toMatchObject({
-				name: bundledModel.name,
-				contextWindow: bundledModel.contextWindow,
-				maxTokens: bundledModel.maxTokens,
-			});
-			expect(resolved.source).toBe("bundled");
-			expect(resolved.updatedAt).toBeUndefined();
-		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
-		}
-	});
-
 	test("retains one source's cached slice when the other source refreshes", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-partial-source-refresh-"));
 		try {

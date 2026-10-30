@@ -267,7 +267,6 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const isAuthoritativeDynamicCache = dynamicModelsAuthoritative && (cache?.payloadAuthoritative ?? false);
-	const cacheAdditiveStaticModelIds = isAuthoritativeDynamicCache ? undefined : modelsDevAdditiveStaticModelIds;
 	const restoredCache = restoreCachedModelHeaders(
 		cache?.models ?? [],
 		staticModels,
@@ -294,6 +293,12 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			? `${staticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
 			: staticCatalogFingerprint;
 	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
+	// A cache written against this static catalog already merged live discovery
+	// over the bundled rows, so its same-id rows are the corrected models
+	// (#17481). Strip them only across a static-catalog change, where additive
+	// shared-catalog rows must not replace the new bundled metadata.
+	const cacheAdditiveStaticModelIds =
+		isAuthoritativeDynamicCache || cacheFingerprintMatches ? undefined : modelsDevAdditiveStaticModelIds;
 	const cacheNeedsModelMigration =
 		!cacheFingerprintMatches &&
 		cacheDropIds !== undefined &&
@@ -324,18 +329,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cacheFingerprintMatches &&
 		!cacheHasUnresolvedHeaders
 	) {
-		const cacheContribution = cacheAdditiveStaticModelIds
-			? restoredCache.models.filter(model => !cacheAdditiveStaticModelIds.has(model.id))
-			: restoredCache.models;
-		const cachedModels = cacheAdditiveStaticModelIds
-			? mergeCatalogMetrics(
-					mergeDynamicModels(staticModels, cacheContribution, mergeAuthority),
-					restoredCache.models,
-				)
-			: restoredCache.models;
-		const source: ModelResolutionSource = cacheContribution.length > 0 ? "cache" : "bundled";
+		const source: ModelResolutionSource = restoredCache.models.length > 0 ? "cache" : "bundled";
 		return {
-			models: collapseBuiltVariants(cachedModels),
+			models: collapseBuiltVariants(restoredCache.models),
 			stale: false,
 			source,
 			...(source === "cache" ? { updatedAt: cache.updatedAt } : {}),
@@ -382,7 +378,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			dynamicModels.length > 0 &&
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
-	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels, mergeAuthority);
+	const mergedWithCache = mergeCachedModels(staticModels, cacheModels, {
+		authority: mergeAuthority,
+		matchesStatic: cacheFingerprintMatches,
+	});
 	const mergedWithModelsDev = mergeDynamicModels(
 		mergedWithCache,
 		modelsDevModels,
@@ -455,7 +454,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				? preparedLatestCacheModels.filter(model => !cacheAdditiveStaticModelIds.has(model.id))
 				: preparedLatestCacheModels;
 			const mergedFallbackModels = mergeDynamicModels(
-				mergeDynamicModels(staticModels, latestCacheModels, mergeAuthority),
+				mergeCachedModels(staticModels, latestCacheModels, {
+					authority: mergeAuthority,
+					matchesStatic: cacheFingerprintMatches,
+				}),
 				modelsDevModels,
 				mergeAuthority,
 			);
@@ -628,6 +630,24 @@ function mergeDynamicModels<TApi extends Api>(
 		if (modelKind(existingModel) !== "chat" && !explicitKindModels?.has(dynamicModel)) continue;
 		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel, authority));
 	}
+	return Array.from(merged.values());
+}
+
+/**
+ * Lays cached rows over the static catalog. A snapshot written against this
+ * static catalog (`matchesStatic`) is already that catalog merged with live
+ * discovery, so its rows replace same-id static rows verbatim; re-merging would
+ * only rebuild them and churn the persisted payload. A snapshot from another
+ * static catalog re-merges so upgraded bundled metadata applies.
+ */
+function mergeCachedModels<TApi extends Api>(
+	staticModels: readonly Model<TApi>[],
+	cacheModels: readonly Model<TApi>[],
+	options: { authority: DynamicMergeAuthority; matchesStatic: boolean },
+): Model<TApi>[] {
+	if (!options.matchesStatic) return mergeDynamicModels(staticModels, cacheModels, options.authority);
+	const merged = new Map<string, Model<TApi>>(staticModels.map(model => [model.id, model]));
+	for (const cachedModel of cacheModels) merged.set(cachedModel.id, cachedModel);
 	return Array.from(merged.values());
 }
 
