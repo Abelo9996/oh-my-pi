@@ -14,7 +14,6 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	cursorModelManagerOptions,
 	resolveModelCacheProviderId,
