@@ -127,7 +127,7 @@ describe("model merge reuse", () => {
 				},
 			],
 			false,
-			fingerprintStaticModels(existing, "additive"),
+			fingerprintStaticModels(existing, { additive: true }),
 			cachePath,
 		);
 		const cached = readModelCache("openai", 60_000, Date.now, cachePath);

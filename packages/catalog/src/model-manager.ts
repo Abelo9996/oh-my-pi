@@ -287,10 +287,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
 	// Additive mode is cache identity: a snapshot written while shared-catalog
 	// rows could replace bundled metadata must not match an additive resolver.
-	const staticCatalogFingerprint = fingerprintStaticModels(
-		staticModels,
-		dynamicModelsAuthoritative ? "authoritative" : modelsDevAdditiveStaticModelIds ? "additive" : undefined,
-	);
+	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, {
+		authoritative: dynamicModelsAuthoritative,
+		additive: modelsDevAdditiveStaticModelIds !== undefined,
+	});
 	// Endpoint-migration policy is cache identity: adding an id must invalidate
 	// matching-static-catalog caches written by the prior resolver.
 	const staticFingerprint =
@@ -669,11 +669,15 @@ function retainModelIds<TApi extends Api>(
 const MODEL_CACHE_FINGERPRINT_VERSION = `merge-v5:${VERSION}`;
 
 /**
- * Cache-identity mode for {@link fingerprintStaticModels}: `authoritative`
- * when dynamic discovery owns the catalog, `additive` when the shared catalog
- * may only add ids. Snapshots written under different modes never match.
+ * Merge policy that is part of a cache's identity in
+ * {@link fingerprintStaticModels}: `authoritative` when dynamic discovery owns
+ * the catalog, `additive` when the shared catalog may only add ids. The flags
+ * compose; snapshots written under different policies never match.
  */
-export type StaticFingerprintMode = "authoritative" | "additive";
+export interface StaticFingerprintPolicy {
+	authoritative?: boolean;
+	additive?: boolean;
+}
 
 /**
  * Return the versioned content identity for a static provider slice. Callers
@@ -682,11 +686,14 @@ export type StaticFingerprintMode = "authoritative" | "additive";
  */
 export function fingerprintStaticModels<TApi extends Api>(
 	models: readonly (ModelSpec<TApi> | Model<TApi>)[],
-	mode?: StaticFingerprintMode,
+	policy: StaticFingerprintPolicy = {},
 ): string {
 	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}:empty`;
 	const content = `${MODEL_CACHE_FINGERPRINT_VERSION}:${Bun.hash(JSON.stringify(models)).toString(36)}`;
-	return mode ? `${MODEL_CACHE_FINGERPRINT_VERSION}:${mode}:${content}` : content;
+	let policyKey = "";
+	if (policy.authoritative) policyKey += ":authoritative";
+	if (policy.additive) policyKey += ":additive";
+	return policyKey ? `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:${content}` : content;
 }
 
 function mergeDynamicModel<TApi extends Api>(
