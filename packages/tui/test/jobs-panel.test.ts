@@ -118,6 +118,29 @@ describe("JobsSheet", () => {
 		expect(source.cancel).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps the selected settled job and its output after the session evicts it, until another is selected", () => {
+		let jobs: JobsPanelSnapshot = JOBS;
+		const details: Record<string, JobsPanelDetail | undefined> = { ...DETAILS };
+		const sheet = new JobsSheet({ load: () => jobs, inspect: id => details[id], close: vi.fn() });
+		sheet.handleInput(DOWN);
+		sheet.handleInput(DOWN);
+		expect(prop(list(sheet.describe(CX)), "selected")).toBe("bash-2");
+
+		jobs = { running: JOBS.running, recent: [] };
+		details["bash-2"] = undefined;
+		const root = sheet.describe(CX);
+		expect(prop(list(root), "selected")).toBe("bash-2");
+		expect(prop(byRole(root, "omp.jobs.output")[0], "text")).toBe("1 error\n");
+		expect(sheet.render(100).join("\n")).toContain("1 error");
+
+		sheet.handleInput(UP);
+		sheet.handleInput(DOWN);
+		expect(list(sheet.describe(CX))?.c?.map(row => ("key" in row ? row.key : undefined))).toEqual([
+			"task-1",
+			"bash-1",
+		]);
+	});
+
 	it("routes clicks: a row selects, Cancel job cancels, Close and Esc close", () => {
 		const { sheet, source } = setup();
 		const events: NativeUiEvent[] = [
