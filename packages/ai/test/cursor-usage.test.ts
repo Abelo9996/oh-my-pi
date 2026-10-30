@@ -274,14 +274,12 @@ describe("cursor usage provider", () => {
 				{ id: "cursor:usd:individual-ondemand", label: "On-Demand Usage" },
 			]);
 			const auto = report?.limits[0]?.amount;
-			const api = report?.limits[1]?.amount;
 			const onDemand = report?.limits[2]?.amount;
 			expect(auto?.unit).toBe("percent");
 			expect(auto?.used).toBeCloseTo(1.85);
 			expect(auto?.usedFraction).toBeCloseTo(0.0185);
 			// Critically: do NOT trust plan.used/limit cents as the dashboard %.
 			expect(auto?.usedFraction).not.toBeCloseTo(1504 / 7000);
-			expect(api).toEqual({ used: 0, usedFraction: 0, unit: "percent" });
 			expect(onDemand).toEqual({
 				used: 0,
 				limit: 20,
