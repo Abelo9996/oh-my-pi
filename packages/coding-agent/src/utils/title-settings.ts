@@ -1,7 +1,7 @@
 /**
  * Automatic session-title settings: which generator names a session, how its
- * card icon shows, and what refreshes it: a todo replan, or a run of operator
- * prompts since it last changed.
+ * card icon shows, and what refreshes it: a todo replan, or the judge finding
+ * it stale after a run of operator prompts since it last changed.
  */
 import { register } from "../config/registry";
 
@@ -74,7 +74,8 @@ export const cfgTitleRefreshAfterPrompts = register({
 		tab: "tasks",
 		group: "Modes",
 		label: "Refresh Title After Prompts",
-		description: "Refresh a generated session title after this many operator prompts since it last changed",
+		description:
+			"After this many operator prompts since a generated session title last changed, ask the judge model whether it still fits the conversation and refresh it if not",
 		options: [
 			{ value: "0", label: "Off" },
 			{ value: "1", label: "Every prompt" },
