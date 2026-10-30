@@ -1065,7 +1065,7 @@ class TreeList implements Component {
 	/** Entry display text as theme-colored parts, shared by the ANSI row and the native item label. */
 	#entryParts(node: TreeSelectorNode): readonly EntryPart[] {
 		const entry = node.entry;
-		const normalize = (s: string) => s.replace(/[\r\n\t\u2028\u2029]/g, " ").trim();
+		const normalize = (s: string) => s.replace(/[\n\t]/g, " ").trim();
 
 		switch (entry.type) {
 			case "message": {
@@ -1233,7 +1233,7 @@ class TreeList implements Component {
 			case "bash": {
 				const rawCmd = String(args.command || "");
 				const cmd = rawCmd
-					.replace(/[\r\n\t\u2028\u2029]/g, " ")
+					.replace(/[\n\t]/g, " ")
 					.trim()
 					.slice(0, 50);
 				return `[bash: ${cmd}${rawCmd.length > 50 ? "..." : ""}]`;
