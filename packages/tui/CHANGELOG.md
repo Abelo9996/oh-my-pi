@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `assertModelSupportsEffortCeiling()`, which throws when a model has no supported thinking effort at or below a `task.maxEffort` ceiling ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes

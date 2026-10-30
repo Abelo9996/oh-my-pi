@@ -9,12 +9,12 @@ import {
 	modelSupportsEffortCeiling,
 } from "../src/thinking";
 
-function customReasoner(id = "custom-reasoner", api: Model["api"] = "openai-completions"): Model {
+function customReasoner(): Model {
 	return buildModel({
-		id,
-		name: id,
-		api,
-		provider: api === "factory-droid-agent" ? "factory-droid" : "custom",
+		id: "custom-reasoner",
+		name: "custom-reasoner",
+		api: "openai-completions",
+		provider: "custom",
 		baseUrl: "https://example.com/v1",
 		reasoning: true,
 		thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
