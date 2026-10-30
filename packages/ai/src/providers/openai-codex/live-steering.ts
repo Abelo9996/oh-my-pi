@@ -124,8 +124,8 @@ export class CodexSteerPump {
 				}
 				const sentAt = performance.now();
 				let ack: CodexSteerAck | undefined;
+				this.#submitted = true;
 				try {
-					this.#submitted = true;
 					ack = await withTimeout(this.#socket.steer(responseId, input), STEER_ACK_TIMEOUT_MS);
 				} catch (error) {
 					logger.debug("Codex steering acknowledgement missing", {

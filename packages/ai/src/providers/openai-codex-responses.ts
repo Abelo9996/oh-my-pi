@@ -293,7 +293,11 @@ const CODEX_RETRYABLE_EVENT_CODES = new Set([
 	"internal_error",
 	AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
 ]);
-/** Share native-lane refusals across sessions, but periodically rediscover server-side support. */
+/**
+ * Turn lanes (see `#steeringLaneKey`) that refused a steer, shared across sessions so each new
+ * session queues follow-ups instead of losing a response to the same refusal. Entries expire so
+ * server-side support is picked up once it ships.
+ */
 const unsupportedSteeringLanes = new LRUCache<string, true>({ max: 256, ttl: 4 * 60 * 60 * 1000 });
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
@@ -2231,7 +2235,8 @@ class CodexStreamProcessor {
 				// The failed attempt's response no longer takes input; a retry
 				// steers its own response.
 				const steered = await this.#retireSteering();
-				const recovered = await this.#recoverStreamError(error, steered);
+				this.#stopSteeringOnNativeLaneRejection(error, steered);
+				const recovered = await this.#recoverStreamError(error);
 				if (!recovered) {
 					await this.#settleSteering(false);
 					throw error;
@@ -2461,14 +2466,10 @@ class CodexStreamProcessor {
 		return firstTokenTime;
 	}
 
+	/** The server-side turn lane this request runs on: what the endpoint sees, not the local model entry. */
 	get #steeringLaneKey(): string {
-		return JSON.stringify([
-			this.requestContext.url,
-			this.model.id,
-			this.requestContext.transformedBody.model,
-			getCodexCredentialKey(this.requestContext.accountId, this.requestContext.apiKey),
-			this.requestContext.responsesLite,
-		]);
+		const { url, transformedBody, accountId, apiKey, responsesLite } = this.requestContext;
+		return JSON.stringify([url, transformedBody.model, getCodexCredentialKey(accountId, apiKey), responsesLite]);
 	}
 
 	/** Start delivering caller steering into the response `response.created` announced. */
@@ -2485,7 +2486,7 @@ class CodexStreamProcessor {
 			typeof responseId !== "string" ||
 			this.runtime.transport !== "websocket" ||
 			!this.model.compat.supportsSteering ||
-			unsupportedSteeringLanes.get(this.#steeringLaneKey)
+			unsupportedSteeringLanes.has(this.#steeringLaneKey)
 		) {
 			return;
 		}
@@ -2783,8 +2784,7 @@ class CodexStreamProcessor {
 		resetCodexWebSocketAppendState(state);
 	}
 
-	async #recoverStreamError(error: unknown, steered: boolean): Promise<boolean> {
-		this.#stopSteeringOnNativeLaneRejection(error, steered);
+	async #recoverStreamError(error: unknown): Promise<boolean> {
 		if (
 			error instanceof CodexSteerCommitError &&
 			this.runtime.websocketState &&
