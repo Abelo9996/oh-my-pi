@@ -548,9 +548,8 @@ function stripDataUriImages(markdown: string): string {
 }
 
 /**
- * `<meta>` names and properties, as the page writes them in any letter case, whose front-matter
- * line is worth its tokens to a reader; Open Graph, Twitter Card, viewport and verification tags
- * are not.
+ * Lowercased `<meta>` names whose front-matter line is worth its tokens to a reader; Open Graph,
+ * Twitter Card, viewport and verification tags are not.
  */
 const READER_META_NAMES: Record<string, true> = {
 	description: true,
@@ -569,22 +568,17 @@ const MAX_OMITTED_META_NAMES = 25;
 const MIN_RENDERED_CHARS = 100;
 
 /**
- * The native converter's markdown without the front-matter lines of `<meta>` tags outside
- * {@link READER_META_NAMES}. The converter opens with the page's head as a `---` block, one
- * `key: value` line each, keys and values escaped onto it as YAML scalars (a `<meta>` tag's key is
- * `meta-` and its name as written); the title, canonical and base lines stay. A `meta_omitted`
- * line names the tags left out, so a task about the page's own metadata sees which ones the page
- * has and where to read their values. A page whose only content is its `<head>` can fall under
- * the length check once pruned; it is returned whole.
+ * Drop the native converter's front-matter lines for `<meta>` tags outside {@link READER_META_NAMES}
+ * (keys `meta-<name>`, YAML-escaped) and name them in one `meta_omitted` line. A page whose only
+ * content is its `<head>` is returned whole.
  */
 function pruneFrontMatter(markdown: string): string {
 	if (!markdown.startsWith("---\n")) return markdown;
 	const end = markdown.indexOf("\n---\n", 3);
 	if (end < 0) return markdown;
-	const lines = markdown.slice(4, end).split("\n");
 	const kept: string[] = [];
 	const omitted: string[] = [];
-	for (const line of lines) {
+	for (const line of markdown.slice(4, end).split("\n")) {
 		const key = FRONT_MATTER_KEY_RE.exec(line);
 		// No front matter: the body opens with a `---` rule.
 		if (!key) return markdown;
@@ -595,29 +589,25 @@ function pruneFrontMatter(markdown: string): string {
 		} catch {
 			return markdown;
 		}
-		if (!name.startsWith("meta-") || Object.hasOwn(READER_META_NAMES, name.slice(5).toLowerCase())) {
-			kept.push(line);
-		} else {
+		if (name.startsWith("meta-") && !Object.hasOwn(READER_META_NAMES, name.slice(5).toLowerCase())) {
 			omitted.push(name.slice(5));
+		} else {
+			kept.push(line);
 		}
 	}
 	if (omitted.length === 0) return markdown;
 	const rest = markdown.slice(end);
-	const pruned = kept.length > 0 ? `---\n${kept.join("\n")}${rest}` : rest.slice("\n---\n".length);
-	if (stripDataUriImages(pruned).trim().length <= MIN_RENDERED_CHARS) return markdown;
-	// A name that is empty, or holds the list's separators or a quote, is written quoted.
-	const names = omitted
-		.slice(0, MAX_OMITTED_META_NAMES)
-		.map(name => (/^$|[,;"]/.test(name) ? JSON.stringify(name) : name));
-	const more = omitted.length - names.length;
-	const note = `${names.join(", ")}${more > 0 ? ` (+${more} more)` : ""}; read the URL with :raw for their values`;
+	const head = kept.join("\n");
+	// `renderHtmlToText` already stripped data-URI images, so the length check needs no second pass.
+	if ((head ? `---\n${head}${rest}` : rest.slice(5)).trim().length <= MIN_RENDERED_CHARS) return markdown;
+	const more = omitted.length - MAX_OMITTED_META_NAMES;
+	const note = `${omitted.slice(0, MAX_OMITTED_META_NAMES).join(", ")}${more > 0 ? ` (+${more} more)` : ""}; read the URL with :raw for their values`;
 	// A JSON string is a YAML double-quoted scalar once the characters YAML reads as line breaks are escaped.
 	const value = JSON.stringify(note).replace(
 		/[\u0085\u2028\u2029]/g,
 		c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
 	);
-	kept.push(`meta_omitted: ${value}`);
-	return `---\n${kept.join("\n")}${rest}`;
+	return `---\n${head ? `${head}\n` : ""}meta_omitted: ${value}${rest}`;
 }
 
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */

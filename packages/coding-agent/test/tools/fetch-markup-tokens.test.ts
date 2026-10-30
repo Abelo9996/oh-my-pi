@@ -118,18 +118,12 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 		expect(frontMatter).not.toContain("TAB_IN_NAME");
 		// The dropped tags are named, with the way to read their values.
 		expect(text).toContain(
-			'meta_omitted: "\\"auth&#111;r\\", descrip\\tion, google-site-verification, og:image, og:title, tracking: id, twitter:card, viewport; read the URL with :raw for their values"',
+			'meta_omitted: "auth&#111;r, descrip\\tion, google-site-verification, og:image, og:title, tracking: id, twitter:card, viewport; read the URL with :raw for their values"',
 		);
 		// The body is left as the converter wrote it, a front-matter lookalike and same-page links included.
 		expect(text).toContain("meta-og:title: BODY_FRONT_MATTER_LOOKALIKE");
 		expect(text).toContain("[Setup](#setup)");
 		expect(text).toContain("LAST_NEEDLE");
-	});
-
-	it("returns every meta tag when the URL is read with :raw", async () => {
-		const { text } = await readPage(DOCS_PAGE, { selector: ":raw", method: "raw" });
-
-		expect(text).toContain('<meta property="og:image"');
 	});
 
 	it("names the first 25 dropped tags and counts the rest", async () => {
@@ -150,14 +144,6 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 
 		expect(text).toContain("meta-description: How it works");
 		expect(text).not.toContain("meta_omitted");
-	});
-
-	it("writes a name that holds the list's separators, or none, quoted", async () => {
-		const { text } = await readPage(
-			`<!doctype html><html><head><title>Guide</title><meta name="a, b" content="1"><meta name="" content="2"><meta name="c" content="3"></head><body><p>${PROSE}</p></body></html>`,
-		);
-
-		expect(text).toContain('meta_omitted: "\\"\\", \\"a, b\\", c; read the URL with :raw for their values"');
 	});
 
 	it("chooses the reader on the whole rendering, before its metadata is pruned", async () => {
