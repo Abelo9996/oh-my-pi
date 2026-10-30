@@ -391,9 +391,10 @@ describe("task.batch validation", () => {
 	});
 
 	// The agent loop validates arguments against the wire schema before execute(),
-	// and that schema deletes undeclared keys. A seance-only field on an ordinary
-	// agent must still be refused by every call form instead of being dropped,
-	// leaving the child on its own model while the caller believes it pinned another.
+	// and that schema deletes undeclared keys. With per-call model off, `model` and
+	// `sourceSession` on an ordinary agent must still be refused by every call form
+	// instead of being dropped, leaving the child on its own model while the caller
+	// believes it pinned another.
 	// `task.structured` and `task.isolation.enabled` choose between the prebuilt and
 	// generated batch schemas, each with and without `isolated`.
 	it.each([

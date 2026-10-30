@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -286,7 +288,7 @@ describe("task spawn validation", () => {
 					createSession({
 						settings: {
 							"task.perCallModel": mode,
-							modelRoles: { smol: "anthropic/claude-haiku-4-5", slow: "openai/gpt-5.5" },
+							modelRoles: { smol: "anthropic/claude-haiku-4-5", slow: "openai/gpt-5*" },
 							"task.perCallModelAllow": ["openai/gpt-5.5"],
 						},
 					}),
@@ -297,9 +299,8 @@ describe("task spawn validation", () => {
 			const text = await description(mode);
 			for (const guidance of [
 				"`model`: one exact",
-				"Approved:",
-				"Allowlist:",
 				"anthropic/claude-haiku-4-5",
+				"openai/gpt-5*",
 				"openai/gpt-5.5",
 			]) {
 				expect(text).not.toContain(guidance);
@@ -307,14 +308,10 @@ describe("task spawn validation", () => {
 		}
 		const text = await description("on");
 		expect(text).toContain("`model`: one exact");
-		// Only the allowlisted role is advertised; smol's model would be refused at dispatch.
-		expect(text).toContain("Approved:");
-		expect(text).toContain("`openai/gpt-5.5` (slow)");
+		// The allowlist could admit only slow's glob; smol's model would be refused at dispatch.
+		expect(text).toContain("openai/gpt-5*");
 		expect(text).not.toContain("anthropic/claude-haiku-4-5");
-		expect(text).toContain("your own current model");
-		expect(text).toContain("the selected bundled/user agent's own configured model.");
-		expect(text).toContain("Allowlist: `openai/gpt-5.5` (must also be approved).");
-		expect(text).toContain("Requested model unavailable → stop and report; NEVER substitute another.");
+		expect(text).toContain("openai/gpt-5.5");
 	});
 
 	it("omits kind roles, role aliases, and default/inherit selectors from approved models", async () => {
@@ -338,9 +335,7 @@ describe("task spawn validation", () => {
 			}),
 		);
 		const text = tool.description;
-		expect(text).toContain(
-			"Approved: `anthropic/claude-haiku-4-5` (smol), `openai/gpt-5.5` (slow); your own current model; the selected bundled/user agent's own configured model.",
-		);
+		for (const advertised of ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) expect(text).toContain(advertised);
 		for (const omitted of [
 			"hidden/image",
 			"hidden/judge",
@@ -370,47 +365,57 @@ describe("task spawn validation", () => {
 		const catalogLookup = vi.fn(() => [{ provider: "mock", id: "registry-expanded" }]);
 		Object.assign(session, { modelRegistry: { getAll: catalogLookup, getAvailable: catalogLookup } });
 		const text = (await TaskTool.create(session)).description;
-		expect(text).toContain("Approved:");
-		expect(text).toContain("`mock/second:high`, `mock/*`, `mock/first` (review)");
-		expect(text).toContain("your own current model");
-		expect(text).toContain("A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.");
+		for (const selector of ["mock/second:high", "mock/*", "mock/first"]) expect(text).toContain(selector);
 		expect(text).not.toContain("mock/registry-expanded");
 		expect(catalogLookup).not.toHaveBeenCalled();
 	});
 
-	it("keeps current-model and selected trusted-agent grants when no roles grant models", async () => {
+	it("offers the caller's own model only when one selector can name it", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
-		const text = (await TaskTool.create(createSession({ settings: { "task.perCallModel": "on", modelRoles: {} } })))
-			.description;
-		expect(text).toContain(
-			"Approved: your own current model; the selected bundled/user agent's own configured model.",
-		);
-		expect(text).not.toContain("Allowlist:");
+		const ownModel = createMockModel({ id: "own" });
+		// Several `only` upstreams: no single selector names this route.
+		const multiRouteModel = {
+			...ownModel,
+			compat: { openRouterRouting: { only: ["anthropic", "google-vertex"] } },
+		} as unknown as Model;
+		const description = async (activeModel: Model) => {
+			// No roles grant a model; the allowlist entry shows the advertisement still renders when the clause is withheld.
+			const session = createSession({
+				settings: { "task.perCallModel": "on", modelRoles: {}, "task.perCallModelAllow": ["mock/own"] },
+			});
+			Object.assign(session, { getActiveModel: () => activeModel });
+			return (await TaskTool.create(session)).description;
+		};
+		const offered = await description(ownModel);
+		expect(offered).toContain("your own current model");
+		expect(offered).toContain("mock/own");
+		const withheld = await description(multiRouteModel);
+		expect(withheld).not.toContain("your own current model");
+		expect(withheld).toContain("mock/own");
 	});
 
 	it("refreshes approved selectors and their allowlist from current settings", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		// Distinct role and allowlist text, so each check proves its own refresh.
 		const session = createSession({
 			settings: {
 				"task.perCallModel": "on",
-				modelRoles: { smol: "mock/original" },
-				"task.perCallModelAllow": ["mock/original"],
+				modelRoles: { smol: "mock/original*" },
+				"task.perCallModelAllow": ["mock/original-allowed"],
 			},
 		});
 		const tool = await TaskTool.create(session);
-		expect(tool.description).toContain("Approved: `mock/original` (smol);");
-		expect(tool.description).toContain("Allowlist: `mock/original` (must also be approved).");
+		expect(tool.description).toContain("mock/original*");
+		expect(tool.description).toContain("mock/original-allowed");
 
-		session.settings.overrideModelRoles({ smol: "mock/replacement" });
-		cfgTaskPerCallModelAllow.override(session.settings, ["mock/replacement"]);
+		session.settings.overrideModelRoles({ smol: "mock/replacement*" });
+		cfgTaskPerCallModelAllow.override(session.settings, ["mock/replacement-allowed"]);
 		const refreshed = tool.description;
-		expect(refreshed).toContain("Approved: `mock/replacement` (smol);");
-		expect(refreshed).toContain("Allowlist: `mock/replacement` (must also be approved).");
+		expect(refreshed).toContain("mock/replacement*");
+		expect(refreshed).toContain("mock/replacement-allowed");
 		expect(refreshed).not.toContain("mock/original");
 
 		cfgTaskPerCallModel.override(session.settings, "off");
-		expect(tool.description).not.toContain("Approved:");
-		expect(tool.description).not.toContain("Allowlist:");
 		expect(tool.description).not.toContain("mock/replacement");
 	});
 

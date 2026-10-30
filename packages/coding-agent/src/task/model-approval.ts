@@ -27,11 +27,19 @@ import { isKindRole } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { cfgTaskDisabledAgents, cfgTaskPerCallModelAllow } from "./settings";
 
-/** A per-call model was rejected: not approved by the operator's configuration. */
+/** A per-call model was rejected: not an available chat model, or not approved by the operator's configuration. */
 export class PerCallModelError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "PerCallModelError";
+	}
+}
+
+/** The per-call model is not an available chat model, so no grant applies. */
+export class PerCallModelUnavailableError extends PerCallModelError {
+	constructor(message: string) {
+		super(message);
+		this.name = "PerCallModelUnavailableError";
 	}
 }
 
@@ -203,7 +211,6 @@ function globGrants(pattern: string, model: Model<Api>): boolean {
 function isGranted(model: Model<Api>, grants: PerCallModelGrants, chat: Model<Api>[], catalog: Model<Api>[]): boolean {
 	const settings = grants.settings.grantAuthority();
 	const target = formatModelStringWithRouting(model);
-	if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) return false;
 	const allow = cfgTaskPerCallModelAllow.get(settings);
 	if (allow.length > 0 && !allow.some(entry => entry.trim() === target)) return false;
 	return perCallModelGrantPatterns(grants).some(pattern => {
@@ -223,13 +230,18 @@ function isGranted(model: Model<Api>, grants: PerCallModelGrants, chat: Model<Ap
 	});
 }
 
-/** Throw {@link PerCallModelError} unless `model` is approved. */
+/** Throw {@link PerCallModelError} unless `model` is an available chat model the configuration approves. */
 export function assertPerCallModelApproved(
 	model: Model<Api>,
 	grants: PerCallModelGrants,
 	registry: ApprovalRegistry,
 ): void {
 	const chat = registry.getAvailable("chat");
+	if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) {
+		throw new PerCallModelUnavailableError(
+			`Per-call model ${formatModelStringWithRouting(model)} is not an available chat model.`,
+		);
+	}
 	if (isGranted(model, grants, chat, registry.getAll())) return;
 	const allowGuidance =
 		cfgTaskPerCallModelAllow.get(grants.settings.grantAuthority()).length > 0

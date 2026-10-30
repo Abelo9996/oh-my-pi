@@ -40,7 +40,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
-import { PerCallModelError } from "@oh-my-pi/pi-coding-agent/task/model-approval";
+import { PerCallModelError, PerCallModelUnavailableError } from "@oh-my-pi/pi-coding-agent/task/model-approval";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -1316,6 +1316,10 @@ describe("persisted subagent revival", () => {
 			// A parked parent grants nothing; the root's model is not substituted.
 			registry.unregister(parentId);
 			expect(() => nested(parentModel)).toThrow(`Parent agent "${parentId}"`);
+			// An unavailable model is not an approval denial, so the parked parent is not blamed for it.
+			const missing = perCallModelFixture("missing-model");
+			expect(() => nested(missing)).toThrow(PerCallModelUnavailableError);
+			expect(() => nested(missing)).not.toThrow(`Parent agent "${parentId}"`);
 			await expect(childOf(parentId)).rejects.toThrow(`Parent agent "${parentId}"`);
 			await expect(childOf(parentId, rootModel)).rejects.toThrow(/not approved/);
 

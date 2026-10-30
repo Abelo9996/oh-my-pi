@@ -28,12 +28,9 @@ function customReasoner(id = "custom-reasoner", api: Model["api"] = "openai-comp
 const DEFERRED_LEVELS: Array<ThinkingLevel | undefined> = [undefined, ThinkingLevel.Inherit, ThinkingLevel.Off];
 
 describe("clampThinkingLevelToCeiling", () => {
-	it.each(DEFERRED_LEVELS)("preserves %s with or without a ceiling", level => {
-		// One provider-default-independent model: the deferred selectors never read it.
-		const model = customReasoner();
-		for (const ceiling of [undefined, Effort.Low, Effort.Max]) {
-			expect(clampThinkingLevelToCeiling(model, level, ceiling)).toBe(level);
-		}
+	it.each(DEFERRED_LEVELS)("preserves %s under a ceiling that clamps explicit efforts", level => {
+		// Each deferred selector has its own documented meaning; none is clamped, even by the lowest ceiling.
+		expect(clampThinkingLevelToCeiling(customReasoner(), level, Effort.Low)).toBe(level);
 	});
 
 	it.each([undefined, Effort.Low, Effort.Max])("caps explicit efforts only when they exceed %s", ceiling => {

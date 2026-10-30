@@ -40,7 +40,12 @@ import {
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
 import { discoverAgents, getAgent } from "./discovery";
-import { assertPerCallModelApproved, parentModelGrantPattern, PerCallModelError } from "./model-approval";
+import {
+	assertPerCallModelApproved,
+	parentModelGrantPattern,
+	PerCallModelError,
+	PerCallModelUnavailableError,
+} from "./model-approval";
 import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
@@ -233,7 +238,13 @@ export function createPersistedSubagentReviverFactory(
 								ctx.modelRegistry,
 							);
 						} catch (error) {
-							if (liveParentSession || !(error instanceof PerCallModelError)) throw error;
+							// Only an approval denial depends on the parent; an unavailable model is refused either way.
+							if (
+								liveParentSession ||
+								!(error instanceof PerCallModelError) ||
+								error instanceof PerCallModelUnavailableError
+							)
+								throw error;
 							throw new PerCallModelError(
 								`${error.message} Parent agent "${ref.parentId ?? "unknown"}" of revived subagent "${ref.id}" is not live; its model grants nothing and its parent-local agent grants are unavailable until the parent is revived.`,
 							);
