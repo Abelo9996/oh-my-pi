@@ -335,6 +335,92 @@ describe("session tree picker", () => {
 		expect(p.selected).toBe("a3");
 	});
 
+	test.each(["\n", "\r", "\r\n", "\t", "\u2028", "\u2029"])(
+		"message labels fold %j without flattening the selected preview",
+		separator => {
+			const content = `Front End ${separator}${separator}Act as a UI lead`;
+			const entries = [
+				entry("user", null, user(content)),
+				entry("assistant", "user", assistant([{ type: "text", text: content }])),
+			];
+			const selector = new TreeSelectorComponent(
+				[{ entry: entries[0]!, children: [{ entry: entries[1]!, children: [] }] }],
+				"assistant",
+				40,
+				() => {},
+				() => {},
+			);
+			const p = treeProps(selector);
+			for (const item of p.items ?? []) {
+				const label = typeof item.label === "string" ? item.label : item.label.map(part => part.t).join("");
+				expect(label).toBe(`${item.id}: Front End ${" ".repeat(separator.length * 2)}Act as a UI lead`);
+			}
+			for (const row of selector.render(100)) {
+				expect(row).not.toMatch(/[\r\n\u2028\u2029]/);
+			}
+			const preview = selector.describe(pickerCx).c?.[0] as NativeNode;
+			expect(preview.c?.at(-1)).toMatchObject({ k: "md", p: { text: content } });
+		},
+	);
+
+	test("copied line separators cannot escape through tool summaries, session markers or label badges", () => {
+		const value = "before\u2028\u2029after";
+		const calls = [
+			{ name: "read", arguments: { path: value } },
+			{ name: "grep", arguments: { pattern: value } },
+			{ name: "glob", arguments: { path: value } },
+			{ name: "bash", arguments: { command: value } },
+			{ name: "task", arguments: { task: value } },
+		];
+		const nodes: TreeSelectorNode[] = [
+			{
+				entry: entry(
+					"calls",
+					null,
+					assistant(calls.map((call, i) => ({ type: "toolCall", id: `c${i}`, ...call }))),
+				),
+				children: [],
+			},
+			...calls.map((call, i) => ({
+				entry: entry(`tool${i}`, null, { ...toolResult(`c${i}`, ""), toolName: call.name } as AgentMessage),
+				children: [],
+			})),
+			...[
+				{ type: "label", targetId: "calls", label: value },
+				{ type: "model_change", model: value, provider: "demo" },
+			].map(
+				(marker, i) =>
+					({
+						entry: { ...marker, id: `marker${i}`, parentId: null, timestamp: "2026-10-29T00:00:00Z" },
+						children: [],
+						label: value,
+					}) as TreeSelectorNode,
+			),
+		];
+		const selector = new TreeSelectorComponent(
+			nodes,
+			null,
+			40,
+			() => {},
+			() => {},
+			undefined,
+			"all",
+		);
+		const p = treeProps(selector);
+		for (const id of [...calls.map((_, i) => `tool${i}`), "marker0", "marker1"]) {
+			const item = p.items?.find(item => item.id === id);
+			expect(item).toBeDefined();
+			const label = typeof item!.label === "string" ? item!.label : item!.label.map(part => part.t).join("");
+			expect(label).not.toMatch(/[\r\n\u2028\u2029]/);
+			expect(label).toContain("before");
+			expect(label).toContain("after");
+			for (const badge of item!.badges ?? []) expect(badge.text).toBe("before  after");
+		}
+		for (const row of selector.render(100)) {
+			expect(row).not.toMatch(/[\r\n\u2028\u2029]/);
+		}
+	});
+
 	test("typing and filter tabs change the order, never the catalogue", () => {
 		const selector = treeSelector();
 		const { items } = treeProps(selector);
