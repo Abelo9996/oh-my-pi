@@ -151,23 +151,24 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	// A bounded raw read locates a published `<id>.md`, which the helper can read verbatim past the
 	// read tool's page limit. A protocol resource can also name that file while prepending a warning
 	// (for a superseded run); only bypass the protocol when the preview matches the file's first line.
+	// `published` is the unannotated file, which a query parses as `agent://<id>/<path>` extraction does.
 	const outputSource = async id => {
 		const path = `agent://${id}`;
 		const located = await globalThis.__omp_call_tool__("read", { path: `${path}:raw:1-1` });
 		const filePath = located?.details?.resolvedPath;
-		const content = typeof filePath === "string" ? await callHelper("read", filePath) : undefined;
-		if (content !== undefined) {
-			const lineEnd = content.indexOf("\n");
-			const prefixLength = Math.min(lineEnd < 0 ? content.length : lineEnd, 100);
-			if (prefixLength > 0 ? located?.text?.startsWith(content.slice(0, prefixLength)) : located?.text === "") {
-				return { path: filePath, content };
+		const published = typeof filePath === "string" ? await callHelper("read", filePath) : undefined;
+		if (published !== undefined) {
+			const lineEnd = published.indexOf("\n");
+			const prefixLength = Math.min(lineEnd < 0 ? published.length : lineEnd, 100);
+			if (prefixLength > 0 ? located?.text?.startsWith(published.slice(0, prefixLength)) : located?.text === "") {
+				return { path: filePath, content: published, published };
 			}
 		}
-		return { path, content: await readToolText(path) };
+		return { path, content: await readToolText(path), published };
 	};
 	// One output's selection; options, results and errors match Python `output()` in `eval/py/prelude.py`.
 	const selectOutput = async (id, { format = "raw", query, offset, limit }) => {
-		const { path, content } = await outputSource(id);
+		const { path, content, published } = await outputSource(id);
 		const lines = content.split(/\r?\n/);
 		if (lines.at(-1) === "") lines.pop();
 		const totalLines = lines.length;
@@ -176,7 +177,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		if (query) {
 			let value;
 			try {
-				value = JSON.parse(content);
+				value = JSON.parse(published ?? content);
 			} catch (error) {
 				throw new Error(`Output ${id} is not valid JSON: ${error.message}`);
 			}

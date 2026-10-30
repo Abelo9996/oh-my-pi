@@ -416,4 +416,19 @@ describe("eval js output() options (issue #17455)", () => {
 		registry.setStatus("Scout", "idle");
 		expect(await vm.runInContext(`output("Scout")`, sandbox)).toBe(`${rows.join("\n")}\n`);
 	});
+
+	it("queries a superseded JSON output's published data, not the banner", async () => {
+		using tmp = TempDir.createSync("@eval-prelude-output-superseded-query-");
+		const sandbox = await loadOutputPrelude(tmp);
+		AgentRegistry.global().register({
+			id: "Report",
+			displayName: "Report",
+			kind: "sub",
+			session: { isStreaming: true } as AgentSession,
+			status: "running",
+		});
+
+		expect(await vm.runInContext(`output("Report")`, sandbox)).toContain("PREVIOUS run");
+		expect(await vm.runInContext(`output("Report", { query: ".files[0].path" })`, sandbox)).toBe('"a.ts"');
+	});
 });
