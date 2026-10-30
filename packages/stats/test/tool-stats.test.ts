@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getToolDashboardStats, syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { getFrustrationByModel, getRecentRequests, initDb, setFileOffset } from "@oh-my-pi/omp-stats/db";
+import { closeDb, getFrustrationByModel, getRecentRequests, initDb, setFileOffset } from "@oh-my-pi/omp-stats/db";
 import { getToolStats, getToolStatsByModel } from "@oh-my-pi/omp-stats/rollup";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import type { ToolUsageStats } from "@oh-my-pi/omp-stats/types";
@@ -368,6 +368,23 @@ describe("tool usage stats pipeline", () => {
 		expect(toolRow(stats, "wait").calls).toBe(1);
 		expect(toolRow(stats, "wait").errors).toBe(0);
 		expect(toolRow(stats, "read").errors).toBe(1);
+
+		// Model a database last synced before non-executions were classified separately.
+		const database = await initDb();
+		database.run("UPDATE tool_calls SET is_error = 1 WHERE tool_call_id = 'call-skipped'");
+		database.run("INSERT OR REPLACE INTO meta VALUES ('tool_calls_v2', 'complete')");
+		database.run("DELETE FROM meta WHERE key = 'tool_calls_v3'");
+		closeDb();
+
+		await syncAllSessions({ workers: 1 });
+		const repaired = getToolStats();
+		expect(toolRow(repaired, "wait").calls).toBe(1);
+		expect(toolRow(repaired, "wait").errors).toBe(0);
+		expect(toolRow(repaired, "read").errors).toBe(1);
+
+		closeDb();
+		await syncAllSessions({ workers: 1 });
+		expect(getToolStats()).toEqual(repaired);
 	});
 
 	it("links a result that lands in a later sync pass without duplicating the call", async () => {
