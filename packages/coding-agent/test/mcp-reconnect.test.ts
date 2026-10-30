@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
-import { createMCPJsonRpcError, MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
+import {
+	createMCPJsonRpcError,
+	MCPTransportError,
+	normalizeMCPTransportError,
+} from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
 	createLegacyMCPToolName,
@@ -10,6 +14,7 @@ import {
 	MCPTool,
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPImageContent } from "@oh-my-pi/pi-tui/tools/mcp";
+import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -171,6 +176,25 @@ describe("isRetriableConnectionError", () => {
 		});
 	}
 
+	for (const code of ["ENOTFOUND", "EAI_AGAIN", "FailedToOpenSocket"]) {
+		it(`retries a pre-dispatch ${code} failure with an uninformative message`, () => {
+			const error = normalizeMCPTransportError(Object.assign(new TypeError("Unable to connect"), { code }), {
+				transport: "http",
+				stage: "send",
+			});
+			expect(error).toMatchObject({ failure: "connect", stage: "connect", retryable: true, code });
+			expect(isRetriableConnectionError(error)).toBe(true);
+		});
+	}
+
+	for (const message of ["getaddrinfo ENOTFOUND example.invalid", "getaddrinfo EAI_AGAIN", "FailedToOpenSocket"]) {
+		it(`retries a pre-dispatch failure identified only by ${message}`, () => {
+			const error = normalizeMCPTransportError(new TypeError(message), { transport: "http", stage: "send" });
+			expect(error).toMatchObject({ failure: "connect", stage: "connect", retryable: true });
+			expect(isRetriableConnectionError(error)).toBe(true);
+		});
+	}
+
 	it("uses typed transport metadata without retrying ambiguous timeouts", () => {
 		expect(
 			isRetriableConnectionError(
@@ -211,6 +235,43 @@ describe("isRetriableConnectionError", () => {
 describe("MCPTool.execute retry on connection error", () => {
 	const noop = () => {};
 	const noCtx = {} as Parameters<MCPTool["execute"]>[3];
+
+	it("reconnects after a real HTTP DNS failure and sends the tool call only once", async () => {
+		let calls = 0;
+		let reconnects = 0;
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(request) {
+				calls++;
+				const body = (await request.json()) as { id: string | number };
+				return Response.json({ jsonrpc: "2.0", id: body.id, result: toolCallResult("recovered") });
+			},
+		});
+		const config = { type: "http" as const, url: "http://omp-mcp-test.invalid/mcp", timeout: 5_000 };
+		const failedTransport = new HttpTransport(config);
+		const healthyConfig = { ...config, url: `http://127.0.0.1:${server.port}/mcp` };
+		const healthyTransport = new HttpTransport(healthyConfig);
+		await failedTransport.connect();
+		await healthyTransport.connect();
+		const connection = { ...makeConnection(failedTransport), config };
+		const tool = new MCPTool(connection, TOOL_DEF, async () => {
+			reconnects++;
+			return { ...connection, config: healthyConfig, transport: healthyTransport };
+		});
+
+		try {
+			const result = await tool.execute("dns", {}, noop, noCtx);
+			expect(result.details?.isError).toBeFalsy();
+			expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+			expect(reconnects).toBe(1);
+			expect(calls).toBe(1);
+		} finally {
+			await failedTransport.close();
+			await healthyTransport.close();
+			await server.stop(true);
+		}
+	});
 
 	it("preserves image blocks returned by MCP tools", async () => {
 		const image: MCPImageContent = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
