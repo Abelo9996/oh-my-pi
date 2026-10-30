@@ -259,7 +259,7 @@ Catalog membership, credentials, built-in role defaults and saved transcripts gr
 
 Grants come from the operator's settings or an SDK host's settings instance; a plain `Settings.overlay()` created by a host is its own authority, including its roles and allowlist. Settings overlays derived for subagents never grant and defer to their parent's authority. Role and allowlist edits apply live, so removing a role stops it granting.
 
-When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models and the narrowing allowlist from settings, without resolving model availability.
+When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models and the narrowing allowlist. Bare role values are resolved through the current registry to exact `provider/model-id` selectors; without a registry they are omitted. Fully qualified selectors and globs remain as configured, without checking availability. The advertisement uses the same literal allowlist comparison as dispatch.
 
 A `model` for an agent with a `task.agentModelOverrides` entry fails preflight with a conflict error, so the operator's override is never silently replaced. Per-call `model` is not supported for the bundled seance agent, whose own `model` overrides its source session's saved model as before. A project or user agent that shadows the `seance` name is an ordinary agent: its `model` is a per-call `model`, held to every rule here.
 

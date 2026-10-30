@@ -41,6 +41,7 @@ import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-st
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { PerCallModelError, PerCallModelUnavailableError } from "@oh-my-pi/pi-coding-agent/task/model-approval";
+import { cfgTaskMaxEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -664,7 +665,7 @@ describe("persisted subagent revival", () => {
 		await expect(revive(Settings.isolated())).rejects.toThrow(/not approved/);
 	});
 
-	it("refuses to revive or dispatch a per-call worker on a model that cannot run at or below task.maxEffort", async () => {
+	it("refuses before session creation when a per-call model cannot run at or below task.maxEffort", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const highOnly = buildModel({
 			id: "mock-high-only",
@@ -680,9 +681,10 @@ describe("persisted subagent revival", () => {
 			maxTokens: 8192,
 		});
 		const disposed: boolean[] = [];
+		const settings = Settings.isolated({ "task.maxEffort": "low", modelRoles: { review: "mock/mock-high-only" } });
 		let options: CreateAgentSessionOptions | undefined;
 		let sessionModel: typeof highOnly | undefined = highOnly;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async created => {
+		const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async created => {
 			options = created;
 			const session = Object.assign(createRevivedSession([]).session, {
 				model: sessionModel,
@@ -703,7 +705,7 @@ describe("persisted subagent revival", () => {
 			});
 			const ref = createRef(sessionFile);
 			const reviver = await createFactory(cwd, undefined, {
-				settings: Settings.isolated({ "task.maxEffort": "low", modelRoles: { review: "mock/mock-high-only" } }),
+				settings,
 				modelRegistry: {
 					authStorage: {},
 					awaitBackgroundRefresh: async () => {},
@@ -718,12 +720,15 @@ describe("persisted subagent revival", () => {
 		await expect(revive(true)).rejects.toThrow(
 			"mock/mock-high-only has no supported thinking effort at or below task.maxEffort=low",
 		);
-		expect(disposed).toEqual([true]);
+		expect(create).not.toHaveBeenCalled();
+		expect(disposed).toEqual([]);
 		await expect(revive(false)).resolves.toBeDefined();
 
 		// A model the worker reaches later (e.g. an extension swap) is held to the same floor at dispatch.
+		cfgTaskMaxEffort.override(settings, Effort.High);
 		sessionModel = undefined;
 		await expect(revive(true)).rejects.toThrow("is no longer available");
+		cfgTaskMaxEffort.override(settings, Effort.Low);
 		const check = options?.assertDispatchModel;
 		if (!check) throw new Error("Expected a per-call dispatch check");
 		expect(() => check(highOnly)).toThrow("no supported thinking effort at or below task.maxEffort=low");

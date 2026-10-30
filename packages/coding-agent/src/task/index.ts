@@ -732,6 +732,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.name === "string" && params.name.trim()) {
 			lines.push(`Name: ${truncateForPrompt(params.name)}`);
 		}
+		if (typeof params.model === "string") {
+			lines.push(`Model: ${truncateForPrompt(params.model)}`);
+		}
 		if (typeof params.task === "string") {
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
@@ -770,6 +773,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			}
 			for (const [index, item] of tasks.entries()) {
+				if (isRecord(item) && typeof item.model === "string") {
+					lines.push(`Task ${index + 1} model: ${truncateForPrompt(item.model)}`);
+				}
 				if (isRecord(item) && typeof item.taskFile === "string") {
 					lines.push(`Task ${index + 1} file: ${truncateForPrompt(sanitizeText(JSON.stringify(item.taskFile)))}`);
 				}
@@ -902,7 +908,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			perCallModelEnabled: perCallModel,
 			perCallModelAdvertisement: perCallModel
-				? getPerCallModelAdvertisement(this.session.settings, this.session.getActiveModel?.())
+				? getPerCallModelAdvertisement(
+						this.session.settings,
+						this.session.getActiveModel?.(),
+						this.session.modelRegistry,
+					)
 				: undefined,
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),

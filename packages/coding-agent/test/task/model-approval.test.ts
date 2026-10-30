@@ -42,29 +42,13 @@ const pinnedSonnet = parseModelPattern("openrouter/anthropic/claude-sonnet-4.5@a
 // Separate catalog models: the base costs 8x the `:low` variant's input price.
 const codingRouter = routerModel("nanogpt", "nanogpt/coding-router", "https://nano-gpt.com/api/v1");
 const codingRouterLow = routerModel("nanogpt", "nanogpt/coding-router:low", "https://nano-gpt.com/api/v1");
-const droidModel = (id: string, rotation: string[]) =>
-	buildModel(
-		buildFactoryDroidModel(
-			factoryDroidRegistry().find(entry => entry.spec.id === id)!,
-			{ apiProviders: rotation },
-		),
-	);
-// Factory sends Fable's refusal chain to Opus 5 natively on the first-party Anthropic upstream.
-const droidFable = droidModel("claude-fable-5", ["anthropic"]);
-const droidVertexFable = droidModel("claude-fable-5.1", ["vertex_anthropic"]);
-const droidOpus = droidModel("claude-opus-5", ["anthropic"]);
-const chat = [
-	target,
-	other,
-	bracketed,
-	bracketImposter,
-	sonnet,
-	codingRouter,
-	codingRouterLow,
-	droidFable,
-	droidVertexFable,
-	droidOpus,
-];
+const droidFable = buildModel(
+	buildFactoryDroidModel(
+		factoryDroidRegistry().find(entry => entry.spec.id === "claude-fable-5")!,
+		{ apiProviders: ["anthropic"] },
+	),
+);
+const chat = [target, other, bracketed, bracketImposter, sonnet, codingRouter, codingRouterLow, droidFable];
 const registry = {
 	getAll: () => [...chat, image],
 	getAvailable: (kind?: string) => (kind === "chat" ? chat : [...chat, image]),
@@ -305,21 +289,9 @@ const rows: Row[] = [
 		approved: false,
 	},
 	{
-		name: "a model whose provider may fall back server-side is approved: the request omits the chain and a handoff fails closed",
+		name: "a configured Factory chat role grants its model like any other provider",
 		settings: { modelRoles: { review: "factory-droid/claude-fable-5" } },
 		model: droidFable,
-		approved: true,
-	},
-	{
-		name: "a model whose server-side fallback target is also approved stays approved",
-		settings: { modelRoles: { review: "factory-droid/claude-fable-5", smol: "factory-droid/claude-opus-5" } },
-		model: droidFable,
-		approved: true,
-	},
-	{
-		name: "a route without a server-side fallback needs no fallback approval",
-		settings: { modelRoles: { review: "factory-droid/claude-fable-5.1" } },
-		model: droidVertexFable,
 		approved: true,
 	},
 	{
@@ -370,6 +342,31 @@ describe("per-call model advertisement", () => {
 			allowlist: ["mock/target", "unavailable/model@upstream"],
 			parentModelWithheld: false,
 		});
+	});
+
+	it.each([{ allowlist: [] }, { allowlist: ["mock/target"] }])(
+		"advertises a bare role as an exact selector with allowlist $allowlist",
+		({ allowlist }) => {
+			const settings = Settings.isolated({
+				modelRoles: { review: "target" },
+				"task.perCallModelAllow": allowlist,
+			});
+			expect(approved(target, { settings, agentName: "worker" })).toBe(true);
+			expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([
+				{ role: "review", patterns: ["mock/target"] },
+			]);
+		},
+	);
+
+	it("uses the dispatch allowlist's literal case comparison in advertisements", () => {
+		const mixedCase = createMockModel({ id: "MiniMax-M2" });
+		const modelRegistry = { getAll: () => [mixedCase], getAvailable: () => [mixedCase] };
+		const settings = Settings.isolated({
+			modelRoles: { review: "mock/MiniMax-M2" },
+			"task.perCallModelAllow": ["mock/minimax-m2"],
+		});
+		expect(approved(mixedCase, { settings, agentName: "worker" }, modelRegistry)).toBe(false);
+		expect(getPerCallModelAdvertisement(settings, undefined, modelRegistry).roles).toEqual([]);
 	});
 
 	it("withholds the own-model clause when the parent's routing cannot be written as one selector", () => {

@@ -251,6 +251,7 @@ export function createPersistedSubagentReviverFactory(
 						}
 					};
 					assertApprovedModel(perCallModel);
+					assertModelSupportsEffortCeiling(perCallModel, cfgTaskMaxEffort.get(ctx.settings));
 				} catch (error) {
 					await reopened.close();
 					throw error;
@@ -412,8 +413,7 @@ export function createPersistedSubagentReviverFactory(
 				mcpFollower?.dispose();
 				throw error;
 			}
-			// A per-call worker runs only on its exact saved model, never a similarly named
-			// survivor, and fails instead of running at the model's floor above the live ceiling.
+			// A per-call worker runs only on its exact saved model, never a similarly named survivor.
 			if (init.perCallModel) {
 				try {
 					const saved = init.perCallModelIdentity!;
@@ -423,7 +423,6 @@ export function createPersistedSubagentReviverFactory(
 							`Cannot revive subagent "${ref.id}": its per-call model ${saved} is no longer available${identity ? ` (resolution found ${identity})` : ""}. A per-call worker revives only on its exact saved model.`,
 						);
 					}
-					assertModelSupportsEffortCeiling(session.model!, cfgTaskMaxEffort.get(ctx.settings));
 					// An explicit unset selector must not inherit a new default while reviving.
 					if (init.perCallThinkingLevel === null) session.setThinkingLevel(undefined);
 				} catch (error) {

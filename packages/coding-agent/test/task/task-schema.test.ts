@@ -357,6 +357,18 @@ describe("task spawn validation", () => {
 		expect(catalogLookup).not.toHaveBeenCalled();
 	});
 
+	it("advertises a bare role's resolved exact model selector", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const model = createMockModel({ id: "target" });
+		const session = createSession({
+			settings: { "task.perCallModel": "on", modelRoles: { review: "target" } },
+		});
+		Object.assign(session, { modelRegistry: { getAll: () => [model], getAvailable: () => [model] } });
+		const text = (await TaskTool.create(session)).description;
+		expect(text).toContain("`mock/target` (review)");
+		expect(text).not.toContain("`target` (review)");
+	});
+
 	it("offers the caller's own model only when one selector can name it", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const ownModel = createMockModel({ id: "own" });

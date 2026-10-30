@@ -201,6 +201,20 @@ describe("eval tool description", () => {
 		expect(catalogLookup).not.toHaveBeenCalled();
 	});
 
+	it("advertises a bare role's resolved exact model selector for agent() and workpool()", () => {
+		const model = createMockModel({ id: "target" });
+		const session = makeSession({
+			readActive: false,
+			settings: { "task.perCallModel": "eval", modelRoles: { review: "target" } },
+		});
+		Object.assign(session, { modelRegistry: { getAll: () => [model], getAvailable: () => [model] } });
+		const tool = new EvalTool(session);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain("`mock/target` (review)");
+			expect(text).not.toContain("`target` (review)");
+		}
+	});
+
 	it("renders supplied helper advertisement data only when its per-call gate is enabled", () => {
 		const options = {
 			py: false,
