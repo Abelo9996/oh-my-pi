@@ -5,10 +5,13 @@
  * A model-facing selector may only pick a chat model the operator already
  * routes to: a configured chat role's value, the selected agent's own
  * frontmatter model (only when that agent is bundled or user-level), or the
- * parent's live model. Catalog membership, credentials, built-in role
- * defaults, project agent frontmatter, other agents' frontmatter and saved
- * transcripts grant nothing. `task.perCallModelAllow`, when set, narrows the
- * result to the exact models it lists.
+ * parent's live model. Grants come from {@link Settings.grantAuthority}, which
+ * leaves out project settings: a repository's files are writable by the agent,
+ * so they and subagent-injected settings can only narrow the result (allowlist,
+ * disabled agents). Catalog membership, credentials, built-in role defaults,
+ * project agent frontmatter, other agents' frontmatter and saved transcripts
+ * grant nothing. `task.perCallModelAllow`, when set, narrows the result to the
+ * exact models it lists.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
@@ -46,8 +49,10 @@ export class PerCallModelUnavailableError extends PerCallModelError {
 
 /**
  * Inputs that grant per-call models; nothing here is persisted as a grant. `settings` is read live,
- * so configuration changes apply to the next request. Spawn snapshots the agent, parent model and
- * match preferences; cold revival snapshots the agent and preferences but reads the live parent on each request.
+ * so configuration changes apply to the next request: its grant authority grants, while its own
+ * merged view (project and subagent-injected layers included) can only narrow. Spawn snapshots the
+ * agent, parent model and match preferences; cold revival snapshots the agent and preferences but
+ * reads the live parent on each request.
  */
 export interface PerCallModelGrants {
 	settings: Settings;
@@ -139,6 +144,18 @@ function allowlistAdmitsIdentity(allow: string[], identity: string): boolean {
 	return allow.length === 0 || allow.some(entry => entry.trim() === identity);
 }
 
+/**
+ * The operator's allowlist and the live one, which includes project and subagent-injected layers.
+ * A model must satisfy both, so a project list can narrow the operator's but never replace it.
+ */
+function perCallAllowlists(settings: Settings): [operator: string[], live: string[]] {
+	return [cfgTaskPerCallModelAllow.get(settings.grantAuthority()), cfgTaskPerCallModelAllow.get(settings)];
+}
+
+function allowlistsAdmitIdentity(allowlists: string[][], identity: string): boolean {
+	return allowlists.every(allow => allowlistAdmitsIdentity(allow, identity));
+}
+
 /** A non-exact role value resolves by the same preferences for approval and advertisement. */
 function resolveGrantPattern(
 	pattern: string,
@@ -179,14 +196,18 @@ function allowlistCouldAdmitPattern(pattern: string, allow: string[]): boolean {
 	return false;
 }
 
-/** Stable prompt data: only operator-owned settings grant or narrow the advertised selectors. */
+/**
+ * Stable prompt data: only operator-owned settings grant; they and the live (project or
+ * subagent-injected) settings narrow the advertised selectors.
+ */
 export function getPerCallModelAdvertisement(
 	settings: Settings,
 	parentModel?: Model<Api>,
 	registry?: ApprovalRegistry,
 ): PerCallModelAdvertisement {
 	const authority = settings.grantAuthority();
-	const allow = cfgTaskPerCallModelAllow.get(authority);
+	const allowlists = perCallAllowlists(settings);
+	const [operatorAllow, liveAllow] = allowlists;
 	const roles = configuredRoleGrantPatterns(authority)
 		.map(({ role, patterns }) => ({
 			role,
@@ -209,26 +230,31 @@ export function getPerCallModelAdvertisement(
 							: identity,
 					];
 				})
-				.filter(pattern => allowlistCouldAdmitPattern(pattern, allow)),
+				.filter(pattern => allowlists.every(allow => allowlistCouldAdmitPattern(pattern, allow))),
 		}))
 		.filter(({ patterns }) => patterns.length > 0);
 	const parentPattern = parentModel && parentModelGrantPattern(parentModel);
 	return {
 		roles,
-		allowlist: [...new Set(allow.map(entry => entry.trim()))],
+		allowlist: [...new Set((operatorAllow.length > 0 ? operatorAllow : liveAllow).map(entry => entry.trim()))].filter(
+			entry => allowlistsAdmitIdentity(allowlists, entry),
+		),
 		// Same literal comparison dispatch applies to the allowlist.
 		parentModelWithheld:
-			parentModel !== undefined && (parentPattern === undefined || !allowlistAdmitsIdentity(allow, parentPattern)),
+			parentModel !== undefined &&
+			(parentPattern === undefined || !allowlistsAdmitIdentity(allowlists, parentPattern)),
 	};
 }
 
 function perCallModelGrantPatterns(grants: PerCallModelGrants): string[] {
 	const settings = grants.settings.grantAuthority();
 	const { agentName } = grants;
+	// Live settings can disable an agent the operator left enabled, never the reverse.
 	const trustedAgent =
 		(grants.agentSource === "bundled" || grants.agentSource === "user") &&
 		!grants.agentRemoved &&
-		!cfgTaskDisabledAgents.get(settings).includes(agentName);
+		!cfgTaskDisabledAgents.get(settings).includes(agentName) &&
+		!cfgTaskDisabledAgents.get(grants.settings).includes(agentName);
 	return [
 		...new Set([
 			...configuredRoleGrantPatterns(settings).flatMap(({ patterns }) => patterns),
@@ -255,10 +281,8 @@ function globGrants(pattern: string, model: Model<Api>): boolean {
 
 /** Whether the configuration grants this model; the caller has already checked chat availability. */
 function isGranted(model: Model<Api>, grants: PerCallModelGrants, chat: Model<Api>[], catalog: Model<Api>[]): boolean {
-	const settings = grants.settings.grantAuthority();
 	const target = formatModelStringWithRouting(model);
-	const allow = cfgTaskPerCallModelAllow.get(settings);
-	if (!allowlistAdmitsIdentity(allow, target)) return false;
+	if (!allowlistsAdmitIdentity(perCallAllowlists(grants.settings), target)) return false;
 	return perCallModelGrantPatterns(grants).some(pattern => {
 		// Full-catalog literals win even when unavailable, so :low and [1m] never broaden a grant.
 		const exact = exactIdentity(pattern, catalog);
@@ -287,11 +311,10 @@ export function assertPerCallModelApproved(
 		);
 	}
 	if (isGranted(model, grants, chat, registry.getAll())) return;
-	const allowGuidance =
-		cfgTaskPerCallModelAllow.get(grants.settings.grantAuthority()).length > 0
-			? " It must also be listed in task.perCallModelAllow."
-			: "";
+	const allowGuidance = perCallAllowlists(grants.settings).some(allow => allow.length > 0)
+		? " It must also be listed in task.perCallModelAllow."
+		: "";
 	throw new PerCallModelError(
-		`Per-call model ${formatModelStringWithRouting(model)} is not approved for agent "${grants.agentName}": use a model named by a configured chat role, the selected agent's own frontmatter (bundled or user-level agents only), or the parent's model.${allowGuidance} Catalog or credentials alone do not approve a model.`,
+		`Per-call model ${formatModelStringWithRouting(model)} is not approved for agent "${grants.agentName}": use a model named by a chat role configured outside project settings, the selected agent's own frontmatter (bundled or user-level agents only), or the parent's model.${allowGuidance} Catalog or credentials alone do not approve a model.`,
 	);
 }

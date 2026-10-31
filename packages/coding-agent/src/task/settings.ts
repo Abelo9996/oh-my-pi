@@ -315,7 +315,7 @@ export const cfgTaskPerCallModel = register({
 		group: "Subagents",
 		label: "Per-Call Model",
 		description:
-			"Whether a subagent call may pick its model with one exact provider/model-id[@upstream][:level] selector. An @upstream pin is part of the model identity and is supported only by aggregators. Only models the configuration already routes to are accepted.",
+			"Whether a subagent call may pick its model with one exact provider/model-id[@upstream][:level] selector. An @upstream pin is part of the model identity and is supported only by aggregators. Only models the configuration already routes to are accepted. Project settings can turn it off but not on, and never approve a model.",
 		options: [
 			{ value: "off", label: "Off", description: "Reject `model` on task items and eval agent()/workpool()" },
 			{ value: "eval", label: "Eval only", description: "Accept `model` in eval agent() and workpool() only" },
@@ -324,10 +324,16 @@ export const cfgTaskPerCallModel = register({
 	},
 });
 
-/** Whether `task.perCallModel` accepts a per-call `model` for this invocation kind. */
+/**
+ * Whether `task.perCallModel` accepts a per-call `model` for this invocation kind. The operator's
+ * layers ({@link Settings.grantAuthority}) must enable it; project and subagent-injected settings,
+ * which the live merged value includes, can only turn it off.
+ */
 export function perCallModelEnabled(settings: Settings, invocationKind: "task" | "eval"): boolean {
-	const mode = cfgTaskPerCallModel.get(settings);
-	return mode === "on" || (mode === "eval" && invocationKind === "eval");
+	return [settings.grantAuthority(), settings].every(layers => {
+		const mode = cfgTaskPerCallModel.get(layers);
+		return mode === "on" || (mode === "eval" && invocationKind === "eval");
+	});
 }
 
 /**
@@ -362,7 +368,7 @@ export const cfgTaskPerCallModelAllow = register({
 		// The editor writes the global layer; hide a project-supplied list so the repository cannot promote it.
 		condition: "perCallModelAllowNotProject",
 		description:
-			"Exact selectors: `provider/model-id`, including `@upstream` only for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`). When set, a per-call model must also be listed here. Empty: every model the configuration grants.",
+			"Exact selectors: `provider/model-id`, including `@upstream` only for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`). When set, a per-call model must also be listed here. Empty: every model the configuration grants. A project list can only narrow this one.",
 	},
 });
 

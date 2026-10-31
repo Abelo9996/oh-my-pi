@@ -176,10 +176,19 @@ describe("settings registry", () => {
 		const host = operator.overlay({ modelRoles: { review: "mock/target" } });
 		const child = host.overlay({ modelRoles: { advisor: "mock/other" } }, { derived: true });
 		const grandchild = child.overlay({}, { derived: true });
-		expect(operator.grantAuthority()).toBe(operator);
-		expect(host.grantAuthority()).toBe(host);
-		expect(child.grantAuthority()).toBe(host);
-		expect(grandchild.grantAuthority()).toBe(host);
+		expect(operator.grantAuthority().getModelRole("review")).toBeUndefined();
+		expect(host.grantAuthority().getModelRole("review")).toBe("mock/target");
+		expect(child.grantAuthority()).toBe(host.grantAuthority());
+		expect(grandchild.grantAuthority()).toBe(host.grantAuthority());
+		expect(child.grantAuthority().getModelRole("advisor")).toBeUndefined();
+	});
+
+	it("rebuilds a host overlay's grant authority after its parent changes", () => {
+		const operator = Settings.isolated({ modelRoles: { review: "mock/target" } });
+		const host = operator.overlay();
+		expect(host.grantAuthority().getModelRole("review")).toBe("mock/target");
+		operator.setModelRole("review", "mock/other");
+		expect(host.grantAuthority().getModelRole("review")).toBe("mock/other");
 	});
 
 	it.each([false, true])("preserves derived=%s when restoring overlay layers", derived => {
@@ -187,7 +196,7 @@ describe("settings registry", () => {
 		const child = parent.overlay({ modelRoles: { review: "mock/target" } }, { derived });
 		const restored = parent.restoreOverlay(child.overlayLayers());
 		expect(restored.getModelRole("review")).toBe("mock/target");
-		expect(restored.grantAuthority()).toBe(derived ? parent : restored);
+		expect(restored.grantAuthority().getModelRole("review")).toBe(derived ? undefined : "mock/target");
 	});
 
 	it("preserves a derived view's host authority when cloning for cwd", async () => {
@@ -195,11 +204,10 @@ describe("settings registry", () => {
 		const host = operator.overlay({ modelRoles: { review: "mock/target" } });
 		const child = host.overlay({ modelRoles: { advisor: "mock/other" } }, { derived: true });
 		const clone = await child.cloneForCwd(host.getCwd());
-		expect(clone.grantAuthority()).not.toBe(clone);
 		expect(clone.grantAuthority().getModelRole("review")).toBe("mock/target");
 		expect(clone.grantAuthority().getModelRole("advisor")).toBeUndefined();
 		const hostClone = await host.cloneForCwd(host.getCwd());
-		expect(hostClone.grantAuthority()).toBe(hostClone);
+		expect(hostClone.grantAuthority().getModelRole("review")).toBe("mock/target");
 	});
 
 	it("delivers every synchronous parent write to an overlay", async () => {

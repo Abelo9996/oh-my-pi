@@ -348,7 +348,11 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 /** The per-call gate's refusal for `invocationKind` calls, or `undefined` when `task.perCallModel` allows them. */
 function perCallModelDisabledReason(settings: Settings, invocationKind: "task" | "eval"): string | undefined {
 	if (perCallModelEnabled(settings, invocationKind)) return undefined;
-	return `Per-call model is disabled for ${invocationKind} calls (task.perCallModel: ${cfgTaskPerCallModel.get(settings)}). Omit model to use the agent's configured model.`;
+	const mode = cfgTaskPerCallModel.get(settings);
+	const operatorMode = cfgTaskPerCallModel.get(settings.grantAuthority());
+	// Project settings can turn the gate off but never on, so name both values when they differ.
+	const setting = mode === operatorMode ? mode : `${operatorMode}, project: ${mode}`;
+	return `Per-call model is disabled for ${invocationKind} calls (task.perCallModel: ${setting}). Omit model to use the agent's configured model.`;
 }
 
 /**

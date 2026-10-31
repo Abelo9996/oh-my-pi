@@ -1,4 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -6,8 +8,8 @@ import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid"
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { getModelMatchPreferences, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
 	assertPerCallModelApproved,
@@ -16,8 +18,11 @@ import {
 	PerCallModelError,
 	type PerCallModelGrants,
 } from "@oh-my-pi/pi-coding-agent/task/model-approval";
-import { cfgTaskPerCallModelAllow } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { invalidModelSelectorReason } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import { cfgTaskPerCallModelAllow, perCallModelEnabled } from "@oh-my-pi/pi-coding-agent/task/settings";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+import { YAML } from "bun";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
 const target = createMockModel({ id: "target" });
 const other = createMockModel({ id: "other" });
@@ -305,6 +310,18 @@ const rows: Row[] = [
 		overlay: { modelRoles: { advisor: "mock/other" } },
 		approved: true,
 	},
+	{
+		name: "a subagent overlay's allowlist narrows the operator's grants",
+		settings: { modelRoles: { review: "mock/target" } },
+		overlay: { "task.perCallModelAllow": ["mock/other"] },
+		approved: false,
+	},
+	{
+		name: "a subagent overlay's allowlist cannot replace the operator's",
+		settings: { modelRoles: { review: "mock/*" }, "task.perCallModelAllow": ["mock/other"] },
+		overlay: { "task.perCallModelAllow": ["mock/target"] },
+		approved: false,
+	},
 ];
 
 describe("per-call model advertisement", () => {
@@ -387,15 +404,12 @@ describe("per-call model advertisement", () => {
 		expect(getPerCallModelAdvertisement(unlisted, sonnet).parentModelWithheld).toBe(true);
 	});
 
-	it("reads live grant authority, excluding derived settings but honoring host overlays", () => {
+	it("reads live grant authority: derived settings never grant, host overlays do", () => {
 		const root = Settings.isolated({
 			modelRoles: { smol: "mock/target" },
 			"task.perCallModelAllow": ["mock/target"],
 		});
-		const child = root.overlay(
-			{ modelRoles: { slow: "mock/other" }, "task.perCallModelAllow": ["mock/other"] },
-			{ derived: true },
-		);
+		const child = root.overlay({ modelRoles: { slow: "mock/other" } }, { derived: true });
 		expect(getPerCallModelAdvertisement(child)).toEqual(getPerCallModelAdvertisement(root));
 		root.setModelRole("smol", "mock/edited");
 		cfgTaskPerCallModelAllow.override(root, ["mock/edited"]);
@@ -412,6 +426,19 @@ describe("per-call model advertisement", () => {
 		expect(getPerCallModelAdvertisement(host)).toEqual({
 			roles: [{ role: "slow", patterns: ["host/model"] }],
 			allowlist: ["host/model"],
+			parentModelWithheld: false,
+		});
+	});
+
+	it("advertises only what both the operator's and a derived allowlist admit", () => {
+		const root = Settings.isolated({
+			modelRoles: { smol: "mock/target", slow: "mock/other" },
+			"task.perCallModelAllow": ["mock/target", "mock/other"],
+		});
+		const child = root.overlay({ "task.perCallModelAllow": ["mock/other", "mock/extra"] }, { derived: true });
+		expect(getPerCallModelAdvertisement(child)).toEqual({
+			roles: [{ role: "slow", patterns: ["mock/other"] }],
+			allowlist: ["mock/other"],
 			parentModelWithheld: false,
 		});
 	});
@@ -540,4 +567,116 @@ describe("per-call model grants", () => {
 		const grants = { settings: Settings.isolated({ "task.perCallModelAllow": ["mock/other"] }), agentName: "worker" };
 		expect(() => assertPerCallModelApproved(target, grants, registry)).toThrow(/task\.perCallModelAllow/);
 	});
+});
+
+// Repository settings are agent-writable, so they may narrow per-call grants but never widen them.
+describe("project settings and per-call grants", () => {
+	let state: SettingsTestState | undefined;
+	let tempDir: TempDir;
+	let agentDir: string;
+	let project: string;
+
+	beforeEach(() => {
+		state = beginSettingsTest();
+		tempDir = TempDir.createSync("@pi-per-call-project-");
+		agentDir = tempDir.join("agent");
+		project = tempDir.join("repo");
+		for (const dir of [agentDir, project]) fs.mkdirSync(dir, { recursive: true });
+	});
+
+	afterEach(() => {
+		restoreSettingsTestState(state);
+		state = undefined;
+		AgentStorage.close();
+		tempDir.removeSync();
+	});
+
+	function writeRepositorySettings(settings: Record<string, unknown>): void {
+		fs.mkdirSync(getProjectAgentDir(project), { recursive: true });
+		fs.writeFileSync(path.join(getProjectAgentDir(project), "settings.json"), JSON.stringify(settings));
+	}
+
+	async function load(operator: Record<string, unknown>, repository?: Record<string, unknown>): Promise<Settings> {
+		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify(operator));
+		if (repository) writeRepositorySettings(repository);
+		return Settings.loadIsolated({ cwd: project, agentDir });
+	}
+
+	it("never grants through a project role, including one written mid-session", async () => {
+		const settings = await load({ modelRoles: { review: "mock/target" } });
+		writeRepositorySettings({ modelRoles: { smol: "mock/other", review: "mock/other" } });
+		// Preflight reloads settings before every spawn.
+		await settings.reloadFromDisk();
+		expect(settings.getModelRole("smol")).toBe("mock/other");
+		const grants = { settings, agentName: "worker" };
+		expect(approved(other, grants)).toBe(false);
+		// The operator's own value still grants beneath a project override of the same role.
+		expect(approved(target, grants)).toBe(true);
+		expect(getPerCallModelAdvertisement(settings).roles).toEqual([{ role: "review", patterns: ["mock/target"] }]);
+	});
+
+	it.each<{ operator: string[]; repository: string[]; admitted: string[] }>([
+		{ operator: ["mock/target"], repository: [], admitted: ["target"] },
+		{ operator: ["mock/target"], repository: ["mock/other"], admitted: [] },
+		{ operator: ["mock/target"], repository: ["mock/target", "mock/other"], admitted: ["target"] },
+		{ operator: [], repository: ["mock/other"], admitted: ["other"] },
+	])(
+		"admits $admitted with operator allowlist $operator and project allowlist $repository",
+		async ({ operator, repository, admitted }) => {
+			const settings = await load(
+				{ modelRoles: { review: "mock/*" }, task: { perCallModelAllow: operator } },
+				{ task: { perCallModelAllow: repository } },
+			);
+			const grants = { settings, agentName: "worker" };
+			expect([target, other].filter(model => approved(model, grants)).map(model => model.id)).toEqual(admitted);
+		},
+	);
+
+	it("advertises the operator's allowlist narrowed by the project's", async () => {
+		const settings = await load(
+			{
+				modelRoles: { smol: "mock/target", slow: "mock/other" },
+				task: { perCallModelAllow: ["mock/target", "mock/other"] },
+			},
+			{ task: { perCallModelAllow: ["mock/other", "mock/extra"] } },
+		);
+		expect(getPerCallModelAdvertisement(settings)).toEqual({
+			roles: [{ role: "slow", patterns: ["mock/other"] }],
+			allowlist: ["mock/other"],
+			parentModelWithheld: false,
+		});
+	});
+
+	it.each([
+		{ operator: "off", repository: "on", task: false, evalCall: false },
+		{ operator: "on", repository: "off", task: false, evalCall: false },
+		{ operator: "on", repository: "eval", task: false, evalCall: true },
+		{ operator: "eval", repository: "on", task: false, evalCall: true },
+	])(
+		"lets project task.perCallModel $repository only narrow operator $operator",
+		async ({ operator, repository, task, evalCall }) => {
+			const settings = await load({ task: { perCallModel: operator } }, { task: { perCallModel: repository } });
+			expect(perCallModelEnabled(settings, "task")).toBe(task);
+			expect(perCallModelEnabled(settings, "eval")).toBe(evalCall);
+		},
+	);
+
+	it("names both values when project settings try to enable the gate", async () => {
+		const settings = await load({ task: { perCallModel: "off" } }, { task: { perCallModel: "on" } });
+		expect(invalidModelSelectorReason("mock/target", "The call", { settings, invocationKind: "task" })).toBe(
+			"Per-call model is disabled for task calls (task.perCallModel: off, project: on). Omit model to use the agent's configured model.",
+		);
+	});
+
+	it.each([
+		{ operator: ["worker"], repository: [] },
+		{ operator: [], repository: ["worker"] },
+	])(
+		"drops the frontmatter grant of an agent either layer disables: $operator / $repository",
+		async ({ operator, repository }) => {
+			const settings = await load({ task: { disabledAgents: operator } }, { task: { disabledAgents: repository } });
+			const grants = { settings, agentName: "worker", agentSource: "user" as const, agentModel: ["mock/target"] };
+			expect(approved(target, grants)).toBe(false);
+		},
+	);
 });

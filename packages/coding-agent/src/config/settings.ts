@@ -627,6 +627,8 @@ export class Settings {
 	#derived = false;
 	/** Parent {@link revision} `#merged` was last built from; any other parent revision re-merges. */
 	#syncedParentRevision = -1;
+	/** Project-free view returned by {@link grantAuthority}, valid while {@link revision} is unchanged. */
+	#grantView: { revision: number; view: Settings } | undefined;
 
 	/**
 	 * Global-layer paths written during this session (for partial save), keyed by
@@ -770,11 +772,28 @@ export class Settings {
 	}
 
 	/**
-	 * The operator or SDK host's authority for model grants. Only subagent-derived overlays
+	 * The operator or SDK host's authority for model grants: a read-only view of the global,
+	 * `--config` and runtime layers (an overlay's own over its parent's) without any project layer,
+	 * because repository settings files are writable by the agent. Only subagent-derived overlays
 	 * delegate to their parent's authority, so a host's own overlay remains authoritative.
 	 */
 	grantAuthority(): Settings {
-		return this.#derived && this.#parent ? this.#parent.grantAuthority() : this;
+		if (this.#derived && this.#parent) return this.#parent.grantAuthority();
+		const revision = this.revision;
+		if (this.#grantView?.revision === revision) return this.#grantView.view;
+		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir });
+		view.#storage = this.#storage;
+		view.#global = this.#operatorLayers();
+		inheritWarnings(view, this);
+		view.#rebuildMerged();
+		this.#grantView = { revision, view };
+		return view;
+	}
+
+	/** Global, `--config` and runtime layers merged over an overlay parent's, skipping every project layer. */
+	#operatorLayers(): RawSettings {
+		const own = this.#mergeOwnLayers({ ...this.#ownLayers(), project: {} });
+		return this.#parent ? this.#deepMerge(this.#parent.#operatorLayers(), own) : own;
 	}
 
 	/**

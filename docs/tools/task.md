@@ -65,7 +65,7 @@ Restricted folders cover task files as well as the working directory. `always-as
 
 Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. A user-tagged `^provider/model` agent grants its tagged model for per-call selection, subject to `task.perCallModelAllow`. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
 
-When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models and the narrowing allowlist from settings.
+When per-call selection is enabled for a surface, the task/eval tool descriptions list approved role models from the operator's settings and the narrowing allowlist; project settings never add a model and can only narrow the list.
 
 Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape.
 
