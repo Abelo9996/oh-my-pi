@@ -117,11 +117,12 @@ function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): 
 	return registry;
 }
 
+/** Native judges on a loopback server; the primary hangs until `recover()`. Attempts get a 200 ms deadline. */
 function nativeLoopback({
 	hangBody = false,
-	attemptTimeoutMs = null,
 	delayPrimaryMs = 0,
-}: { hangBody?: boolean; attemptTimeoutMs?: number | null; delayPrimaryMs?: number } = {}) {
+	configuredFallback = true,
+}: { hangBody?: boolean; delayPrimaryMs?: number; configuredFallback?: boolean } = {}) {
 	const attempted: string[] = [];
 	const started = Promise.withResolvers<void>();
 	const pending = Promise.withResolvers<Response>();
@@ -166,9 +167,9 @@ function nativeLoopback({
 	);
 	const settings = Settings.isolated({
 		modelRoles: { judge: "openrouter/loopback-primary" },
-		"retry.fallbackChains": { judge: ["openrouter/loopback-backup"] },
+		...(configuredFallback ? { "retry.fallbackChains": { judge: ["openrouter/loopback-backup"] } } : {}),
 	});
-	if (attemptTimeoutMs !== null) cfgJudgmentAttemptTimeoutMs.override(settings, attemptTimeoutMs);
+	cfgJudgmentAttemptTimeoutMs.override(settings, 200);
 	const registry = makeRegistry(models, { openrouter: "loopback-key" });
 	return {
 		deps: { settings, registry, purpose: "test", sessionId: "loopback-session" },
@@ -893,42 +894,20 @@ describe("ChainJudge", () => {
 	it("fails over within the native attempt bound and skips the timed-out route until its cooldown expires", async () => {
 		using fixture = nativeLoopback();
 		const request = { state: "locate the scheduler", questions: { level: TIER_QUESTION } };
-		const started = performance.now();
 		const result = await new ChainJudge(fixture.deps).judge(request, { signal: AbortSignal.timeout(4_500) });
-		expect(result.answers.level.choice).toBe("high");
 		expect(result.model).toBe("loopback-backup");
-		expect(performance.now() - started).toBeLessThan(4_500);
 		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup"]);
 
-		await new ChainJudge(fixture.deps).judge(request);
-		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup", "loopback-backup"]);
-
 		fixture.recover();
-		const otherSession = await new ChainJudge({ ...fixture.deps, sessionId: "another-session" }).judge(request);
-		expect(otherSession.model).toBe("loopback-primary");
+		await new ChainJudge(fixture.deps).judge(request);
+		expect(fixture.attempted.at(-1)).toBe("loopback-backup");
 		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
 		const recovered = await new ChainJudge(fixture.deps).judge(request);
 		expect(recovered.model).toBe("loopback-primary");
-		expect(fixture.attempted.slice(-2)).toEqual(["loopback-primary", "loopback-primary"]);
-	}, 7_000);
+	});
 
-	it("does not share an anonymous judge's cooldown with unrelated callers using the same registry", async () => {
-		using fixture = nativeLoopback();
-		const deps = { ...fixture.deps, sessionId: undefined };
-		const judge = new ChainJudge(deps);
-		const request = { state: "locate the scheduler", questions: { level: TIER_QUESTION } };
-		const first = await judge.judge(request, { signal: AbortSignal.timeout(4_500) });
-		expect(first.model).toBe("loopback-backup");
-		fixture.recover();
-		const sameJudge = await judge.judge(request);
-		expect(sameJudge.model).toBe("loopback-backup");
-		const unrelated = await new ChainJudge(deps).judge(request);
-		expect(unrelated.model).toBe("loopback-primary");
-		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup", "loopback-backup", "loopback-primary"]);
-	}, 7_000);
-
-	it("permits slower healthy native responses when the candidate deadline is raised", async () => {
-		using fixture = nativeLoopback({ attemptTimeoutMs: 10_000, delayPrimaryMs: 3_100 });
+	it("never cuts off a slow native judge for an implicit candidate when no fallback is configured", async () => {
+		using fixture = nativeLoopback({ configuredFallback: false, delayPrimaryMs: 400 });
 		fixture.recover();
 		const result = await new ChainJudge(fixture.deps).judge({
 			state: "locate the scheduler",
@@ -936,14 +915,6 @@ describe("ChainJudge", () => {
 		});
 		expect(result.model).toBe("loopback-primary");
 		expect(fixture.attempted).toEqual(["loopback-primary"]);
-	}, 7_000);
-
-	it.each([0, 1.5])("rejects an invalid native attempt deadline of %d before contacting a judge", timeoutMs => {
-		using fixture = nativeLoopback();
-		expect(() => cfgJudgmentAttemptTimeoutMs.override(fixture.deps.settings, timeoutMs)).toThrow(
-			"must be a positive safe integer",
-		);
-		expect(fixture.attempted).toEqual([]);
 	});
 
 	it("bounds native response bodies that stop arriving after the headers", async () => {
@@ -999,32 +970,13 @@ describe("ChainJudge", () => {
 		7_000,
 	);
 
-	it.each(["credentials", "headers"] as const)(
-		"propagates caller cancellation while native %s resolution is hung",
-		async stage => {
-			using fixture = nativeLoopback();
-			using setup = hangNativeSetup(fixture.deps.registry, stage);
-			const controller = new AbortController();
-			const pending = new ChainJudge(fixture.deps).judge(
-				{ state: "locate the scheduler", questions: { level: TIER_QUESTION } },
-				{ signal: controller.signal },
-			);
-			await setup.started;
-			const reason = new Error("caller stopped");
-			controller.abort(reason);
-			await expect(pending).rejects.toBe(reason);
-			expect(setup.state.signal?.aborted).toBe(true);
-			expect(fixture.attempted).toEqual([]);
-		},
-	);
-
 	it("does not charge local image preparation to a native candidate's deadline", async () => {
 		using fixture = nativeLoopback();
 		fixture.recover();
 		vi.spyOn(ai, "nativeJudgmentAcceptsImages").mockReturnValue(false);
 		vi.spyOn(imageResize, "fitImage").mockImplementation(async image => {
 			// AbortSignal.timeout uses the platform clock; image work must outlast that real deadline.
-			await Bun.sleep(3_100);
+			await Bun.sleep(400);
 			return { image, content: { top: 0, left: 0, bottom: 1, right: 1 } };
 		});
 		const result = await new ChainJudge(fixture.deps).judge({

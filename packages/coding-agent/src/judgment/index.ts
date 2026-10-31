@@ -158,8 +158,6 @@ const LOCAL_REASONING_MAX_TOKENS = 1024;
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
 /** A transient hang should not consume the next judgment's budget in the same session. */
 const CANDIDATE_TIMEOUT_COOLDOWN_MS = 30_000;
-/** Registries can outlive sessions; retain only a bounded set of recent timed-out routes. */
-const MAX_TIMEOUT_COOLDOWNS = 64;
 /**
  * How long a resolved role chain is reused. Resolution filters the full
  * catalog (thousands of models) synchronously — milliseconds per call, which a
@@ -454,10 +452,17 @@ export class ChainJudge implements Judge {
 		const candidates = this.#resolveCandidates(request);
 		const rejections = this.#rejections();
 		const timeouts = this.#timeouts();
-		for (const candidate of candidates) {
+		// A slow judge only gives way to a fallback the user configured: the per-attempt deadline and the
+		// timed-out-route skip apply while an explicit candidate remains, and a timeout never hands the work
+		// to an implicit (priority-default or session) candidate.
+		const lastExplicitIndex = candidates.findLastIndex(candidate => candidate.explicit);
+		let timedOutBefore = false;
+		for (const [index, candidate] of candidates.entries()) {
 			if (signal?.aborted) {
 				throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 			}
+			if (timedOutBefore && !candidate.explicit) continue;
+			const configuredFallbackRemains = index < lastExplicitIndex;
 			const identity = formatModelStringWithRouting(candidate.model);
 			const skippedUntil = rejections.get(identity);
 			if (skippedUntil !== undefined) {
@@ -468,8 +473,9 @@ export class ChainJudge implements Judge {
 				rejections.delete(identity);
 			}
 			const timeoutKey = `${this.#deps.sessionId ?? ""}\0${identity}`;
-			if ((timeouts.get(timeoutKey) ?? 0) > Date.now()) {
+			if (configuredFallbackRemains && (timeouts.get(timeoutKey) ?? 0) > Date.now()) {
 				lastUnavailable = `${identity} timed out recently`;
+				timedOutBefore = true;
 				continue;
 			}
 			// Outside the candidate's failure handling: a refusal ends the judgment.
@@ -479,7 +485,7 @@ export class ChainJudge implements Judge {
 			try {
 				// Image fitting is local work, not evidence that a provider route has stalled.
 				const prepared = prepare ? await untilAborted(signal, () => prepare(candidate.model, kind)) : undefined;
-				timeout = kind === "native" ? AbortSignal.timeout(timeoutMs) : undefined;
+				timeout = kind === "native" && configuredFallbackRemains ? AbortSignal.timeout(timeoutMs) : undefined;
 				const candidateSignal = timeout ? (signal ? AbortSignal.any([signal, timeout]) : timeout) : signal;
 				const judge = await untilAborted(candidateSignal, () => this.#createJudge(candidate, candidateSignal));
 				if (!judge) {
@@ -498,17 +504,13 @@ export class ChainJudge implements Judge {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 				}
 				const timedOut =
-					timeout?.aborted || (kind === "native" && error instanceof Error && error.name === "TimeoutError");
+					timeout !== undefined && (timeout.aborted || (error instanceof Error && error.name === "TimeoutError"));
 				if (!timedOut && isAbortOrTimeout(error)) throw error;
 				const rejected = isAccountRejection(error);
 				if (rejected) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
 				if (timedOut) {
-					timeouts.delete(timeoutKey);
-					if (timeouts.size >= MAX_TIMEOUT_COOLDOWNS) {
-						const oldest = timeouts.keys().next().value;
-						if (oldest !== undefined) timeouts.delete(oldest);
-					}
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
+					timedOutBefore = true;
 				}
 				lastFailure = error instanceof Error ? error.message : String(error);
 				logger.warn("judgment candidate failed", {
