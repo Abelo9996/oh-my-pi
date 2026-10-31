@@ -2668,10 +2668,10 @@ export interface ListWorkspaceOptions {
   /** Respect .gitignore files. Default: true. */
   gitignore?: boolean
   /**
-   * Stop pruning dependency, VCS, build-output, and cache directory names
-   * (`node_modules`, `.git`, `dist`, `target`, …). Hidden entries still
-   * require `hidden: true`; ignored entries require `gitignore: false`.
-   * Default: true.
+   * Prune dependency, VCS, build-output, and cache directory names
+   * (`node_modules`, `.git`, `dist`, `target`, …); `false` lists them too.
+   * Hidden entries still require `hidden: true`; ignored entries require
+   * `gitignore: false`. Default: true.
    */
   pruneExcludedDirs?: boolean
   /**
