@@ -13,7 +13,7 @@ import {
 	readSourceFsPath,
 	splitPathAndSel,
 } from "../tools/read";
-import { PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
+import { FILE_NAME_COLOR, formatStyledPath, PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
 import { wrapTextWithAnsi } from "../utils";
@@ -21,7 +21,7 @@ import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
-import { formatCount, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
+import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
 import { card, code, keyed, md, node, span, text, withHidden } from "../native/describe";
@@ -915,7 +915,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			const row = displayRows[0]!;
 			if (!this.#shouldRenderPreviewRow(row)) {
 				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
-				const pathDisplay = this.#formatRowPath(row);
+				const pathDisplay = this.#formatRowPath(row, true);
 				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
 				this.#appendUsageRows(lines, usageRows, "   ");
@@ -1084,12 +1084,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return `${statusPrefix}${this.#formatRowPath(row)}`;
 	}
 
-	#formatRowPath(row: ReadSummaryRow): string {
+	/** A row's path: styled in the group's rows, accent in a header line. */
+	#formatRowPath(row: ReadSummaryRow, header = false): string {
 		return this.#formatPathValue(row.targetPath, {
 			correctedFrom: this.#correctedFromForTargets(row.targets),
 			conflictCount: this.#conflictCountForTargets(row.targets),
 			line: firstSelectorLineForTargets(row.targets),
 			linkPath: linkPathForTargets(row.targets),
+			basePath: row.basePath,
+			header,
 		});
 	}
 
@@ -1137,25 +1140,43 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#formatPathValue(
 		value: string,
-		options: { correctedFrom?: string; conflictCount?: number; line?: number; linkPath?: string } = {},
+		options: {
+			correctedFrom?: string;
+			conflictCount?: number;
+			line?: number;
+			linkPath?: string;
+			/** The path `value` selects from; merged selectors (`1-5,…,9`) do not parse back out of it. */
+			basePath?: string;
+			header?: boolean;
+		} = {},
 	): string {
-		const split = splitPathAndSel(value);
-		const selectorSuffix = split.sel ? `:${split.sel}` : "";
+		const { basePath } = options;
+		const split =
+			basePath !== undefined && value.startsWith(`${basePath}:`)
+				? { path: basePath, sel: value.slice(basePath.length + 1) }
+				: splitPathAndSel(value);
 		const baseValue = split.sel ? split.path : value;
-		const filePath = shortenPath(baseValue);
-		let pathDisplay = filePath ? theme.fg("accent", filePath) : theme.fg("toolOutput", "…");
+		// `?q=…` queries read like selectors: they follow the path, outside its link.
+		const isUrl = isUrlLikePath(baseValue);
+		const queryIndex = isUrl ? -1 : baseValue.indexOf("?");
+		const filePath = shortenPath(queryIndex > 0 ? baseValue.slice(0, queryIndex) : baseValue);
+		const query = queryIndex > 0 ? baseValue.slice(queryIndex) : "";
+		const selectors = split.sel ? `${query}:${split.sel}` : query;
+		// Header lines keep the accent path; group rows share the tool-body path style.
+		let pathDisplay: string;
+		if (!filePath) pathDisplay = theme.fg("toolOutput", "…");
+		else if (options.header) pathDisplay = theme.fg("accent", filePath);
+		else if (isUrl) pathDisplay = theme.fg(FILE_NAME_COLOR, filePath);
+		else pathDisplay = formatStyledPath(filePath, theme);
 		if (filePath && options.linkPath) {
 			const linkOptions = options.line !== undefined ? { line: options.line } : undefined;
 			pathDisplay = fileHyperlink(options.linkPath, pathDisplay, linkOptions);
 		}
-		if (selectorSuffix) {
-			pathDisplay += theme.fg("accent", selectorSuffix);
-		}
+		if (selectors) pathDisplay += theme.fg(options.header ? "accent" : "muted", selectors);
 		if (options.correctedFrom) {
 			pathDisplay += theme.fg("dim", ` (corrected from ${shortenPath(options.correctedFrom)})`);
 		}
-		pathDisplay += this.#formatConflictBadge(options.conflictCount);
-		return pathDisplay;
+		return pathDisplay + this.#formatConflictBadge(options.conflictCount);
 	}
 
 	#formatConflictBadge(conflictCount: number | undefined): string {
@@ -1179,6 +1200,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 					conflictCount: entry.conflictCount,
 					line: firstSelectorLine(split.sel),
 					linkPath: readTargetLinkPath(split.path, entry.linkPath),
+					header: true,
 				})
 			: "";
 		const title = pathDisplay ? `Read ${pathDisplay}` : "Read";

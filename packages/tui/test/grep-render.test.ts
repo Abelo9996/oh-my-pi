@@ -39,6 +39,28 @@ describe("grepToolRenderer", () => {
 		expect(renderedLines[0]).not.toContain(uiTheme.fg("accent", "Search"));
 	});
 
+	it("gives each file of a directory its own branch, labelled with its full path", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const result = {
+			content: [{ type: "text", text: "" }],
+			details: {
+				matchCount: 2,
+				fileCount: 2,
+				displayContent: ["# src/", "## a.ts#abcd", "*1│needle", "## b.ts#ef01", "*2│needle"].join("\n"),
+			},
+		};
+		const plainLines = sanitizeText(
+			grepToolRenderer
+				.renderResult(result as never, { expanded: true, isPartial: false }, uiTheme, { pattern: "needle" })
+				.render(120)
+				.join("\n"),
+		)
+			.split("\n")
+			.map(line => line.trimEnd());
+		const fileRows = plainLines.filter(line => line.endsWith(".ts"));
+		expect(fileRows).toEqual([`${uiTheme.tree.branch} src/a.ts`, `${uiTheme.tree.last} src/b.ts`]);
+	});
+
 	it("keeps truncation status in the header without a bottom notice", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();
@@ -74,7 +96,7 @@ describe("grepToolRenderer", () => {
 		expect(bodyLines.some(line => line.includes("gamma:1"))).toBe(true);
 	});
 
-	it("shows actual matches when one grouped search section is larger than the collapsed budget", async () => {
+	it("cuts the collapsed list between files, never after a file row without its match", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();
 		const uiTheme = theme!;
@@ -82,8 +104,8 @@ describe("grepToolRenderer", () => {
 		const result = {
 			content: [{ type: "text", text: "" }],
 			details: {
-				matchCount: 3,
-				fileCount: 3,
+				matchCount: 4,
+				fileCount: 4,
 				displayContent: [
 					"# src/",
 					"## first.ts#aaaa",
@@ -94,6 +116,8 @@ describe("grepToolRenderer", () => {
 					"*4│const secondFlag = true;",
 					"## third.ts#cccc",
 					"*5│const thirdFlag = true;",
+					"## fourth.ts#dddd",
+					"*6│const fourthFlag = true;",
 				].join("\n"),
 			},
 		};
@@ -104,12 +128,13 @@ describe("grepToolRenderer", () => {
 		const renderedLines = sanitizeText(collapsed.render(240).join("\n")).split("\n");
 		const bodyLines = renderedLines.slice(1);
 
-		expect(bodyLines).toHaveLength(6);
+		// first.ts and second.ts with their matches, then the summary: third.ts's row would fit, its match would not.
+		expect(bodyLines).toHaveLength(5);
 		expect(bodyLines.some(line => line.includes("const firstFlag = true;"))).toBe(true);
 		expect(bodyLines.some(line => line.includes("const secondFlag = true;"))).toBe(true);
-		expect(bodyLines.some(line => line.includes("1 more match"))).toBe(true);
+		expect(bodyLines.at(-1)).toContain("2 more matches");
 		expect(bodyLines.some(line => line.includes("before"))).toBe(false);
-		expect(bodyLines.some(line => line.includes("thirdFlag"))).toBe(false);
+		expect(bodyLines.some(line => line.includes("third"))).toBe(false);
 	});
 
 	it("links grouped file headers and code-frame lines to filesystem targets", async () => {
@@ -138,8 +163,11 @@ describe("grepToolRenderer", () => {
 		const fileUri = url.pathToFileURL(path.resolve(filePath)).href;
 		const uris = extractLinkUris(rendered);
 
-		expect(uris).toContain(fileUri);
+		// The file row (its full path, no `#` headers) and its match row both link to the file.
 		expect(uris.filter(uri => uri === fileUri)).toHaveLength(2);
+		const plainLines = sanitizeText(rendered).split("\n");
+		expect(plainLines.some(line => line.endsWith("src/file.ts"))).toBe(true);
+		expect(plainLines.some(line => line.includes("#"))).toBe(false);
 	});
 
 	it("links sanitized grouped headers and matches to the original control-byte filename and cwd", async () => {
@@ -350,5 +378,25 @@ describe("grepToolRenderer", () => {
 			expect(plain).not.toContain("x".repeat(200));
 			expect(plain.split("\n").filter(line => line.includes("12│"))).toHaveLength(1);
 		}
+	});
+
+	it("keeps the leading `/` of absolute paths folded under a `# /` root", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const result = {
+			content: [{ type: "text", text: "" }],
+			details: {
+				matchCount: 2,
+				fileCount: 2,
+				displayContent: ["# /", "## z.ts", "*1│needle", "", "## tmp/a/", "### x.ts", "*2│needle"].join("\n"),
+			},
+		};
+		const plain = sanitizeText(
+			grepToolRenderer
+				.renderResult(result as never, { expanded: true, isPartial: false }, uiTheme, { pattern: "needle" })
+				.render(200)
+				.join("\n"),
+		);
+		expect(plain).toContain("─ /z.ts");
+		expect(plain).toContain("─ /tmp/a/x.ts");
 	});
 });

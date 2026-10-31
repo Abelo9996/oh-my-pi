@@ -1,4 +1,3 @@
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { replaceTabs } from "../utils";
@@ -13,7 +12,13 @@ import {
 	formatParseErrorsCountLabel,
 	PREVIEW_LIMITS,
 } from "../render/render-utils";
-import { classifyGroupedLines, groupLineIndicesByBlank } from "./grouped-file-output";
+import {
+	classifyGroupedLines,
+	formatGroupedFileHeader,
+	groupedHeaderLinkTargets,
+	groupLineIndicesByBlank,
+	groupsByFile,
+} from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
 import type {
 	NativeToolHead,
@@ -251,19 +256,8 @@ export const astEditToolRenderer = {
 		// Resolve hyperlinks over the whole output so nested directory headers
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		// The display lines are sanitized; reconstruct link targets from the original
-		// grouped headers only when they still align with those display lines.
-		const rawDetails = options.renderContext?.rawDetails;
-		const rawContent =
-			isRecord(rawDetails) && typeof rawDetails.displayContent === "string" ? rawDetails.displayContent : undefined;
-		const rawLines = rawContent?.split("\n");
-		const rawCwd = isRecord(rawDetails) && typeof rawDetails.cwd === "string" ? rawDetails.cwd : undefined;
-		const rawSearchPath =
-			isRecord(rawDetails) && typeof rawDetails.searchPath === "string" ? rawDetails.searchPath : undefined;
-		const rawContexts =
-			rawContent !== undefined && rawLines?.length === allLines.length && sanitizeText(rawContent) === textContent
-				? classifyGroupedLines(rawLines, rawCwd ?? rawSearchPath, rawSearchPath)
-				: undefined;
+		// The display lines are sanitized; link targets keep the original path bytes.
+		const linkTarget = groupedHeaderLinkTargets(contexts, textContent, options.renderContext?.rawDetails);
 		// Style lazily: collapsed bodies show only the first groups.
 		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
 		const styleLine = (index: number): string => {
@@ -274,16 +268,11 @@ export const astEditToolRenderer = {
 			// second vertical bar inside the frame border.
 			const display = replaceTabs(allLines[index]!.replace("│", " "));
 			let styled: string;
-			const linkPath =
-				ctx.headerPath && rawContexts?.[index]?.kind === ctx.kind && rawContexts[index]?.depth === ctx.depth
-					? (rawContexts[index]?.headerPath ?? ctx.headerPath)
-					: ctx.headerPath;
-			if (ctx.kind === "dir") {
-				const accent = uiTheme.fg("accent", display);
-				styled = linkPath ? fileHyperlink(linkPath, accent) : accent;
-			} else if (ctx.kind === "file") {
-				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", display);
-				styled = linkPath ? fileHyperlink(linkPath, tinted) : tinted;
+			if (ctx.kind === "file") {
+				// Directory headers are folded into each file row's full path.
+				const label = formatGroupedFileHeader(ctx, uiTheme);
+				const linkPath = linkTarget(index);
+				styled = linkPath ? fileHyperlink(linkPath, label) : label;
 			} else if (display.startsWith("+")) {
 				styled = uiTheme.fg("toolDiffAdded", display);
 			} else if (display.startsWith("-")) {
@@ -294,7 +283,7 @@ export const astEditToolRenderer = {
 			styledLines[index] = styled;
 			return styled;
 		};
-		const changeGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+		const changeGroups = groupsByFile(groupLineIndicesByBlank(allLines), contexts).filter(indices => {
 			const first = allLines[indices[0]!]!;
 			return !first.startsWith("Safety cap reached") && !first.startsWith("Parse issues:");
 		});

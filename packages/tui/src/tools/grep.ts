@@ -38,7 +38,10 @@ import {
 	classifyGroupedLines,
 	createCodeFrameStyler,
 	describeGroupedOutput,
+	formatGroupedFileHeader,
+	type GroupedLineContext,
 	groupLineIndicesByBlank,
+	groupsByFile,
 } from "./grouped-file-output";
 
 /** Display metadata for grep tool results. */
@@ -150,17 +153,7 @@ function grepLinkTargets(details: GrepToolDetails | undefined, rawDetails: unkno
 	const rawBase = rawCwd ?? rawSearchPath ?? displayBase;
 	if (displayBase && rawBase && rawFiles && details?.files) {
 		for (let index = 0; index < Math.min(details.files.length, rawFiles.length); index++) {
-			const displayFile = path.resolve(displayBase, details.files[index]!);
-			const rawFile = path.resolve(rawBase, rawFiles[index]!);
-			pathTargets.set(displayFile, rawFile);
-			// Folded directory headers must retain the original path as well.
-			let displayDir = path.dirname(displayFile);
-			let rawDir = path.dirname(rawFile);
-			while (displayDir !== path.dirname(displayDir) && rawDir !== path.dirname(rawDir)) {
-				pathTargets.set(displayDir, rawDir);
-				displayDir = path.dirname(displayDir);
-				rawDir = path.dirname(rawDir);
-			}
+			pathTargets.set(path.resolve(displayBase, details.files[index]!), path.resolve(rawBase, rawFiles[index]!));
 		}
 	}
 	const target = (displayPath: string): string => {
@@ -205,20 +198,19 @@ function isSearchHeaderLine(line: string): boolean {
 const URL_HEADER_PREFIX_RE = /^#+\s+/;
 
 /**
- * Build a memoized per-line styler for search display output. Classification
- * and URL-target tracking walk the whole output once (nested directory stacks
- * span blank-line groups), but styling and hyperlinking run only for the rows
- * a preview actually shows.
+ * Build a memoized per-line styler for search display output from the
+ * classified lines. URL-target tracking walks the whole output once (nested
+ * directory stacks span blank-line groups), but styling and hyperlinking run
+ * only for the rows a preview actually shows. Directory header rows are never
+ * shown: each file row carries its full path.
  */
 function createSearchLineStyler(
 	lines: readonly string[],
-	headerBase: string | undefined,
-	fileScope: string | undefined,
+	contexts: readonly GroupedLineContext[],
 	uiTheme: Theme,
 	displayTargets: Record<string, string> | undefined,
 	target: (displayPath: string) => string,
 ): (index: number) => string {
-	const contexts = classifyGroupedLines(lines, headerBase, fileScope);
 	const styleCodeFrame = createCodeFrameStyler(lines, contexts, "toolOutput", uiTheme);
 	// `classifyGroupedLines` can't resolve internal URLs (TUI-only), so track the
 	// resolved URL target here and use it for the body lines that follow.
@@ -250,17 +242,13 @@ function createSearchLineStyler(
 		const line = lines[index]!;
 		const ctx = contexts[index]!;
 		let styled: string;
-		if (ctx.kind === "dir") {
-			const accent = uiTheme.fg("accent", line);
-			styled = ctx.headerPath ? fileHyperlink(target(ctx.headerPath), accent) : accent;
-		} else if (ctx.kind === "file") {
+		if (ctx.kind === "file") {
+			const label = formatGroupedFileHeader(ctx, uiTheme);
 			const raw = urlRaw[index];
 			if (raw !== undefined) {
-				styled = linkUrlLikeSearchHeader(raw, uiTheme.fg("accent", line), displayTargets?.[raw]).line;
+				styled = linkUrlLikeSearchHeader(raw, label, displayTargets?.[raw]).line;
 			} else {
-				// Root-level files keep the bright accent; nested file headers are dimmed.
-				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
-				styled = ctx.headerPath ? fileHyperlink(target(ctx.headerPath), tinted) : tinted;
+				styled = ctx.headerPath ? fileHyperlink(target(ctx.headerPath), label) : label;
 			}
 		} else {
 			const tinted = styleCodeFrame(index) ?? uiTheme.fg("toolOutput", line);
@@ -321,6 +309,8 @@ function renderBudgetedSearchGroups(
 		const available = contentBudget - visibleLineCount;
 		const take = Math.min(group.length, available);
 		if (take <= 0) break;
+		// Never end on a lone file row: a cut group must show at least one row under its path.
+		if (take < group.length && isSearchHeaderLine(lines[group[take - 1]!]!)) break;
 		const visibleGroup = group.slice(0, take);
 		visibleGroups.push(visibleGroup);
 		visibleLineCount += visibleGroup.length;
@@ -473,15 +463,15 @@ export const grepToolRenderer = {
 		// Header/match display paths are cwd-relative, so resolve them against cwd
 		// (falling back to searchPath for legacy results that predate `cwd`); the
 		// scoped file's absolute path seeds body lines in single-file searches.
+		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, linkTargets.fileScope);
 		const styleLine = createSearchLineStyler(
 			allLines,
-			details?.cwd ?? details?.searchPath,
-			linkTargets.fileScope,
+			contexts,
 			uiTheme,
 			linkTargets.displayTargets,
 			linkTargets.target,
 		);
-		const matchGroups = groupLineIndicesByBlank(allLines);
+		const matchGroups = groupsByFile(groupLineIndicesByBlank(allLines), contexts);
 
 		const extraLines: string[] = [];
 		if (missingNote) extraLines.push(missingNote);

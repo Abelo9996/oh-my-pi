@@ -1,4 +1,3 @@
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type { Theme } from "../theme/theme";
@@ -18,7 +17,10 @@ import {
 	classifyGroupedLines,
 	createCodeFrameStyler,
 	describeGroupedOutput,
+	formatGroupedFileHeader,
+	groupedHeaderLinkTargets,
 	groupLineIndicesByBlank,
+	groupsByFile,
 } from "./grouped-file-output";
 import { code, compact, node, span } from "../native/describe";
 import type { NativeChild } from "../native/node";
@@ -133,19 +135,8 @@ export const astGrepToolRenderer = {
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
 		const styleCodeFrame = createCodeFrameStyler(allLines, contexts, "toolOutput", uiTheme, args?.lang);
 		// The displayed lines are sanitized, but OSC 8 destinations must retain the
-		// original path bytes. Only substitute targets for headers already linked
-		// by the sanitized output; never let raw text create additional links.
-		const rawDetails = options.renderContext?.rawDetails;
-		const rawContent =
-			isRecord(rawDetails) && typeof rawDetails.displayContent === "string" ? rawDetails.displayContent : undefined;
-		const rawLines = rawContent?.split("\n");
-		const rawCwd = isRecord(rawDetails) && typeof rawDetails.cwd === "string" ? rawDetails.cwd : undefined;
-		const rawSearchPath =
-			isRecord(rawDetails) && typeof rawDetails.searchPath === "string" ? rawDetails.searchPath : undefined;
-		const rawContexts =
-			rawContent !== undefined && rawLines?.length === allLines.length && sanitizeText(rawContent) === textContent
-				? classifyGroupedLines(rawLines, rawCwd ?? rawSearchPath, rawSearchPath)
-				: undefined;
+		// original path bytes.
+		const linkTarget = groupedHeaderLinkTargets(contexts, textContent, options.renderContext?.rawDetails);
 		// Style lazily: the collapsed tree list only renders the first few groups,
 		// so a large result never styles/hyperlinks rows nobody sees.
 		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
@@ -154,25 +145,19 @@ export const astGrepToolRenderer = {
 			if (cached !== undefined) return cached;
 			const line = allLines[index]!;
 			const ctx = contexts[index]!;
-			const rawContext = rawContexts?.[index];
-			const target =
-				ctx.headerPath && rawContext?.kind === ctx.kind && rawContext.depth === ctx.depth
-					? (rawContext.headerPath ?? ctx.headerPath)
-					: ctx.headerPath;
 			let styled: string;
-			if (ctx.kind === "dir") {
-				const accent = uiTheme.fg("accent", line);
-				styled = target ? fileHyperlink(target, accent) : accent;
-			} else if (ctx.kind === "file") {
-				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
-				styled = target ? fileHyperlink(target, tinted) : tinted;
+			if (ctx.kind === "file") {
+				// Directory headers are folded into each file row's full path.
+				const label = formatGroupedFileHeader(ctx, uiTheme);
+				const target = linkTarget(index);
+				styled = target ? fileHyperlink(target, label) : label;
 			} else {
 				styled = styleCodeFrame(index) ?? uiTheme.fg(line.startsWith("  meta:") ? "dim" : "toolOutput", line);
 			}
 			styledLines[index] = styled;
 			return styled;
 		};
-		const matchGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+		const matchGroups = groupsByFile(groupLineIndicesByBlank(allLines), contexts).filter(indices => {
 			const first = allLines[indices[0]!]!;
 			return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
 		});

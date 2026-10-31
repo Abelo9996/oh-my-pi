@@ -44,18 +44,23 @@ describe("formatGroupedFiles", () => {
 });
 
 describe("classifyGroupedLines", () => {
-	it("reconstructs absolute paths across a nested directory stack", () => {
+	it("reconstructs absolute paths and display paths across a nested directory stack", () => {
 		const lines = ["# pkg/ai/", "## CHANGELOG.md", "  match", "## src/util/", "### x.ts", "*12│const y = 1;"];
 		const ctx = classifyGroupedLines(lines, REPO_ROOT);
 
-		expect(ctx[0]).toMatchObject({ kind: "dir", headerPath: path.join(REPO_ROOT, "pkg", "ai") });
-		expect(ctx[1]).toMatchObject({ kind: "file", headerPath: path.join(REPO_ROOT, "pkg", "ai", "CHANGELOG.md") });
+		expect(ctx[0]).toMatchObject({ kind: "dir" });
+		expect(ctx[1]).toMatchObject({
+			kind: "file",
+			headerPath: path.join(REPO_ROOT, "pkg", "ai", "CHANGELOG.md"),
+			displayPath: "pkg/ai/CHANGELOG.md",
+		});
 		expect(ctx[2]).toMatchObject({ kind: "content", filePath: path.join(REPO_ROOT, "pkg", "ai", "CHANGELOG.md") });
 		// `src/util/` is a folded subdirectory chain under `pkg/ai/`, not the root.
-		expect(ctx[3]).toMatchObject({ kind: "dir", headerPath: path.join(REPO_ROOT, "pkg", "ai", "src", "util") });
+		expect(ctx[3]).toMatchObject({ kind: "dir" });
 		expect(ctx[4]).toMatchObject({
 			kind: "file",
 			headerPath: path.join(REPO_ROOT, "pkg", "ai", "src", "util", "x.ts"),
+			displayPath: "pkg/ai/src/util/x.ts",
 		});
 		expect(ctx[5]).toMatchObject({
 			kind: "content",
@@ -65,8 +70,18 @@ describe("classifyGroupedLines", () => {
 
 	it("keeps an absolute folded prefix instead of joining it onto the search base", () => {
 		const ctx = classifyGroupedLines([`# ${toGroupedHeaderPath(OUTSIDE_DIR)}/`, "## file.txt"], REPO_ROOT);
-		expect(ctx[0]).toMatchObject({ kind: "dir", headerPath: OUTSIDE_DIR });
+		expect(ctx[0]).toMatchObject({ kind: "dir" });
 		expect(ctx[1]).toMatchObject({ kind: "file", headerPath: path.join(OUTSIDE_DIR, "file.txt") });
+	});
+
+	it("keeps a directory name's own parenthesized part in its file's label and link", () => {
+		const ctx = classifyGroupedLines(["# src (old)/", "## file.ts (2 replacements)"], REPO_ROOT);
+		expect(ctx[1]).toMatchObject({
+			kind: "file",
+			displayPath: "src (old)/file.ts",
+			suffix: "(2 replacements)",
+			headerPath: path.join(REPO_ROOT, "src (old)", "file.ts"),
+		});
 	});
 
 	it("links body lines before any header to the single-file search base", () => {

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `FILE_NAME_COLOR` and `formatStyledPath` to `render/render-utils` for paths in tool bodies, and `formatGroupedFileHeader`, `groupedHeaderLinkTargets` and `groupsByFile` to `tools/grouped-file-output`; `classifyGroupedLines` reports each file header's full `displayPath` and `suffix` ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
+### Changed
+
+- File paths in tool output share one style: a dim directory and the file name in the custom-message label color (bronze in titanium), with line locations and selectors (`:1-175`, `:42:14`, `?q=`) muted. This covers Grep, AST Grep, AST Edit, Glob, Find, LSP, diagnostics, grouped Reads and file mentions; Glob's folder icon is muted like the file-type icons, and paths in tool headers keep their color ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Grep, AST Grep and AST Edit results label each file with its full path instead of the model-facing `# dir/` and `## file#tag` headers, and each file gets its own tree branch. Collapsed AST Grep and AST Edit count their `… N more` rows per file, and collapsed AST Edit shows its first file in full instead of the whole first directory ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- LSP diagnostics carry their severity color on the `[error]`/`[warning]` tag instead of the location, and collapsed diagnostic rows now show that tag ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
