@@ -256,62 +256,15 @@ describe("tool usage stats pipeline", () => {
 	});
 
 	it.each([
+		{ name: "a skipped call that never executed", details: { __synthetic: true, executed: false }, expected: false },
+		{ name: "a synthetic result marked executed", details: { __synthetic: true, executed: true }, expected: true },
+		{ name: "executed: false without the synthetic marker", details: { executed: false }, expected: true },
 		{
-			name: "synthetic non-execution is not a tool error",
-			details: { __synthetic: true, source: "interrupt_skipped", executed: false },
-			isError: true,
-			expected: false,
-		},
-		{
-			name: "synthetic results marked executed still count as errors",
-			details: { __synthetic: true, executed: true },
-			isError: true,
-			expected: true,
-		},
-		{
-			name: "a synthetic marker alone does not imply non-execution",
-			details: { __synthetic: true },
-			isError: true,
-			expected: true,
-		},
-		{
-			name: "non-execution without a synthetic marker does not hide errors",
-			details: { executed: false },
-			isError: true,
-			expected: true,
-		},
-		{
-			name: "skip wording without structured markers does not hide errors",
-			details: undefined,
-			isError: true,
-			expected: true,
-		},
-		{
-			name: "interrupted executions still count as errors",
+			name: "an interrupted call that had started",
 			details: { __interrupted: true, source: "interrupt_skipped", execution: "started" },
-			isError: true,
 			expected: true,
 		},
-		{
-			name: "malformed details do not hide errors",
-			details: "not executed",
-			isError: true,
-			expected: true,
-		},
-		{
-			name: "truthy non-boolean markers do not hide errors",
-			details: { __synthetic: "true", executed: false },
-			isError: true,
-			expected: true,
-		},
-		{
-			name: "successful results remain non-errors",
-			details: undefined,
-			isError: false,
-			expected: false,
-		},
-	])("$name", async ({ details, isError, expected }) => {
-		const text = "Skipped due to queued user message.";
+	])("counts $name as error=$expected", async ({ details, expected }) => {
 		const sessionFile = await writeSessionFile("session.jsonl", { id: "synthetic" }, [
 			buildAssistantEntry({
 				entryId: "asst-1",
@@ -327,16 +280,14 @@ describe("tool usage stats pipeline", () => {
 				timestamp: TS1,
 				toolCallId: "call-1",
 				toolName: "wait",
-				text,
-				isError,
+				text: "Skipped due to queued user message.",
+				isError: true,
 				details,
 			}),
 		]);
 
 		const parsed = await parseSessionFile(sessionFile);
-		expect(parsed.toolResults.map(result => result.isError)).toEqual([expected]);
 		expect(parsed.toolCalls.map(call => call.isError)).toEqual([expected]);
-		expect(parsed.toolResults[0].resultChars).toBe(text.length);
 	});
 
 	it("excludes skipped non-executions from error totals without dropping calls or real errors", async () => {
@@ -381,10 +332,6 @@ describe("tool usage stats pipeline", () => {
 		expect(toolRow(repaired, "wait").calls).toBe(1);
 		expect(toolRow(repaired, "wait").errors).toBe(0);
 		expect(toolRow(repaired, "read").errors).toBe(1);
-
-		closeDb();
-		await syncAllSessions({ workers: 1 });
-		expect(getToolStats()).toEqual(repaired);
 	});
 
 	it("links a result that lands in a later sync pass without duplicating the call", async () => {

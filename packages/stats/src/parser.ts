@@ -416,17 +416,11 @@ function sanitizeToolName(name: string): string | null {
 	return candidate.length > 0 ? candidate : null;
 }
 
-/** Provider pairing placeholders are not failures of an executed tool. */
+/** A call the agent loop skipped carries a synthetic `executed: false` result: it never ran, so it is no tool error. */
 function isToolExecutionError(message: { isError?: unknown; details?: unknown }): boolean {
 	if (message.isError !== true) return false;
-	const details = message.details;
-	if (!details || typeof details !== "object") return true;
-	return !(
-		"__synthetic" in details &&
-		details.__synthetic === true &&
-		"executed" in details &&
-		details.executed === false
-	);
+	const details = message.details as { __synthetic?: unknown; executed?: unknown } | null | undefined;
+	return !(details?.__synthetic === true && details.executed === false);
 }
 
 /**
