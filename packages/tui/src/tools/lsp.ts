@@ -19,6 +19,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	PREVIEW_LIMITS,
 	type ParsedDiagnostic,
 	parseDiagnosticMessage,
 	replaceTabs,
@@ -36,7 +37,7 @@ import type { NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
 import { plainText } from "../native/spans";
 import { numberedCode, walkGroupedOutput } from "./grouped-file-output";
-import { diagnosticGlyph, fileHref, fileRow, inlineErrorView } from "./native-view";
+import { diagnosticGlyph, displayPath, fileHref, fileRow, inlineErrorView } from "./native-view";
 import { activeThemeSymbol } from "../theme/active-symbols";
 
 /** Display arguments for an LSP tool request. */
@@ -292,7 +293,7 @@ export function renderResult(
 			: expanded
 				? bodyLines.flatMap(line => wrapGuidedLine(line, contentWidth, theme))
 				: locations
-					? bodyLines.map(line => truncateToWidth(line, contentWidth))
+					? clipCollapsedLocations(bodyLines, contentWidth, locations, theme)
 					: bodyLines;
 		return {
 			header,
@@ -574,9 +575,6 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 // Locations Rendering
 // =============================================================================
 
-/** Locations shown while a definition, type definition or implementation result is collapsed. */
-const COLLAPSED_LOCATIONS = 2;
-
 /** One location of a definition-style response, with its numbered source context. */
 interface LspLocation {
 	file: string;
@@ -631,7 +629,7 @@ function parseLspLocations(lines: readonly string[]): LspLocations | undefined {
  */
 function renderLocations(parsed: LspLocations, expanded: boolean, theme: Theme): string[] {
 	const { noun, count, locations } = parsed;
-	const shown = expanded ? locations : locations.slice(0, COLLAPSED_LOCATIONS);
+	const shown = expanded ? locations : locations.slice(0, PREVIEW_LIMITS.LOCATIONS_COLLAPSED);
 	const hidden = locations.length - shown.length;
 	const icon = count > 0 ? theme.styledSymbol("tool.lsp", "accent") : theme.styledSymbol("status.warning", "warning");
 	const rows = [
@@ -657,6 +655,19 @@ function renderLocations(parsed: LspLocations, expanded: boolean, theme: Theme):
 		rows.push(` ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", formatMoreItems(hidden, noun))}`);
 	}
 	return rows;
+}
+
+/**
+ * Collapsed location rows stop at the card's edge. When that clips a row and no hidden location already
+ * advertises Ctrl+O, the header gets the expand hint: the expanded view wraps the full text.
+ */
+function clipCollapsedLocations(rows: string[], width: number, parsed: LspLocations, theme: Theme): string[] {
+	const clipped = rows.map(row => truncateToWidth(row, width));
+	const hinted = parsed.locations.length > PREVIEW_LIMITS.LOCATIONS_COLLAPSED;
+	if (!hinted && clipped.some((row, index) => row !== rows[index])) {
+		clipped[0] = truncateToWidth(`${rows[0]}${formatExpandHint(theme, false, true)}`, width);
+	}
+	return clipped;
 }
 
 // =============================================================================
@@ -1119,7 +1130,9 @@ function describeLspLocations(
 		const context = location.context.map(line => ({ ...line, text: plainText(line.text) }));
 		const range = `:${location.line}:${location.col}`;
 		return keyed(
-			col([fileRow(file, { range }), ...numberedCode(context, { path: file })], { gap: "xs" }),
+			col([fileRow(displayPath(file), { range, title: file }), ...numberedCode(context, { path: file })], {
+				gap: "xs",
+			}),
 			`${file}${range}`,
 		);
 	});

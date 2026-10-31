@@ -52,11 +52,13 @@ describe("LSP definition locations", () => {
 		expect(rows).not.toContain("more definition");
 	});
 
-	it("keeps each collapsed source line on one row, cut at the card's edge", () => {
+	it("cuts collapsed source lines at the card's edge and offers expansion for the clipped text", () => {
 		const long = `export const banner = "${"x".repeat(200)}";`;
 		const text = ["Found 1 definition(s):", "  src/a.ts:2:14", "    1: {", `    2: ${long}`, "    3: }"].join("\n");
 		const rows = renderRows(text, false, 60);
 		const marked = rows.findIndex(row => row.includes("*2│export const banner"));
 		expect(rows[marked + 1]).toContain(" 3│}");
+		expect(rows.join("\n")).toContain("Expand");
+		expect(renderRows(text, false, 400).join("\n")).not.toContain("Expand");
 	});
 });
