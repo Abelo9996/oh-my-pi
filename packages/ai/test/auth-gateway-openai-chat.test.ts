@@ -1,11 +1,18 @@
 import { describe, expect, it } from "bun:test";
-import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-chat-server";
+import {
+	adoptReplayedGeminiSignatures,
+	encodeResponse,
+	encodeStream,
+	parseRequest,
+} from "@oh-my-pi/pi-ai/providers/openai-chat-server";
+import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	ToolCall,
 } from "@oh-my-pi/pi-ai/types";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
 	async function* iter() {
@@ -73,7 +80,6 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 							id: "call_1",
 							type: "function",
 							function: { name: "lookup", arguments: '{"q":"a"}' },
-							extra_content: { google: { thought_signature: "sig-123" } },
 						},
 						{
 							id: "call_2",
@@ -123,7 +129,6 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		if (call1.type !== "toolCall" || call2.type !== "toolCall") throw new Error("unreachable");
 		expect(call1.id).toBe("call_1");
 		expect(call1.name).toBe("lookup");
-		expect(call1.thoughtSignature).toBe("sig-123");
 		expect(call1.arguments).toEqual({ q: "a" });
 		// Un-parseable args fall back to __raw passthrough.
 		expect(call2.arguments).toEqual({ __raw: "not-json" });
@@ -147,6 +152,45 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		expect(parsed.options.toolChoice).toEqual({ name: "lookup" });
 		expect(parsed.options.responseFormat).toEqual({ type: "json_object" });
 		expect(parsed.options.extra).toEqual({ includeStreamingUsage: true });
+	});
+
+	it("replays a client's Gemini signature to the resolved model in the form its transport sends", () => {
+		const signedTurn = () =>
+			parseRequest({
+				model: "gemini",
+				messages: [
+					{ role: "user", content: "hi" },
+					{
+						role: "assistant",
+						content: null,
+						tool_calls: [
+							{
+								id: "call_1",
+								type: "function",
+								function: { name: "lookup", arguments: "{}" },
+								extra_content: { google: { thought_signature: "sig-123" } },
+							},
+						],
+					},
+					{ role: "tool", tool_call_id: "call_1", content: "ok" },
+				],
+			}).context;
+		const replayedSignature = (model: NonNullable<ReturnType<typeof getBundledModel>>) => {
+			const context = signedTurn();
+			adoptReplayedGeminiSignatures(context, model);
+			const assistant = transformMessages(context.messages, model).find(message => message.role === "assistant");
+			const call =
+				assistant?.role === "assistant" ? assistant.content.find(part => part.type === "toolCall") : undefined;
+			return call?.type === "toolCall" ? call.thoughtSignature : undefined;
+		};
+
+		const native = getBundledModel("google", "gemini-2.5-pro");
+		const compatible = getBundledModel("kilo", "google/gemini-2.5-pro");
+		if (!native || !compatible) throw new Error("expected bundled Gemini models");
+		expect(replayedSignature(native)).toBe("sig-123");
+		expect(JSON.parse(replayedSignature(compatible) ?? "null")).toEqual({
+			perCall: { google: { thought_signature: "sig-123" } },
+		});
 	});
 
 	it("coerces content:null to empty content for non-function roles (Codex #10956)", () => {

@@ -13,6 +13,7 @@ import type {
 	Context,
 	ImageContent,
 	Message,
+	Model,
 	ServiceTier,
 	StopReason,
 	TextContent,
@@ -30,6 +31,11 @@ import {
 	openaiChatRequestSchema,
 } from "./openai-chat-server-schema";
 import { decodeDataUri } from "./openai-data-uri";
+import {
+	geminiToolCallExtraContent,
+	rawGeminiToolCallSignature,
+	storeGeminiToolCallSignature,
+} from "./openai-completions";
 import { coerceNullMessageContentInPlace } from "./openai-shared";
 
 export type { ParsedRequest };
@@ -292,9 +298,8 @@ function buildAssistantMessage(
 					args = { __raw: argsStr };
 				}
 			}
-			const rawExtraContent =
-				typeof raw === "object" && raw !== null && "extra_content" in raw ? raw.extra_content : undefined;
-			const thoughtSignature = extractGoogleThoughtSignature(rawExtraContent);
+			// A Gemini tool call replays the signature its response carried; store it as this API's transport does.
+			const thoughtSignature = storeGeminiToolCallSignature(Reflect.get(raw, "extra_content"));
 			const call: ToolCall = {
 				type: "toolCall",
 				id: raw.id,
@@ -322,6 +327,29 @@ function buildAssistantMessage(
 		stopReason: "stop",
 		timestamp: now,
 	};
+}
+
+/**
+ * Stamp the replayed tool-call turns that carry a Gemini signature as `model`'s own: they came from this gateway
+ * model, and a turn labeled as a foreign model loses its signature in `transformMessages`. Native Gemini
+ * transports replay the raw signature; every other transport keeps the stored envelope.
+ */
+export function adoptReplayedGeminiSignatures(context: Context, model: Model): void {
+	const nativeGemini =
+		model.api === "google-generative-ai" || model.api === "google-vertex" || model.api === "google-gemini-cli";
+	for (const message of context.messages) {
+		if (message.role !== "assistant") continue;
+		if (!message.content.some(block => block.type === "toolCall" && block.thoughtSignature)) continue;
+		message.provider = model.provider;
+		message.api = model.api;
+		message.model = model.id;
+		if (!nativeGemini) continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall" && block.thoughtSignature) {
+				block.thoughtSignature = rawGeminiToolCallSignature(block.thoughtSignature);
+			}
+		}
+	}
 }
 
 /**
@@ -438,7 +466,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 	}
 	if (toolCalls.length > 0) {
 		responseMessage.tool_calls = toolCalls.map(tc => {
-			const extraContent = googleThoughtSignatureExtraContent(tc.thoughtSignature);
+			const extraContent = geminiToolCallExtraContent(tc.thoughtSignature);
 			return {
 				id: tc.id,
 				type: "function",
@@ -509,32 +537,6 @@ function flattenAssistant(message: AssistantMessage): {
 		}
 	}
 	return { text, reasoning, toolCalls };
-}
-
-function extractGoogleThoughtSignature(value: unknown): string | undefined {
-	if (typeof value === "string") {
-		const trimmed = value.trim();
-		if (trimmed.length === 0) return undefined;
-		try {
-			const parsed: unknown = JSON.parse(trimmed);
-			if (parsed !== trimmed) return extractGoogleThoughtSignature(parsed);
-		} catch {
-			// Raw provider signatures are opaque strings, usually base64.
-		}
-		return trimmed;
-	}
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-	if ("google" in value) return extractGoogleThoughtSignature(value.google);
-	if ("perCall" in value) return extractGoogleThoughtSignature(value.perCall);
-	if ("thought_signature" in value) return extractGoogleThoughtSignature(value.thought_signature);
-	return undefined;
-}
-
-function googleThoughtSignatureExtraContent(
-	value: string | undefined,
-): Record<string, unknown> | undefined {
-	const signature = extractGoogleThoughtSignature(value);
-	return signature ? { google: { thought_signature: signature } } : undefined;
 }
 
 function isOnlyRaw(args: Record<string, unknown>): boolean {
@@ -634,7 +636,7 @@ export function encodeStream(
 			// concatenation-safe corrective chunk before the finish.
 			const sentToolMeta = new Map<
 				number,
-				{ id: string; name: string; hasArgumentBytes: boolean; thoughtSignature?: string }
+				{ id: string; name: string; hasArgumentBytes: boolean; signed: boolean }
 			>();
 			let nextToolIndex = 0;
 			let hasToolCalls = false;
@@ -688,9 +690,9 @@ export function encodeStream(
 								id: call?.id ?? "",
 								name: call?.name ?? "",
 								hasArgumentBytes: false,
-								...(call?.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
+								signed: Boolean(call?.thoughtSignature),
 							});
-							const extraContent = googleThoughtSignatureExtraContent(call?.thoughtSignature);
+							const extraContent = geminiToolCallExtraContent(call?.thoughtSignature);
 							writeSse(
 								controller,
 								baseChunk(
@@ -738,9 +740,9 @@ export function encodeStream(
 							const correctArguments = sent.hasArgumentBytes
 								? undefined
 								: stringifyArgs(event.toolCall.arguments);
-							const extraContent = sent.thoughtSignature
+							const extraContent = sent.signed
 								? undefined
-								: googleThoughtSignatureExtraContent(event.toolCall.thoughtSignature);
+								: geminiToolCallExtraContent(event.toolCall.thoughtSignature);
 							if (
 								correctId !== undefined ||
 								correctName !== undefined ||
