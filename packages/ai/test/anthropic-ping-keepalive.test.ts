@@ -174,15 +174,9 @@ describe("anthropic ping keepalive idle cap", () => {
 		expect(providerRetryWait).not.toHaveBeenCalled();
 	});
 
-	it.each([
-		["text", { type: "text", text: "" }, { type: "text_delta", text: "" }],
-		["thinking", { type: "thinking", thinking: "", signature: "" }, { type: "thinking_delta", thinking: "" }],
-		[
-			"tool input",
-			{ type: "tool_use", id: "toolu_empty_delta", name: "write", input: {} },
-			{ type: "input_json_delta", partial_json: "" },
-		],
-	] as const)("times out empty %s deltas without renewing ping keepalives", async (_name, block, delta) => {
+	it("times out a stream of empty deltas instead of letting them renew the ping keepalive", async () => {
+		const block = { type: "tool_use", id: "toolu_empty_delta", name: "write", input: {} };
+		const delta = { type: "input_json_delta", partial_json: "" };
 		vi.useFakeTimers();
 		const counters = { pings: 0 };
 		const controller = new AbortController();

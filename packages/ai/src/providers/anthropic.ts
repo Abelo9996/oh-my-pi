@@ -925,6 +925,22 @@ type RawMessagePingEvent = { type: "ping" };
 type AnthropicStreamEvent = RawMessageStreamEvent | RawMessagePingEvent;
 const ANTHROPIC_PING_EVENT: RawMessagePingEvent = { type: "ping" };
 
+/** A content delta that carries no bytes: a stalled relay can repeat these forever, so they are not stream progress. */
+function isEmptyContentDelta(event: AnthropicStreamEvent): boolean {
+	if (event.type !== "content_block_delta") return false;
+	const delta = event.delta;
+	switch (delta.type) {
+		case "text_delta":
+			return delta.text === "";
+		case "thinking_delta":
+			return delta.thinking === "";
+		case "input_json_delta":
+			return delta.partial_json === "";
+		default:
+			return false;
+	}
+}
+
 /**
  * In-stream `error` SSE frames carry an Anthropic error envelope:
  * `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`.
@@ -2685,16 +2701,7 @@ const streamAnthropicOnce = (
 						abortSignal: options?.signal,
 						isProgressItem: item => {
 							const event = item as AnthropicStreamEvent;
-							if (event.type === "content_block_delta") {
-								const delta = event.delta;
-								if (
-									(delta.type === "text_delta" && delta.text === "") ||
-									(delta.type === "thinking_delta" && delta.thinking === "") ||
-									(delta.type === "input_json_delta" && delta.partial_json === "")
-								) {
-									return false;
-								}
-							}
+							if (isEmptyContentDelta(event)) return false;
 							if (event.type === "ping") {
 								if (!sawNonPingEvent) return false;
 								if (pingProgressCapMs === undefined) return true;
