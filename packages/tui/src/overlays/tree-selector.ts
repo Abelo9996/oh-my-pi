@@ -15,7 +15,7 @@ import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 export const TREE_FILTER_MODES = ["default", "no-tools", "user-only", "labeled-only", "all"] as const;
 /** Session-tree display filter. */
 export type TreeFilterMode = (typeof TREE_FILTER_MODES)[number];
-import { theme } from "../theme/theme";
+import { getThemeEpoch, theme } from "../theme/theme";
 import {
 	matchesAppInterrupt,
 	matchesSelectDown,
@@ -274,6 +274,8 @@ class TreeList implements Component {
 		| undefined;
 	/** Bumped on every label edit: labels are item badges. */
 	#labelVersion = 0;
+	/** Theme epoch the native item caches were built under: labels bake in theme-dependent colors. */
+	#nativeThemeEpoch = getThemeEpoch();
 	#pickerItems:
 		| { rows: readonly TreeRow<TreeSelectorNode, string>[]; labels: number; items: TspPickerItem[] }
 		| undefined;
@@ -743,6 +745,7 @@ class TreeList implements Component {
 	 * only `order` (the visible entries) and the selection.
 	 */
 	pickerView(): TreePickerView {
+		this.#syncNativeTheme();
 		const allRows = this.#tree.allRows;
 		if (this.#pickerItems?.rows !== allRows || this.#pickerItems.labels !== this.#labelVersion) {
 			// Real branch points get a disclosure; linear chains stay flat at their head's depth.
@@ -843,6 +846,7 @@ class TreeList implements Component {
 	 * instead of drawn tree connectors.
 	 */
 	describeList(): NativeNode {
+		this.#syncNativeTheme();
 		const rows = this.#tree.rows;
 		let items = this.#itemsNative;
 		if (items?.rows !== rows) {
@@ -890,6 +894,19 @@ class TreeList implements Component {
 			span("alt+d", "key"),
 			span(" for default", "muted"),
 		];
+	}
+
+	/**
+	 * Drop native items built under another theme: {@link assistantLabelColor}
+	 * picks the `assistant:` hue from the active palette when an item is built.
+	 */
+	#syncNativeTheme(): void {
+		const epoch = getThemeEpoch();
+		if (epoch === this.#nativeThemeEpoch) return;
+		this.#nativeThemeEpoch = epoch;
+		this.#pickerItems = undefined;
+		this.#itemsNative = undefined;
+		this.#itemCache.clear();
 	}
 
 	#describeRow(row: TreeRow<TreeSelectorNode, string>): NativeNode {

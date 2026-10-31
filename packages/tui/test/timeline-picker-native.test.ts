@@ -8,7 +8,7 @@ import type { TUI } from "../src/index";
 import { CopySelectorComponent } from "../src/overlays/copy-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "../src/overlays/rewind-selector";
 import { TreeSelectorComponent, type TreeSelectorNode } from "../src/overlays/tree-selector";
-import { initTheme, theme } from "../src/theme";
+import { initTheme, setTheme, theme } from "../src/theme";
 import type { ThemeColor } from "../src/theme/schema";
 
 const pickerCx: DescribeContext = {
@@ -364,6 +364,44 @@ describe("session tree picker", () => {
 				return theme.getColorHex(semantic[token!]!).toLowerCase();
 			};
 			expect(labelHex("a1")).not.toBe(labelHex("u1"));
+		} finally {
+			await initTheme(false);
+		}
+	});
+
+	test("an open tree re-picks the assistant label hue when the theme switches", async () => {
+		// The card path prefixes active-path rows with an accent bullet, so match the label's own span.
+		const spanToken = (label: TspPickerItem["label"] | undefined) =>
+			typeof label === "string" ? undefined : label?.find(part => part.t.startsWith("assistant"))?.s?.split(" ")[0];
+		const pickerToken = (selector: TreeSelectorComponent) =>
+			spanToken(treeProps(selector).items?.find(item => item.id === "a1")?.label);
+		const findKey = (root: NativeChild, key: string): NativeNode | undefined => {
+			if (typeof root !== "object" || root === null || !("k" in root)) return undefined;
+			if (root.key === key) return root;
+			for (const child of root.c ?? []) {
+				const found = findKey(child, key);
+				if (found) return found;
+			}
+			return undefined;
+		};
+		const cardToken = (selector: TreeSelectorComponent) => {
+			const item = findKey(findKey(selector.describe(genericCx), "list")!, "a1");
+			return spanToken((item?.p as { label?: TspPickerItem["label"] } | undefined)?.label);
+		};
+		try {
+			await setTheme("dark-github");
+			const picker = treeSelector();
+			const card = treeSelector();
+			const before = pickerToken(picker);
+			expect(cardToken(card)).toBe(before);
+			// Each switch must match a selector built fresh under the new theme, both ways.
+			for (const name of ["dark-terminal", "dark-github"]) {
+				await setTheme(name);
+				const fresh = pickerToken(treeSelector());
+				expect(pickerToken(picker)).toBe(fresh);
+				expect(cardToken(card)).toBe(fresh);
+				if (name === "dark-terminal") expect(fresh).not.toBe(before);
+			}
 		} finally {
 			await initTheme(false);
 		}
