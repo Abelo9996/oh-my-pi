@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { TspKind, TspPickerProps, TspProps } from "@oh-my-pi/pi-wire";
+import type { TspKind, TspPickerItem, TspPickerProps, TspProps } from "@oh-my-pi/pi-wire";
 import type { SessionMessageEntryLike } from "../src/chat/transcript-entry";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { setNativeRendering } from "../src/native/state";
@@ -333,6 +333,21 @@ describe("session tree picker", () => {
 		expect(byId.get("u3")?.badges).toEqual([{ text: "idea", tone: "warning" }]);
 		expect((byId.get("u2")?.depth ?? 0) > (byId.get("a1")?.depth ?? 0)).toBe(true);
 		expect(p.selected).toBe("a3");
+	});
+
+	test("user rows differ from assistant rows beyond hue, so themes with accent = success stay readable", () => {
+		// `dark-terminal` and `*-poimandres` paint `accent` and `success` one colour.
+		const hueFree = (item: TspPickerItem | undefined) =>
+			(typeof item?.label === "string" ? [] : (item?.label ?? []))
+				.map(part =>
+					(part.s ?? "")
+						.split(" ")
+						.filter(token => token !== "accent" && token !== "success")
+						.join(" "),
+				)
+				.join("|");
+		const byId = new Map(treeProps(treeSelector()).items?.map(item => [item.id, item]));
+		expect(hueFree(byId.get("u1"))).not.toBe(hueFree(byId.get("a1")));
 	});
 
 	test("message labels fold \\r and Unicode line separators without flattening the selected preview", () => {
