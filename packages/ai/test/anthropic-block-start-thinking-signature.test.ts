@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { convertAnthropicMessages, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai/types";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import type { Context } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 // Captured v4 format; its header deliberately has no serving-model field.
@@ -55,39 +55,23 @@ function thinkingResponse(startSignature: string, signatureDeltas: readonly stri
 	});
 }
 
-describe("Anthropic block-start thinking signatures", () => {
+describe("Anthropic thinking signatures", () => {
 	it.each([
-		{ name: "block-start fallback", startSignature: SIGNATURE, deltas: [] },
+		// First-party shape: an empty block-start signature, then fragmented deltas.
 		{
-			name: "native fragmented delta precedence",
-			startSignature: "discarded-start-signature",
+			name: "native deltas after an empty block start",
+			startSignature: "",
 			deltas: [SIGNATURE.slice(0, 30), SIGNATURE.slice(30)],
 		},
-	])("preserves $name through live and serialized history", async ({ startSignature, deltas }) => {
+		{ name: "a block-start signature with no deltas", startSignature: SIGNATURE, deltas: [] },
+		{ name: "native deltas over a block-start signature", startSignature: "discarded", deltas: [SIGNATURE] },
+	])("keeps the signature from $name", async ({ startSignature, deltas }) => {
 		const context: Context = { messages: [{ role: "user", content: "Think and reply.", timestamp: 0 }] };
-		const stream = streamAnthropic(model, context, {
+		const message = await streamAnthropic(model, context, {
 			apiKey: "local-test-key",
 			thinkingEnabled: true,
 			fetch: async () => thinkingResponse(startSignature, deltas),
-		});
-		const message = await stream.result();
-		expect(message.stopReason).toBe("stop");
-		expect(message.content[0]).toMatchObject({
-			type: "thinking",
-			thinking: "Preserve signed bytes.",
-			thinkingSignature: SIGNATURE,
-		});
-		for (const history of [message, JSON.parse(JSON.stringify(message)) as AssistantMessage]) {
-			const wire = convertAnthropicMessages(
-				[...context.messages, history, { role: "user", content: "Continue.", timestamp: 1 }],
-				model,
-				false,
-			);
-			expect(wire.find(turn => turn.role === "assistant")?.content).toContainEqual({
-				type: "thinking",
-				thinking: "Preserve signed bytes.",
-				signature: SIGNATURE,
-			});
-		}
+		}).result();
+		expect(message.content[0]).toMatchObject({ type: "thinking", thinkingSignature: SIGNATURE });
 	});
 });

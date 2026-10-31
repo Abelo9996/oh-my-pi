@@ -3006,13 +3006,12 @@ const streamAnthropicOnce = (
 									continue;
 								}
 								streamedReplayUnsafeContent = true;
-								// Some compatible endpoints put the signature on block_start.
-								// It is a fallback, not a prefix of the native delta sequence.
-								if (!openBlock.signatureDeltaStarted) {
-									block.thinkingSignature = "";
-									openBlock.signatureDeltaStarted = true;
-								}
-								block.thinkingSignature = (block.thinkingSignature ?? "") + event.delta.signature;
+								// Some compatible endpoints put the signature on block_start: a fallback that the
+								// first native delta replaces, not a prefix of the delta sequence.
+								block.thinkingSignature = openBlock.signatureDeltaStarted
+									? `${block.thinkingSignature ?? ""}${event.delta.signature}`
+									: event.delta.signature;
+								openBlock.signatureDeltaStarted = true;
 							}
 						} else if (event.type === "content_block_stop") {
 							if (sawTerminalEnvelope) {
