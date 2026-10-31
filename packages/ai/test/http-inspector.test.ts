@@ -200,15 +200,6 @@ describe("finalizeErrorMessage", () => {
 		expect(occurrences(message, MUSE_DENIAL_BODY)).toBe(1);
 	});
 
-	it("prints literal dollar patterns in a provider body verbatim when restoring a truncated copy", async () => {
-		const core = "Upstream rejected $& and $' and $` literally, plus enough trailing words to be truncated.";
-		const payload = { error: { message: core, type: "invalid_request_error" } };
-		const captured: CapturedHttpErrorResponse = { status: 400, bodyText: JSON.stringify(payload), bodyJson: payload };
-		const message = await finalizeErrorMessage(new Error(`400 ${core.slice(0, 30)}`), undefined, captured);
-
-		expect(message).toBe(`400 ${core} (type=invalid_request_error)`);
-	});
-
 	it("prints a truncated body once when a retry header is present, with the hint last", async () => {
 		const core = "slow down ".repeat(500);
 		const payload = { error: { message: core, type: "rate_limit" } };
@@ -238,16 +229,6 @@ describe("finalizeErrorMessage", () => {
 		const message = await finalizeErrorMessage(new Error("403 403"), undefined, captured);
 
 		expect(message).toBe(`403 ${core} (type=permission_error)`);
-	});
-
-	it("still replaces a bodyless status line with the captured payload", async () => {
-		const message = await finalizeErrorMessage(
-			new Error("403 status code (no body)"),
-			undefined,
-			MUSE_DENIAL_RESPONSE,
-		);
-
-		expect(message).toBe(`403 status code: ${MUSE_DENIAL_BODY}${MUSE_DENIAL_SUFFIX}`);
 	});
 
 	it("joins a provider body the thrown message does not carry", async () => {

@@ -31,8 +31,8 @@ export function appendRetryAfterHint(message: string, headers: HeadersLike): str
 	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
 }
 
-export function formatErrorMessageWithRetryAfter(error: unknown, headers?: HeadersLike): string {
-	return appendRetryAfterHint(errorMessageText(error), headers ?? getHeadersFromError(error));
+export function formatErrorMessageWithRetryAfter(error: unknown): string {
+	return appendRetryAfterHint(errorMessageText(error), getHeadersFromError(error));
 }
 
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
