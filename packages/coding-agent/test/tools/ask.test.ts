@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
-import { agentLoop, TOOL_INTERRUPT_ABORT_REASON, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { agentLoop, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentLoopConfig } from "@oh-my-pi/pi-agent-core/types";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -66,6 +66,8 @@ function createContext(args: {
 		dialogOptions?: any,
 	) => Promise<ExtensionAskDialogResult | undefined>;
 	abort?: () => void;
+	/** The loop's cooperative steering signal for this call (`ctx.toolCall.steeringSignal`). */
+	steeringSignal?: AbortSignal;
 }): AgentToolContext {
 	// AgentToolContext includes many runtime fields; tests only need UI + abort behavior.
 	return {
@@ -81,6 +83,7 @@ function createContext(args: {
 			) => args.editor?.(title, prefill, dialogOptions, editorOptions) ?? Promise.resolve(undefined),
 		},
 		abort: args.abort ?? (() => {}),
+		...(args.steeringSignal ? { toolCall: { steeringSignal: args.steeringSignal } } : {}),
 	} as unknown as AgentToolContext;
 }
 
@@ -130,27 +133,34 @@ describe("AskTool cancellation", () => {
 		expect(abort).toHaveBeenCalledTimes(1);
 	});
 
-	it("does not cancel the turn when steering interrupts the fallback selector", async () => {
-		const controller = new AbortController();
-		const abort = vi.fn();
-		const tool = new AskTool(createSession());
-		const context = createContext({
-			abort,
-			select: async () => {
-				controller.abort(TOOL_INTERRUPT_ABORT_REASON);
-				return undefined;
-			},
-		});
-		await expect(
-			tool.execute(
-				"call-interrupted",
+	it("closes for a message the user queued without cancelling the turn, but stays open for other interrupts", async () => {
+		const ask = (source: string) => {
+			const steering = new AbortController();
+			const abort = vi.fn();
+			const context = createContext({
+				abort,
+				steeringSignal: steering.signal,
+				select: async (_prompt, options, dialogOptions) => {
+					steering.abort(source);
+					return dialogOptions?.signal?.aborted ? undefined : selectItemLabel(options[0]);
+				},
+			});
+			const outcome = new AskTool(createSession()).execute(
+				`call-${source}`,
 				{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
-				controller.signal,
+				undefined,
 				undefined,
 				context,
-			),
-		).rejects.toBeInstanceOf(ToolAbortError);
-		expect(abort).not.toHaveBeenCalled();
+			);
+			return { outcome, abort };
+		};
+
+		const user = ask("user");
+		await expect(user.outcome).rejects.toThrow("Ask interrupted by message");
+		expect(user.abort).not.toHaveBeenCalled();
+
+		const irc = ask("irc");
+		expect((await irc.outcome).details).toMatchObject({ selectedOptions: ["SQLite"] });
 	});
 
 	it("delivers queued steering while ask is open without cancelling the turn", async () => {
@@ -186,7 +196,7 @@ describe("AskTool cancellation", () => {
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: messages => messages as Message[],
-			getToolContext: () => context,
+			getToolContext: toolCall => ({ ...context, toolCall }) as AgentToolContext,
 			hasSteeringMessages: () => queued,
 			waitForSteeringMessages: () => wake.promise,
 			getSteeringMessages: async () => {
@@ -235,15 +245,8 @@ describe("AskTool cancellation", () => {
 			expect(result?.type).toBe("tool_execution_end");
 			if (result?.type !== "tool_execution_end") return;
 			expect(result.isError).toBe(true);
-			expect(result.result.details).toMatchObject({ __interrupted: true, source: "interrupt_skipped" });
+			expect(JSON.stringify(result.result.content)).toContain("Ask interrupted by message");
 			expect(mock.calls).toHaveLength(2);
-			expect(
-				mock.calls[1]?.context.messages.some(
-					message =>
-						message.role === "assistant" &&
-						message.content.some(part => part.type === "toolCall" && part.id === "ask-1"),
-				),
-			).toBe(true);
 		} finally {
 			clearTimeout(timer);
 		}
@@ -820,7 +823,7 @@ describe("AskTool custom input", () => {
 		const abort = vi.fn();
 		const controller = new AbortController();
 		const editor = vi.fn(async (_title: string, _prefill?: string, dialogOptions?: { signal?: AbortSignal }) => {
-			expect(dialogOptions?.signal).toBe(controller.signal);
+			expect(dialogOptions?.signal?.aborted).toBe(false);
 			return await new Promise<string | undefined>((_resolve, reject) => {
 				dialogOptions?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
 					once: true,
