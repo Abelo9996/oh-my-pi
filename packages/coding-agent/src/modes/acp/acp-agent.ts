@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import {
 	type Agent,
 	type AgentSideConnection,
@@ -134,6 +134,23 @@ export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
 const ACP_CANCEL_CLEANUP_TIMEOUT_MS = PYTHON_KERNEL_CANCEL_BUDGET_MS + 1_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
+
+/**
+ * `<agentDir>/acp-session-handles.json` maps ACP handles whose durable session an
+ * extension replaced (`ctx.newSession`) to the session id now behind them, so
+ * `session/load` and `session/resume` by the handle reopen the conversation that
+ * continued under it after the agent restarts.
+ */
+const ACP_SESSION_HANDLES_FILE = "acp-session-handles.json";
+
+async function readAcpSessionHandles(): Promise<Record<string, string>> {
+	try {
+		return await Bun.file(path.join(getAgentDir(), ACP_SESSION_HANDLES_FILE)).json();
+	} catch (error) {
+		if (!isEnoent(error)) logger.warn("Ignoring unreadable ACP session handle map", { error: String(error) });
+		return {};
+	}
+}
 
 type AgentImageContent = {
 	type: "image";
@@ -790,6 +807,8 @@ export class AcpAgent implements Agent {
 	#initialSession: AgentSession | undefined;
 	#createSession: CreateAcpSession;
 	#sessions = new Map<string, ManagedSessionRecord>();
+	/** Serializes writes of the handle map ({@link readAcpSessionHandles}). */
+	#handleWrites: Promise<void> = Promise.resolve();
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
 	#clientCapabilities: ClientCapabilities | undefined;
@@ -1621,10 +1640,7 @@ export class AcpAgent implements Agent {
 			return existing;
 		}
 
-		const storedSession = await this.#findStoredSession(sessionId, cwd);
-		if (!storedSession) {
-			throw new Error(`ACP session not found: ${sessionId}`);
-		}
+		const storedSession = await this.#findHandleSession(sessionId, cwd);
 		return await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
 	}
 
@@ -1636,11 +1652,34 @@ export class AcpAgent implements Agent {
 			return existing;
 		}
 
-		const storedSession = await this.#findStoredSession(sessionId, cwd);
-		if (!storedSession) {
-			throw new Error(`ACP session not found: ${sessionId}`);
-		}
+		const storedSession = await this.#findHandleSession(sessionId, cwd);
 		return await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
+	}
+
+	/** The stored session behind `handle`: the session an extension moved it to, else the handle's own. */
+	async #findHandleSession(handle: string, cwd: string): Promise<StoredSessionInfo> {
+		await this.#handleWrites;
+		const moved = (await readAcpSessionHandles())[handle];
+		const stored =
+			(moved ? await this.#findStoredSession(moved, cwd) : undefined) ??
+			(await this.#findStoredSession(handle, cwd));
+		if (!stored) throw new Error(`ACP session not found: ${handle}`);
+		return stored;
+	}
+
+	/** Persist which durable session `record`'s handle now stands for. */
+	#rememberHandleSession(record: ManagedSessionRecord): void {
+		const handle = record.protocolSessionId;
+		const sessionId = record.session.sessionId;
+		this.#handleWrites = this.#handleWrites
+			.then(async () => {
+				const handles = await readAcpSessionHandles();
+				if (sessionId === handle ? !(handle in handles) : handles[handle] === sessionId) return;
+				if (sessionId === handle) delete handles[handle];
+				else handles[handle] = sessionId;
+				await Bun.write(path.join(getAgentDir(), ACP_SESSION_HANDLES_FILE), JSON.stringify(handles));
+			})
+			.catch(error => logger.warn("Failed to record ACP session handle", { handle, sessionId, error }));
 	}
 
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
@@ -1670,7 +1709,7 @@ export class AcpAgent implements Agent {
 		sessionPath: string,
 		cwd: string,
 		mcpServers: McpServer[],
-		sessionId: string,
+		protocolSessionId: string,
 	): Promise<ManagedSessionRecord> {
 		const { session, setToolUIContext } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
@@ -1680,21 +1719,24 @@ export class AcpAgent implements Agent {
 		try {
 			const success = await session.switchSession(sessionPath);
 			if (!success) {
-				throw new Error(`ACP session load was cancelled: ${sessionId}`);
+				throw new Error(`ACP session load was cancelled: ${protocolSessionId}`);
 			}
 		} catch (error) {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
+		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, protocolSessionId);
 	}
 
 	async #registerPreparedSession(
 		session: AgentSession,
 		mcpServers: McpServer[],
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
+		protocolSessionId = session.sessionId,
 	): Promise<ManagedSessionRecord> {
-		const record = this.#createManagedSessionRecord(session, setToolUIContext);
+		const record = this.#createManagedSessionRecord(session, setToolUIContext, protocolSessionId);
+		// Registered before extensions start: a `session_start` handler can already replace the durable session.
+		session.registerSessionChangeCallback(() => this.#rememberHandleSession(record));
 		session.setClientBridge(
 			createAcpClientBridge(this.#connection, record.protocolSessionId, this.#clientCapabilities),
 		);
@@ -1718,9 +1760,10 @@ export class AcpAgent implements Agent {
 	#createManagedSessionRecord(
 		session: AgentSession,
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined = undefined,
+		protocolSessionId = session.sessionId,
 	): ManagedSessionRecord {
 		return {
-			protocolSessionId: session.sessionId,
+			protocolSessionId,
 			session,
 			setToolUIContext,
 			mcpManager: undefined,
