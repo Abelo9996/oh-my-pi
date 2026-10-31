@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { TspKind, TspPickerItem, TspPickerProps, TspProps } from "@oh-my-pi/pi-wire";
+import type { TspKind, TspPickerProps, TspProps } from "@oh-my-pi/pi-wire";
 import type { SessionMessageEntryLike } from "../src/chat/transcript-entry";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { setNativeRendering } from "../src/native/state";
@@ -8,8 +8,7 @@ import type { TUI } from "../src/index";
 import { CopySelectorComponent } from "../src/overlays/copy-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "../src/overlays/rewind-selector";
 import { TreeSelectorComponent, type TreeSelectorNode } from "../src/overlays/tree-selector";
-import { initTheme, setTheme, theme } from "../src/theme";
-import type { ThemeColor } from "../src/theme/schema";
+import { initTheme, setTheme } from "../src/theme";
 
 const pickerCx: DescribeContext = {
 	cols: 120,
@@ -336,72 +335,23 @@ describe("session tree picker", () => {
 		expect(p.selected).toBe("a3");
 	});
 
-	test("user rows differ from assistant rows beyond hue, so themes with accent = success stay readable", () => {
-		// `dark-terminal` and `*-poimandres` paint `accent` and `success` one colour.
-		const hueFree = (item: TspPickerItem | undefined) =>
-			(typeof item?.label === "string" ? [] : (item?.label ?? []))
-				.map(part =>
-					(part.s ?? "")
-						.split(" ")
-						.filter(token => token !== "accent" && token !== "success")
-						.join(" "),
-				)
-				.join("|");
-		const byId = new Map(treeProps(treeSelector()).items?.map(item => [item.id, item]));
-		expect(hueFree(byId.get("u1"))).not.toBe(hueFree(byId.get("a1")));
-	});
-
-	test("user and assistant labels get different terminal-renderable hues when accent and success match", async () => {
-		await initTheme(false, undefined, undefined, "dark-terminal", "dark-terminal");
-		try {
-			const byId = new Map(treeProps(treeSelector()).items?.map(item => [item.id, item]));
-			// Semantic tokens terminals style natively, with the theme color each one draws.
-			const semantic: Record<string, ThemeColor> = { accent: "accent", success: "success", path: "statusLinePath" };
-			const labelHex = (id: string) => {
-				const label = byId.get(id)?.label;
-				const token = typeof label === "string" ? undefined : label?.[0]?.s?.split(" ")[0];
-				expect(token && token in semantic).toBe(true);
-				return theme.getColorHex(semantic[token!]!).toLowerCase();
-			};
-			expect(labelHex("a1")).not.toBe(labelHex("u1"));
-		} finally {
-			await initTheme(false);
-		}
-	});
-
-	test("an open tree re-picks the assistant label hue when the theme switches", async () => {
-		// The card path prefixes active-path rows with an accent bullet, so match the label's own span.
-		const spanToken = (label: TspPickerItem["label"] | undefined) =>
-			typeof label === "string" ? undefined : label?.find(part => part.t.startsWith("assistant"))?.s?.split(" ")[0];
-		const pickerToken = (selector: TreeSelectorComponent) =>
-			spanToken(treeProps(selector).items?.find(item => item.id === "a1")?.label);
-		const findKey = (root: NativeChild, key: string): NativeNode | undefined => {
-			if (typeof root !== "object" || root === null || !("k" in root)) return undefined;
-			if (root.key === key) return root;
-			for (const child of root.c ?? []) {
-				const found = findKey(child, key);
-				if (found) return found;
-			}
-			return undefined;
-		};
-		const cardToken = (selector: TreeSelectorComponent) => {
-			const item = findKey(findKey(selector.describe(genericCx), "list")!, "a1");
-			return spanToken((item?.p as { label?: TspPickerItem["label"] } | undefined)?.label);
+	test("an open tree keeps user and assistant labels apart as the theme switches", async () => {
+		const selector = treeSelector();
+		const labelStyles = () => {
+			const items = treeProps(selector).items ?? [];
+			return ["u1", "a1"].map(id => {
+				const label = items.find(item => item.id === id)?.label;
+				return typeof label === "string" ? undefined : label?.[0]?.s;
+			});
 		};
 		try {
 			await setTheme("dark-github");
-			const picker = treeSelector();
-			const card = treeSelector();
-			const before = pickerToken(picker);
-			expect(cardToken(card)).toBe(before);
-			// Each switch must match a selector built fresh under the new theme, both ways.
-			for (const name of ["dark-terminal", "dark-github"]) {
-				await setTheme(name);
-				const fresh = pickerToken(treeSelector());
-				expect(pickerToken(picker)).toBe(fresh);
-				expect(cardToken(card)).toBe(fresh);
-				if (name === "dark-terminal") expect(fresh).not.toBe(before);
-			}
+			expect(labelStyles()).toEqual(["accent strong", "success"]);
+			// `dark-terminal` paints `accent` and `success` the same green.
+			await setTheme("dark-terminal");
+			expect(labelStyles()).toEqual(["accent strong", "path"]);
+			await setTheme("dark-github");
+			expect(labelStyles()).toEqual(["accent strong", "success"]);
 		} finally {
 			await initTheme(false);
 		}

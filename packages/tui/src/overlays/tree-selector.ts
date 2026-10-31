@@ -10,12 +10,12 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "../index";
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, oklabDistance, sanitizeText } from "@oh-my-pi/pi-utils";
 /** Available session-tree display filters. */
 export const TREE_FILTER_MODES = ["default", "no-tools", "user-only", "labeled-only", "all"] as const;
 /** Session-tree display filter. */
 export type TreeFilterMode = (typeof TREE_FILTER_MODES)[number];
-import { getThemeEpoch, theme } from "../theme/theme";
+import { theme } from "../theme/theme";
 import {
 	matchesAppInterrupt,
 	matchesSelectDown,
@@ -170,45 +170,39 @@ function stripSystemWrapperTags(content: string): string {
 /** Per-message cap on text folded into the tree search index. */
 const SEARCH_TEXT_LIMIT = 200;
 
-/**
- * One theme-colored piece of an entry's display text. `strong` sets bold weight
- * so user turns stand apart from assistant turns even in themes whose `accent`
- * and `success` share a hue (e.g. `dark-terminal`).
- */
+/** One theme-colored piece of an entry's display text; `strong` draws it bold. */
 interface EntryPart {
 	t: string;
 	s?: ThemeColor;
 	strong?: boolean;
 }
 
-/**
- * Native span token for a theme color. Terminals style the semantic tokens
- * (`path`, `accent`, …) but not every theme color name, so colors with a
- * semantic twin are sent as that token.
- */
-function nativeToken(color: ThemeColor): string {
-	return color === "statusLinePath" ? "path" : color;
-}
-
-/** An entry part as a native span: its theme color, plus `strong` when bold. */
+/** An entry part as a native span. Terminals style the semantic `path` token, not `statusLinePath`. */
 function partSpan(part: EntryPart): TspSpan {
-	const value = treeRowText(part.t);
-	const color = part.s && nativeToken(part.s);
-	if (!part.strong) return span(value, color);
-	return span(value, color ? `${color} strong` : "strong");
+	const color = part.s === "statusLinePath" ? "path" : part.s;
+	const style = part.strong ? (color ? `${color} strong` : "strong") : color;
+	return span(treeRowText(part.t), style);
 }
 
+/** OKLab distance under which two role colors read as the same color. */
+const SAME_COLOR_DISTANCE = 0.05;
+
+let assistantLabel: { theme: typeof theme; color: ThemeColor } | undefined;
+
 /**
- * The `assistant:` label color: `success`, unless the theme paints it the same as
- * the `user:` label's `accent` (`dark-terminal`, `*-poimandres`). Then the path
- * color, a hue terminals can render natively, and `muted` if that matches too.
+ * The `assistant:` label color: `success`, unless it looks like the `user:` label's
+ * `accent` (`dark-terminal`, `*-poimandres`); then the path color, then `muted`.
  */
 function assistantLabelColor(): ThemeColor {
-	const accent = theme.getColorHex("accent").toLowerCase();
-	for (const color of ["success", "statusLinePath"] as const) {
-		if (theme.getColorHex(color).toLowerCase() !== accent) return color;
+	if (assistantLabel?.theme !== theme) {
+		const accent = theme.getColorHex("accent");
+		const color =
+			(["success", "statusLinePath"] as const).find(
+				c => oklabDistance(theme.getColorHex(c), accent) >= SAME_COLOR_DISTANCE,
+			) ?? "muted";
+		assistantLabel = { theme, color };
 	}
-	return "muted";
+	return assistantLabel.color;
 }
 
 /** A cached native tree item and the inputs it was built from. */
@@ -274,8 +268,8 @@ class TreeList implements Component {
 		| undefined;
 	/** Bumped on every label edit: labels are item badges. */
 	#labelVersion = 0;
-	/** Theme epoch the native item caches were built under: labels bake in theme-dependent colors. */
-	#nativeThemeEpoch = getThemeEpoch();
+	/** Theme the native item caches were built under: labels bake in the `assistant:` color. */
+	#nativeTheme = theme;
 	#pickerItems:
 		| { rows: readonly TreeRow<TreeSelectorNode, string>[]; labels: number; items: TspPickerItem[] }
 		| undefined;
@@ -896,14 +890,10 @@ class TreeList implements Component {
 		];
 	}
 
-	/**
-	 * Drop native items built under another theme: {@link assistantLabelColor}
-	 * picks the `assistant:` hue from the active palette when an item is built.
-	 */
+	/** Drop native items built under another theme. */
 	#syncNativeTheme(): void {
-		const epoch = getThemeEpoch();
-		if (epoch === this.#nativeThemeEpoch) return;
-		this.#nativeThemeEpoch = epoch;
+		if (this.#nativeTheme === theme) return;
+		this.#nativeTheme = theme;
 		this.#pickerItems = undefined;
 		this.#itemsNative = undefined;
 		this.#itemCache.clear();
@@ -1169,7 +1159,10 @@ class TreeList implements Component {
 				if (entry.customType === "advisor") {
 					const { qualifier, text } = advisorTreeDisplay(entry.details);
 					const label = qualifier ? `advisor (${qualifier}): ` : "advisor: ";
-					return [{ t: label, s: "customMessageLabel" }, { t: normalize(text) }];
+					return [
+						{ t: label, s: "customMessageLabel" },
+						{ t: normalize(text), s: "muted" },
+					];
 				}
 				const content = stripSystemWrapperTags(this.#joinTextContent(entry.content));
 				return [
