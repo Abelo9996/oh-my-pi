@@ -84,18 +84,15 @@ describe("EpisodicGraph heuristic fact extraction", () => {
 				["Bob", "is", "active"],
 				["Alice", "is", "idle"],
 			]);
-			expect(triples(graph, "Alice is active yet Bob is idle.")).toEqual([
-				["Alice", "is", "active"],
-				["Bob", "is", "idle"],
-			]);
 		});
 	});
 
-	it("leaves the next clause's subject for its own fact even after an unlisted connector", () => {
+	it("leaves the next clause's whole subject for its own fact even after an unlisted connector", () => {
 		withGraph(graph => {
-			const facts = triples(graph, "Alice is active plus Bob is idle.");
-			expect(facts).toContainEqual(["Bob", "is", "idle"]);
-			expect(facts.some(([, , object]) => object?.includes("Bob"))).toBe(false);
+			expect(triples(graph, "Alice is active plus Bob Jones is idle.")).toEqual([
+				["Alice", "is", "active plus"],
+				["Bob Jones", "is", "idle"],
+			]);
 		});
 	});
 

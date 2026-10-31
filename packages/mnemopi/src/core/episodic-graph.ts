@@ -115,10 +115,10 @@ const ARTICLE = String.raw`(?:(?:an?|the)\s+)?`;
 /** Fact subject: from the first capitalized word up to the predicate. */
 const SUBJECT = String.raw`\b([A-Z][a-zA-Z\s]+?)`;
 /**
- * Start of another extractable clause (`Bob is …`, `the runtime has …`). Catches clauses joined by a
- * connector missing from {@link CLAUSE_BREAK}, so their subject is left for the next match.
+ * Start of another extractable clause (`Bob is …`, `Bob Jones is …`, `the runtime has …`). Catches clauses
+ * joined by a connector missing from {@link CLAUSE_BREAK}, so their whole subject is left for the next match.
  */
-const NEXT_CLAUSE = String.raw`${ARTICLE}[a-zA-Z\d]+\s+(?:is|has|uses?|using|used|works?)\b`;
+const NEXT_CLAUSE = String.raw`${ARTICLE}(?:[A-Z][a-zA-Z\d]*[ \t]+)*[a-zA-Z\d]+\s+(?:is|has|uses?|using|used|works?)\b`;
 
 /**
  * Captures a whole phrase of `word`s up to punctuation, a line break, a clause connector, or the
