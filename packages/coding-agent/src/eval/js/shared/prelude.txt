@@ -166,14 +166,18 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 		return { path, content: await readToolText(path), published };
 	};
+	// Lines as Python's `splitlines()` counts them: a trailing newline adds no empty line.
+	const sourceLines = content => {
+		const lines = content.split(/\r?\n/);
+		if (lines.at(-1) === "") lines.pop();
+		return lines;
+	};
 	// One output's selection; options, results and errors match Python `output()` in `eval/py/prelude.py`.
 	const selectOutput = async (id, { format = "raw", query, offset, limit }) => {
 		const { path, content, published } = await outputSource(id);
-		const lines = content.split(/\r?\n/);
-		if (lines.at(-1) === "") lines.pop();
-		const totalLines = lines.length;
 		let selected = content;
 		let range;
+		let lines;
 		if (query) {
 			let value;
 			try {
@@ -183,6 +187,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			}
 			selected = JSON.stringify(applyQuery(value, query), null, 2) ?? "null";
 		} else if (!isNil(offset) || !isNil(limit)) {
+			lines = sourceLines(content);
+			const totalLines = lines.length;
 			const startLine = Math.max(1, offset ?? 1);
 			if (startLine > totalLines) {
 				throw new RangeError(`Offset ${startLine} is beyond end of output (${totalLines} lines) for ${id}`);
@@ -196,7 +202,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		const entry = {
 			id,
 			path,
-			line_count: query ? selected.split(/\r?\n/).length : totalLines,
+			line_count: (lines ?? sourceLines(query ? selected : content)).length,
 			char_count: query ? selected.length : content.length,
 			content: selected,
 		};

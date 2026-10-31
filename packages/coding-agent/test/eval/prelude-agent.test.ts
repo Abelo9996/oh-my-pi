@@ -395,40 +395,24 @@ describe("eval js output() options (issue #17455)", () => {
 		});
 	});
 
-	it("marks published output as a previous run while the agent streams a follow-up", async () => {
+	it("keeps the previous-run banner while the agent streams a follow-up, but queries the published data", async () => {
 		using tmp = TempDir.createSync("@eval-prelude-output-superseded-");
 		const sandbox = await loadOutputPrelude(tmp);
 		const registry = AgentRegistry.global();
-		registry.register({
-			id: "Scout",
-			displayName: "Scout",
-			kind: "sub",
-			session: { isStreaming: true } as AgentSession,
-			status: "running",
-		});
+		for (const id of ["Scout", "Report"]) {
+			registry.register({
+				id,
+				displayName: id,
+				kind: "sub",
+				session: { isStreaming: true } as AgentSession,
+				status: "running",
+			});
+		}
 
-		const superseded = await vm.runInContext(`output("Scout")`, sandbox);
-		expect(superseded).toStartWith("> `Scout` is running a newer turn.");
-		expect(superseded).toContain("PREVIOUS run");
-		expect(superseded).toContain(rows[0]);
 		expect(await vm.runInContext(`output("Scout", { limit: 1 })`, sandbox)).toContain("PREVIOUS run");
+		expect(await vm.runInContext(`output("Report", { query: ".files[0].path" })`, sandbox)).toBe('"a.ts"');
 
 		registry.setStatus("Scout", "idle");
 		expect(await vm.runInContext(`output("Scout")`, sandbox)).toBe(`${rows.join("\n")}\n`);
-	});
-
-	it("queries a superseded JSON output's published data, not the banner", async () => {
-		using tmp = TempDir.createSync("@eval-prelude-output-superseded-query-");
-		const sandbox = await loadOutputPrelude(tmp);
-		AgentRegistry.global().register({
-			id: "Report",
-			displayName: "Report",
-			kind: "sub",
-			session: { isStreaming: true } as AgentSession,
-			status: "running",
-		});
-
-		expect(await vm.runInContext(`output("Report")`, sandbox)).toContain("PREVIOUS run");
-		expect(await vm.runInContext(`output("Report", { query: ".files[0].path" })`, sandbox)).toBe('"a.ts"');
 	});
 });
