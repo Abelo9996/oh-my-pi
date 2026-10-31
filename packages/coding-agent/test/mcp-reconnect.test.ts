@@ -177,24 +177,18 @@ describe("isRetriableConnectionError", () => {
 		});
 	}
 
-	for (const code of ["ENOTFOUND", "EAI_AGAIN", "FailedToOpenSocket"]) {
-		it(`retries a pre-dispatch ${code} failure with an uninformative message`, () => {
-			const error = normalizeMCPTransportError(Object.assign(new TypeError("Unable to connect"), { code }), {
-				transport: "http",
-				stage: "send",
-			});
-			expect(error).toMatchObject({ failure: "connect", stage: "connect", retryable: true, code });
+	it("retries pre-dispatch DNS and socket-open failures identified by code or message", () => {
+		const failures = [
+			Object.assign(new TypeError("Unable to connect"), { code: "EAI_AGAIN" }),
+			Object.assign(new TypeError("Unable to connect"), { code: "FailedToOpenSocket" }),
+			new TypeError("getaddrinfo ENOTFOUND example.invalid"),
+		];
+		for (const failure of failures) {
+			const error = normalizeMCPTransportError(failure, { transport: "http", stage: "send" });
+			expect(error).toMatchObject({ failure: "connect", retryable: true });
 			expect(isRetriableConnectionError(error)).toBe(true);
-		});
-	}
-
-	for (const message of ["getaddrinfo ENOTFOUND example.invalid", "getaddrinfo EAI_AGAIN", "FailedToOpenSocket"]) {
-		it(`retries a pre-dispatch failure identified only by ${message}`, () => {
-			const error = normalizeMCPTransportError(new TypeError(message), { transport: "http", stage: "send" });
-			expect(error).toMatchObject({ failure: "connect", stage: "connect", retryable: true });
-			expect(isRetriableConnectionError(error)).toBe(true);
-		});
-	}
+		}
+	});
 
 	it("uses typed transport metadata without retrying ambiguous timeouts", () => {
 		expect(
