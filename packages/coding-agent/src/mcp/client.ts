@@ -126,7 +126,6 @@ async function initializeConnection(
 	options?.signal?.throwIfAborted();
 
 	await options?.onInitialized?.();
-	options?.signal?.throwIfAborted();
 
 	return result;
 }
