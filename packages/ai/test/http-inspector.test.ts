@@ -209,6 +209,37 @@ describe("finalizeErrorMessage", () => {
 		expect(message).toBe(`400 ${core} (type=invalid_request_error)`);
 	});
 
+	it("prints a truncated body once when a retry header is present, with the hint last", async () => {
+		const core = "slow down ".repeat(500);
+		const payload = { error: { message: core, type: "rate_limit" } };
+		const captured: CapturedHttpErrorResponse = {
+			status: 429,
+			bodyText: JSON.stringify(payload),
+			bodyJson: payload,
+			headers: new Headers({ "retry-after-ms": "1000" }),
+		};
+		const message = await finalizeErrorMessage(new Error(`429 ${core.slice(0, 4096)}`), undefined, captured);
+
+		expect(message).toBe(`429 ${core} (type=rate_limit) retry-after-ms=1000`);
+	});
+
+	it("keeps the retry hint when a bodyless status line is replaced by the captured payload", async () => {
+		const headers = new Headers({ "retry-after-ms": "250" });
+		const captured: CapturedHttpErrorResponse = { ...MUSE_DENIAL_RESPONSE, headers };
+		const message = await finalizeErrorMessage(new Error("403 status code (no body)"), undefined, captured);
+
+		expect(message).toBe(`403 status code: ${MUSE_DENIAL_BODY}${MUSE_DENIAL_SUFFIX} retry-after-ms=250`);
+	});
+
+	it("restores a truncated body that starts like the status code without touching the status code", async () => {
+		const core = "403 forbidden by upstream policy";
+		const payload = { error: { message: core, type: "permission_error" } };
+		const captured: CapturedHttpErrorResponse = { status: 403, bodyText: JSON.stringify(payload), bodyJson: payload };
+		const message = await finalizeErrorMessage(new Error("403 403"), undefined, captured);
+
+		expect(message).toBe(`403 ${core} (type=permission_error)`);
+	});
+
 	it("still replaces a bodyless status line with the captured payload", async () => {
 		const message = await finalizeErrorMessage(
 			new Error("403 status code (no body)"),

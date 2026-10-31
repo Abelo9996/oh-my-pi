@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getLogsDir, isBunTestRuntime, isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
-import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
+import { appendRetryAfterHint, errorMessageText, getHeadersFromError } from "./retry-after.js";
 
 export type RawHttpRequestDump = {
 	provider: string;
@@ -166,34 +166,36 @@ export async function finalizeErrorMessage(
 	rawRequestDump: RawHttpRequestDump | undefined,
 	capturedErrorResponse?: CapturedHttpErrorResponse,
 ): Promise<string> {
-	let message = formatErrorMessageWithRetryAfter(error, capturedErrorResponse?.headers);
 	const captured = formatCapturedHttpErrorParts(capturedErrorResponse);
-	if (captured) {
-		if (/\bstatus code\s*\(no body\)/i.test(message)) {
-			message = `${capturedErrorResponse?.status ?? "HTTP"} status code: ${captured.text}`;
-		} else {
-			const truncated = truncatedBodySlice(message, captured.core);
-			if (truncated || message.includes(captured.core)) {
-				if (truncated) message = message.replace(truncated, () => captured.core);
-				if (captured.suffix && !message.includes(captured.suffix)) {
-					message = `${message}${captured.suffix}`;
-				}
-			} else {
-				message = `${message}\n${captured.text}`;
-			}
-		}
-	}
+	const body = captured
+		? mergeCapturedBody(errorMessageText(error), captured, capturedErrorResponse?.status)
+		: errorMessageText(error);
+	const message = appendRetryAfterHint(body, capturedErrorResponse?.headers ?? getHeadersFromError(error));
 	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
 }
 
+const STATUS_PREFIX_PATTERN = /^\s*\d{3}\s+/;
+
 /**
- * The leading slice of `core` carried by the thrown message, when the message
- * holds only a prefix of the provider body: OpenAI-family errors cap the
- * detail they interpolate, so the captured body is the fuller copy.
+ * Fold the captured provider body into the thrown message so it prints once.
+ * Works on the message before any retry hint is appended: OpenAI-family errors
+ * cap the body they interpolate, so the thrown message may hold only a prefix
+ * of the captured body, which the captured copy then replaces.
  */
-function truncatedBodySlice(message: string, core: string): string | undefined {
-	const body = message.replace(/^\s*\d{3}\s+/, "").trimEnd();
-	return body.length > 0 && body.length < core.length && core.startsWith(body) ? body : undefined;
+function mergeCapturedBody(message: string, captured: CapturedHttpErrorText, status: number | undefined): string {
+	if (/\bstatus code\s*\(no body\)/i.test(message)) {
+		return `${status ?? "HTTP"} status code: ${captured.text}`;
+	}
+	const statusPrefix = STATUS_PREFIX_PATTERN.exec(message)?.[0] ?? "";
+	const body = message.slice(statusPrefix.length).trimEnd();
+	const carriesTruncatedBody = body.length > 0 && body.length < captured.core.length && captured.core.startsWith(body);
+	if (carriesTruncatedBody) return withSuffix(`${statusPrefix}${captured.core}`, captured);
+	if (message.includes(captured.core)) return withSuffix(message, captured);
+	return `${message}\n${captured.text}`;
+}
+
+function withSuffix(message: string, captured: CapturedHttpErrorText): string {
+	return captured.suffix && !message.includes(captured.suffix) ? `${message}${captured.suffix}` : message;
 }
 
 /**
