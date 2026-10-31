@@ -370,7 +370,7 @@ export const openaiResponsesRequestSchema = type({
 	"tool_choice?": toolChoiceSchema,
 	"max_output_tokens?": "number | null",
 	"temperature?": "number | null",
-	"top_p?": "number",
+	"top_p?": "number | null",
 	"stop?": stopSchema,
 	"stream?": "boolean",
 	"reasoning?": reasoningConfigSchema.or("null"),
