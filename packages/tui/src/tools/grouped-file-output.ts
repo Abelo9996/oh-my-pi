@@ -319,29 +319,38 @@ function groupedHeaderName(line: string): string {
 }
 
 /**
+ * Source rows highlighted together. A run longer than this (a huge AST match) highlights chunk by chunk as rows
+ * are requested, so a collapsed view never tokenizes source it hides; a string or comment spanning a chunk
+ * boundary loses its continuation there.
+ */
+const CODE_FRAME_CHUNK_ROWS = 64;
+
+/**
  * Styled code-frame rows of grouped search output, highlighted in each owning
- * file's language. A run of consecutive line numbers in one file highlights
- * together on its first request; a gap row, a jump in line numbers or another
- * file starts a new run. Rows without a numbered code frame (headers, gap rows,
- * notes) return undefined, for the caller to style.
+ * file's language (`lang` overrides it when the highlighter knows it). A run of
+ * consecutive line numbers in one file highlights together on its first
+ * request; a gap row, a jump in line numbers or another file starts a new run.
+ * Rows without a numbered code frame (headers, gap rows, notes) return
+ * undefined, for the caller to style.
  */
 export function createCodeFrameStyler(
 	lines: readonly string[],
 	contexts: readonly GroupedLineContext[],
 	color: ThemeColor,
 	theme: Theme,
+	lang?: string,
 ): (index: number) => string | undefined {
-	// Each body row's language: its owning file's, from the resolved path or else its file header's name.
+	// Each body row's language: the override, else its owning file's, from the resolved path or its header's name.
+	const langOverride = isHighlightLanguage(lang) ? lang : undefined;
 	const langs: (string | undefined)[] = [];
 	let headerLang: string | undefined;
 	for (let index = 0; index < lines.length; index++) {
 		const ctx = contexts[index]!;
 		if (ctx.kind === "content") {
-			langs.push(ctx.filePath ? getLanguageFromPath(ctx.filePath) : headerLang);
+			langs.push(langOverride ?? (ctx.filePath ? getLanguageFromPath(ctx.filePath) : headerLang));
 			continue;
 		}
-		headerLang =
-			ctx.kind === "file" && !ctx.isUrl ? getLanguageFromPath(groupedHeaderName(lines[index]!)) : undefined;
+		headerLang = ctx.kind === "file" ? getLanguageFromPath(groupedHeaderName(lines[index]!)) : undefined;
 		langs.push(undefined);
 	}
 
@@ -361,19 +370,28 @@ export function createCodeFrameStyler(
 		const above = frameAt(index - 1);
 		return frame !== null && above !== null && frame.n === above.n + 1;
 	};
+	// First row of each row's run, memoized so walking back through a long run happens once.
+	const runStarts: number[] = [];
+	const runStartOf = (index: number): number => {
+		let row = index;
+		while (runStarts[row] === undefined && continuesRun(row)) row--;
+		const start = runStarts[row] ?? row;
+		for (let filled = row; filled <= index; filled++) runStarts[filled] = start;
+		return start;
+	};
 
 	const styled: string[] = [];
 	return index => {
 		if (frameAt(index) === null) return undefined;
 		const cached = styled[index];
 		if (cached !== undefined) return cached;
-		let start = index;
-		while (continuesRun(start)) start--;
+		const runStart = runStartOf(index);
+		const start = runStart + Math.floor((index - runStart) / CODE_FRAME_CHUNK_ROWS) * CODE_FRAME_CHUNK_ROWS;
 		let end = index + 1;
-		while (end < lines.length && continuesRun(end)) end++;
-		const runRows: CodeFrameRow[] = [];
-		for (let row = start; row < end; row++) runRows.push(frameAt(row)!.row);
-		renderCodeFrameRun(runRows, langs[index], color, theme).forEach((row, offset) => {
+		while (end < start + CODE_FRAME_CHUNK_ROWS && end < lines.length && continuesRun(end)) end++;
+		const chunkRows: CodeFrameRow[] = [];
+		for (let row = start; row < end; row++) chunkRows.push(frameAt(row)!.row);
+		renderCodeFrameRun(chunkRows, langs[index], color, theme).forEach((row, offset) => {
 			styled[start + offset] = row;
 		});
 		return styled[index];

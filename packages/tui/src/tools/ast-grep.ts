@@ -56,6 +56,8 @@ interface AstGrepRenderArgs {
 	/** Legacy pre-`path` argument name; kept so historical transcripts still render a scope. */
 	paths?: string[];
 	skip?: number;
+	/** Language the search parsed the files as; highlighting follows it over the file extension. */
+	lang?: string;
 }
 
 const COLLAPSED_MATCH_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
@@ -129,7 +131,7 @@ export const astGrepToolRenderer = {
 		// Resolve hyperlinks over the whole output so nested directory headers
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		const styleCodeFrame = createCodeFrameStyler(allLines, contexts, "toolOutput", uiTheme);
+		const styleCodeFrame = createCodeFrameStyler(allLines, contexts, "toolOutput", uiTheme, args?.lang);
 		// The displayed lines are sanitized, but OSC 8 destinations must retain the
 		// original path bytes. Only substitute targets for headers already linked
 		// by the sanitized output; never let raw text create additional links.
