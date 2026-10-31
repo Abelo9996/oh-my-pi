@@ -57,12 +57,10 @@ export async function writeArtifact(path: string, content: string): Promise<numb
 		await file.slice(0, Math.min(expectedBytes, 1)).arrayBuffer();
 		await replaceFileAtomically(tempPath, path);
 	} catch (error) {
-		try {
-			await fs.rm(tempPath, { force: true });
-		} catch (cleanupError) {
-			// Best-effort cleanup; preserve the original write or publication error.
+		// Best-effort cleanup: the write or publication error is the one to report.
+		await fs.rm(tempPath, { force: true }).catch(cleanupError => {
 			logger.warn("Failed to remove staged artifact", { tempPath, error: toError(cleanupError).message });
-		}
+		});
 		throw error;
 	}
 	return expectedBytes;
