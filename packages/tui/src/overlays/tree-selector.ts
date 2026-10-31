@@ -188,6 +188,20 @@ function partSpan(part: EntryPart): TspSpan {
 	return span(value, part.s ? `${part.s} strong` : "strong");
 }
 
+/**
+ * The `assistant:` label color: `success`, unless the theme paints it the same as
+ * the `user:` label's `accent` (`dark-terminal`, `*-poimandres`). Then the first
+ * fallback hue that differs; link and warning colors are skipped so the label
+ * does not read as a link or an alert.
+ */
+function assistantLabelColor(): ThemeColor {
+	const accent = theme.getColorHex("accent").toLowerCase();
+	for (const color of ["success", "thinkingMedium", "syntaxFunction"] as const) {
+		if (theme.getColorHex(color).toLowerCase() !== accent) return color;
+	}
+	return "success";
+}
+
 /** A cached native tree item and the inputs it was built from. */
 interface TreeItemMemo {
 	label: string | undefined;
@@ -1102,15 +1116,10 @@ class TreeList implements Component {
 				}
 				if (role === "assistant") {
 					const presentation = resolveAssistantErrorPresentation(msg);
-					if (presentation.kind === "compact-recovered") {
-						return [
-							{ t: "assistant: ", s: "success" },
-							{ t: presentation.text, s: "dim" },
-						];
-					}
+					const head: EntryPart = { t: "assistant: ", s: assistantLabelColor() };
+					if (presentation.kind === "compact-recovered") return [head, { t: presentation.text, s: "dim" }];
 					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
 					const textContent = normalize(this.#extractContent(msgWithContent.content));
-					const head: EntryPart = { t: "assistant: ", s: "success" };
 					if (textContent) return [head, { t: textContent }];
 					if (presentation.kind === "full") {
 						return [head, { t: normalize(presentation.text).slice(0, 80), s: "error" }];

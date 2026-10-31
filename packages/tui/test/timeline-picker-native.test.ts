@@ -8,7 +8,8 @@ import type { TUI } from "../src/index";
 import { CopySelectorComponent } from "../src/overlays/copy-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "../src/overlays/rewind-selector";
 import { TreeSelectorComponent, type TreeSelectorNode } from "../src/overlays/tree-selector";
-import { initTheme } from "../src/theme";
+import { initTheme, theme } from "../src/theme";
+import type { ThemeColor } from "../src/theme/schema";
 
 const pickerCx: DescribeContext = {
 	cols: 120,
@@ -348,6 +349,21 @@ describe("session tree picker", () => {
 				.join("|");
 		const byId = new Map(treeProps(treeSelector()).items?.map(item => [item.id, item]));
 		expect(hueFree(byId.get("u1"))).not.toBe(hueFree(byId.get("a1")));
+	});
+
+	test("user and assistant labels get different hues in a theme whose accent and success match", async () => {
+		await initTheme(false, undefined, undefined, "dark-terminal", "dark-terminal");
+		try {
+			const byId = new Map(treeProps(treeSelector()).items?.map(item => [item.id, item]));
+			const labelHex = (id: string) => {
+				const label = byId.get(id)?.label;
+				const token = typeof label === "string" ? undefined : label?.[0]?.s?.split(" ")[0];
+				return theme.getColorHex(token as ThemeColor).toLowerCase();
+			};
+			expect(labelHex("a1")).not.toBe(labelHex("u1"));
+		} finally {
+			await initTheme(false);
+		}
 	});
 
 	test("message labels fold \\r and Unicode line separators without flattening the selected preview", () => {
