@@ -110,6 +110,11 @@ describe("classifyGroupedLines", () => {
 		expect(ctx[0]?.headerPath).toBeUndefined();
 		expect(ctx[1]).toMatchObject({ kind: "content", url: "omp://docs/", filePath: undefined });
 	});
+
+	it("gives a headerless URL scope's lines its URL, never a filesystem path", () => {
+		const ctx = classifyGroupedLines(["*7│needle();"], REPO_ROOT, "local://notes/a.ts");
+		expect(ctx[0]).toMatchObject({ kind: "content", url: "local://notes/a.ts", filePath: undefined });
+	});
 });
 
 describe("groupLineIndicesByBlank", () => {

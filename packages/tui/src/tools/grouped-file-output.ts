@@ -212,7 +212,9 @@ function resolveGroupedPath(parent: string | undefined, name: string): string | 
  * formatted relative to cwd regardless of the (sub)directory the search was
  * scoped to. `fileScope` is the initial owning file for body lines that appear
  * before any header (single-file scopes have no `#` headers); it defaults to
- * `headerBase` and should be passed the scoped file's absolute path.
+ * `headerBase` and should be passed the scoped file's absolute path. A URL base
+ * or scope (`local://…`) is no filesystem path: headerless lines belong to the
+ * URL, and headers under a URL base get no path.
  */
 export function classifyGroupedLines(
 	lines: readonly string[],
@@ -220,13 +222,15 @@ export function classifyGroupedLines(
 	fileScope: string | undefined = headerBase,
 ): GroupedLineContext[] {
 	const result: GroupedLineContext[] = [];
+	const base = headerBase !== undefined && isUrlLikePath(headerBase) ? undefined : headerBase;
 	// Per depth (index `depth - 1`): each directory's absolute path, and its display
 	// name with the trailing `/`, so the `# /` root of absolute paths keeps its separator.
 	const dirAtDepth: (string | undefined)[] = [];
 	const displayDirAtDepth: string[] = [];
-	// Body lines before any header (single-file scopes) link to the scoped file.
-	let currentFile = fileScope;
-	let currentUrl: string | undefined;
+	// Body lines before any header (single-file scopes) belong to the scoped file or URL.
+	const scopeIsUrl = fileScope !== undefined && isUrlLikePath(fileScope);
+	let currentFile = scopeIsUrl ? undefined : fileScope;
+	let currentUrl = scopeIsUrl ? fileScope : undefined;
 
 	for (const line of lines) {
 		const match = GROUPED_HEADER_RE.exec(line);
@@ -236,7 +240,7 @@ export function classifyGroupedLines(
 		}
 		const depth = match[1]!.length;
 		const rest = match[2]!.trimEnd();
-		const parent = depth > 1 ? dirAtDepth[depth - 2] : headerBase;
+		const parent = depth > 1 ? dirAtDepth[depth - 2] : base;
 		const url = isUrlLikePath(rest);
 		dirAtDepth.length = displayDirAtDepth.length = depth - 1;
 		currentFile = currentUrl = undefined;
