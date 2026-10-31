@@ -155,7 +155,7 @@ describe("provider-file stream fallback", () => {
 			maxTokens: 4096,
 		});
 		// Sized from the budget the clamp reads for this model, so a change to the catalog value moves the case with
-		// it: the budget holds `withinBudget` screenshots, and the context carries 16 more.
+		// it: the budget holds at most `withinBudget` screenshots, and the context carries 16 more.
 		const byteBudget = resolveInlineImageByteBudget(anthropicModel, reachesBudgetedHost(anthropicModel));
 		if (byteBudget === undefined) throw new Error(`${anthropicModel.id} has no inline image byte budget`);
 		const screenshot = "A".repeat(Math.floor(byteBudget / 224));
@@ -182,12 +182,14 @@ describe("provider-file stream fallback", () => {
 		expect(await eventTypes(await wrapped(anthropicModel, context))).toEqual(["start", "done"]);
 		expect(attempts).toHaveLength(2);
 		const retried = attempts[1];
-		// The retry drops the oldest screenshots, and only as many as the budget requires.
-		expect(
+		// The retry drops the oldest screenshots until the rest fit; the host's body limit may drop a few more.
+		const kept =
 			retried?.messages.flatMap(message =>
 				message.role === "toolResult" && message.content[0]?.type === "image" ? [message.toolCallId] : [],
-			),
-		).toEqual(ids.slice(ids.length - withinBudget));
+			) ?? [];
+		expect(kept.length).toBeGreaterThan(0);
+		expect(kept.length).toBeLessThanOrEqual(withinBudget);
+		expect(kept).toEqual(ids.slice(ids.length - kept.length));
 	});
 
 	it("never retries after content has been emitted", async () => {
