@@ -91,6 +91,7 @@ import {
 	escapeSummaryBoundaryTags,
 	extractFileOpsFromMessage,
 	type FileOperations,
+	incompleteOutputError,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversationForSummary,
 	stripReadSelector,
@@ -1076,7 +1077,7 @@ async function summarizeConversationWindow(
 		throw createSummarizationError("Summarization failed", response);
 	}
 	if (response.stopReason === "length") {
-		throw new Error("Summarization failed: model output ended incomplete (stopReason: length)");
+		throw new Error(incompleteOutputError("Summarization failed"));
 	}
 
 	const textContent = response.content
@@ -1186,7 +1187,7 @@ export async function generateHandoffFromContext(
 		throw createSummarizationError("Handoff generation failed", response);
 	}
 	if (response.stopReason === "length") {
-		throw new Error("Handoff generation failed: model output ended incomplete (stopReason: length)");
+		throw new Error(incompleteOutputError("Handoff generation failed"));
 	}
 
 	return response.content
@@ -1312,10 +1313,7 @@ async function generateShortSummary(
 					outcome = { kind: "failed", error: response.errorMessage || "Unknown error" };
 					break;
 				case "length":
-					outcome = {
-						kind: "failed",
-						error: "Short summary failed: model output ended incomplete (stopReason: length)",
-					};
+					outcome = { kind: "failed", error: incompleteOutputError("Short summary failed") };
 					break;
 				case "stop":
 				case "toolUse":
@@ -2447,7 +2445,7 @@ async function generateTurnPrefixSummary(
 		throw createSummarizationError("Turn prefix summarization failed", response);
 	}
 	if (response.stopReason === "length") {
-		throw new Error("Turn prefix summarization failed: model output ended incomplete (stopReason: length)");
+		throw new Error(incompleteOutputError("Turn prefix summarization failed"));
 	}
 
 	return response.content
