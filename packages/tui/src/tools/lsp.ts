@@ -1129,12 +1129,9 @@ function describeLspLocations(
 		const file = plainText(location.file);
 		const context = location.context.map(line => ({ ...line, text: plainText(line.text) }));
 		const range = `:${location.line}:${location.col}`;
-		return keyed(
-			col([fileRow(displayPath(file), { range, title: file }), ...numberedCode(context, { path: file })], {
-				gap: "xs",
-			}),
-			`${file}${range}`,
-		);
+		const code = numberedCode(context, { path: file });
+		const header = fileRow(displayPath(file), { range, title: file });
+		return keyed(col(code ? [header, code] : [header], { gap: "xs" }), `${file}${range}`);
 	});
 	return {
 		tool: lspNativeHead(request, fallbackAction, [formatCount(parsed.noun, parsed.count)]),
