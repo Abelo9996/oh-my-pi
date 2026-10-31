@@ -1089,7 +1089,7 @@ class TreeList implements Component {
 					const content = normalize(this.#extractContent(msgWithContent.content));
 					return [
 						{ t: "user: ", s: "accent", strong: true },
-						{ t: content, strong: true },
+						{ t: content, s: "accent", strong: true },
 					];
 				}
 				if (role === "developer") {
