@@ -61,4 +61,17 @@ describe("LSP definition locations", () => {
 		expect(rows.join("\n")).toContain("Expand");
 		expect(renderRows(text, false, 400).join("\n")).not.toContain("Expand");
 	});
+
+	it("keeps a location whose path starts with whitespace instead of folding its source into the previous one", () => {
+		const text = [
+			"Found 2 definition(s):",
+			"  src/a.ts:1:1",
+			"    1: export const a = 1;",
+			"   spaced.ts:3:5",
+			"    3: export const spaced = 2;",
+		].join("\n");
+		const rows = renderRows(text, true).join("\n");
+		expect(rows).toMatch(/─ {2}spaced\.ts:3:5/);
+		expect(rows).toMatch(/\*3│export const spaced = 2;/);
+	});
 });

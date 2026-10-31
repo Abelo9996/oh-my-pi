@@ -593,8 +593,11 @@ interface LspLocations {
 }
 
 const LOCATIONS_HEADER_RE = /^Found (\d+) (definition|type definition|implementation)\(s\):$/;
-/** `  file:line:col`; context rows indent further, so the path starts at column 2. */
-const LOCATION_RE = /^ {2}(\S.*):(\d+):(\d+)$/;
+/**
+ * `  file:line:col`, the path from column 2 on (it may itself start with whitespace). Context rows are
+ * `    N: source`; a row matching both is context of the current location.
+ */
+const LOCATION_RE = /^ {2}(.+):(\d+):(\d+)$/;
 const LOCATION_CONTEXT_RE = /^ {4}(\d+): ?(.*)$/;
 
 /**
@@ -607,17 +610,18 @@ function parseLspLocations(lines: readonly string[]): LspLocations | undefined {
 	if (!header) return undefined;
 	const locations: LspLocation[] = [];
 	for (const line of lines.slice(1)) {
+		const current = locations.at(-1);
+		const context = current ? LOCATION_CONTEXT_RE.exec(line) : null;
+		if (current && context) {
+			const n = Number(context[1]);
+			current.context.push({ n, text: context[2].trimEnd(), mark: n === current.line });
+			continue;
+		}
 		const location = LOCATION_RE.exec(line);
 		if (location) {
 			const [, file, lineNumber, column] = location;
 			locations.push({ file, line: Number(lineNumber), col: Number(column), context: [] });
-			continue;
 		}
-		const context = LOCATION_CONTEXT_RE.exec(line);
-		const current = locations.at(-1);
-		if (!context || !current) continue;
-		const n = Number(context[1]);
-		current.context.push({ n, text: context[2].trimEnd(), mark: n === current.line });
 	}
 	return { noun: header[2], count: Number(header[1]), locations };
 }
@@ -1138,7 +1142,7 @@ function describeLspLocations(
 		tone: parsed.count > 0 ? undefined : "warning",
 		inline: true,
 		body: body.length > 0 ? body : undefined,
-		preview: { lines: 8 },
+		preview: { lines: PREVIEW_LIMITS.COLLAPSED_ITEMS },
 	};
 }
 
