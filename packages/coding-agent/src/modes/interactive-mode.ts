@@ -1346,11 +1346,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly composer: Composer;
 	ui: TUI;
 	chatContainer: TranscriptContainer;
+	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
+	pendingShellContainer: Container;
 	pendingMessagesContainer: Container;
 	/** Judge-batch and automatic-download progress rows above the working line. */
 	progressHudContainer: Container;
-	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
-	pendingShellContainer: Container;
 	statusContainer: Container;
 	/** Whether {@link statusContainer} rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
 	statusRowOccupied = false;
@@ -1946,11 +1946,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.retryLoader = undefined;
 		}
 		this.statusContainer.disposeChildren();
+		this.pendingShellContainer.disposeChildren();
 		this.pendingMessagesContainer.disposeChildren();
 		this.#clearJudgmentBatchProgress();
 		this.#cancelModelCycleClearTimer();
 		this.modelCycleContainer.disposeChildren();
-		this.pendingShellContainer.disposeChildren();
 		this.deferredCommandContainer.disposeChildren();
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
@@ -2126,11 +2126,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.chatContainer = new TranscriptContainer();
+		this.pendingShellContainer = new AnchoredLiveContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
 		this.progressHudContainer.addChild(this.#downloadActivityHud);
-		this.pendingShellContainer = new AnchoredLiveContainer();
 		this.#eventBusUnsubscribers.push(onDownloadActivity(activity => this.#downloadActivityHud.update(activity)));
 		this.statusContainer = new StatusHudContainer(this);
 		this.todoContainer = new TodoHudContainer(this);
@@ -2468,11 +2468,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setRuntimeChildren(
 			[
 				this.chatContainer,
+				this.pendingShellContainer,
 				this.pendingMessagesContainer,
 				this.todoContainer,
 				this.subagentContainer,
 				this.btwContainer,
-				this.pendingShellContainer,
 				this.reportContainer,
 				this.omfgContainer,
 				this.cleanseContainer,
@@ -2504,11 +2504,11 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.editorContainer,
 					this.attachmentChipsContainer,
 					this.reportContainer,
+					this.pendingShellContainer,
 					this.pendingMessagesContainer,
 					this.btwContainer,
 					this.omfgContainer,
 					this.cleanseContainer,
-					this.pendingShellContainer,
 					this.errorBannerContainer,
 				],
 				// HUDs that clear themselves on a timer or registry change (todos,
@@ -2538,13 +2538,13 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
 				],
+				// Deferred shell runs are transcript output: natively they flow at its
+				// end, where they stay when they move in, not pinned over the composer.
+				nativeTail: [this.pendingShellContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
-				// Deferred shell runs are transcript output: natively they flow at its
-				// end, where they stay when they move in, not pinned over the composer.
-				nativeTail: [this.pendingShellContainer],
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
