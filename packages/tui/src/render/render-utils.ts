@@ -442,17 +442,25 @@ export function formatEmptyMessage(message: string, theme: Theme): string {
 export const FILE_NAME_COLOR = "customMessageLabel" satisfies ThemeColor;
 
 /**
+ * Where a display path's final segment (file or folder name) starts, past its
+ * last `/` or `\` separator; a trailing-slash directory keeps its slash on the
+ * name. Shared by the terminal ({@link formatStyledPath}) and Tern file rows.
+ */
+export function pathNameStart(filePath: string): number {
+	let end = filePath.length;
+	while (end > 0 && (filePath[end - 1] === "/" || filePath[end - 1] === "\\")) end--;
+	return end === 0 ? 0 : Math.max(filePath.lastIndexOf("/", end - 1), filePath.lastIndexOf("\\", end - 1)) + 1;
+}
+
+/**
  * A file path in a tool body: the directory (with its trailing separator) dim,
- * the final segment (file or folder name) in {@link FILE_NAME_COLOR}. Handles
- * `/` and `\` separators and a trailing-slash directory. Tool headers keep
- * paths in their plain subject color instead.
+ * the final segment in {@link FILE_NAME_COLOR}. Tool headers keep paths in
+ * their plain subject color instead.
  */
 export function formatStyledPath(filePath: string, theme: Theme): string {
-	const end = filePath.replace(/[/\\]+$/, "").length;
-	const slash = Math.max(filePath.lastIndexOf("/", end - 1), filePath.lastIndexOf("\\", end - 1));
-	if (end === 0 || slash < 0) return theme.fg(FILE_NAME_COLOR, filePath);
-	const dir = theme.fg("dim", filePath.slice(0, slash + 1));
-	return `${dir}${theme.fg(FILE_NAME_COLOR, filePath.slice(slash + 1))}`;
+	const cut = pathNameStart(filePath);
+	const name = theme.fg(FILE_NAME_COLOR, filePath.slice(cut));
+	return cut > 0 ? `${theme.fg("dim", filePath.slice(0, cut))}${name}` : name;
 }
 
 // =============================================================================

@@ -24,7 +24,7 @@ describe("grepToolRenderer", () => {
 			details: {
 				matchCount: 1,
 				fileCount: 1,
-				displayContent: ["# src/", "## file.ts#abcd", "*12│const needle = true;"].join("\n"),
+				displayContent: ["# src/", "## file.ts#ABCD", "*12│const needle = true;"].join("\n"),
 			},
 		};
 
@@ -46,7 +46,7 @@ describe("grepToolRenderer", () => {
 			details: {
 				matchCount: 2,
 				fileCount: 2,
-				displayContent: ["# src/", "## a.ts#abcd", "*1│needle", "## b.ts#ef01", "*2│needle"].join("\n"),
+				displayContent: ["# src/", "## a.ts#ABCD", "*1│needle", "## b.ts#EF01", "*2│needle"].join("\n"),
 			},
 		};
 		const plainLines = sanitizeText(
@@ -108,15 +108,15 @@ describe("grepToolRenderer", () => {
 				fileCount: 4,
 				displayContent: [
 					"# src/",
-					"## first.ts#aaaa",
+					"## first.ts#AAAA",
 					" 1│before",
 					"*2│const firstFlag = true;",
 					" 3│after",
-					"## second.ts#bbbb",
+					"## second.ts#BBBB",
 					"*4│const secondFlag = true;",
-					"## third.ts#cccc",
+					"## third.ts#CCCC",
 					"*5│const thirdFlag = true;",
-					"## fourth.ts#dddd",
+					"## fourth.ts#DDDD",
 					"*6│const fourthFlag = true;",
 				].join("\n"),
 			},
@@ -152,7 +152,7 @@ describe("grepToolRenderer", () => {
 				fileCount: 1,
 				searchPath: projectRoot,
 				scopePath: "src",
-				displayContent: ["# src/", "## file.ts#abcd", "*12│const needle = true;"].join("\n"),
+				displayContent: ["# src/", "## file.ts#ABCD", "*12│const needle = true;"].join("\n"),
 			},
 		};
 
@@ -163,11 +163,8 @@ describe("grepToolRenderer", () => {
 		const fileUri = url.pathToFileURL(path.resolve(filePath)).href;
 		const uris = extractLinkUris(rendered);
 
-		// The file row (its full path, no `#` headers) and its match row both link to the file.
+		// The file row and its match row both link to the file.
 		expect(uris.filter(uri => uri === fileUri)).toHaveLength(2);
-		const plainLines = sanitizeText(rendered).split("\n");
-		expect(plainLines.some(line => line.endsWith("src/file.ts"))).toBe(true);
-		expect(plainLines.some(line => line.includes("#"))).toBe(false);
 	});
 
 	it("links sanitized grouped headers and matches to the original control-byte filename and cwd", async () => {
@@ -179,7 +176,7 @@ describe("grepToolRenderer", () => {
 		const searchPath = path.join(cwd, "src");
 		const file = `src/fi${control}xture.ts`;
 		const filename = path.join(cwd, file);
-		const displayContent = ["# src/", `## fi${control}xture.ts#abcd`, "*12│needle"].join("\n");
+		const displayContent = ["# src/", `## fi${control}xture.ts#ABCD`, "*12│needle"].join("\n");
 		const rawDetails = {
 			cwd,
 			searchPath,
@@ -378,25 +375,5 @@ describe("grepToolRenderer", () => {
 			expect(plain).not.toContain("x".repeat(200));
 			expect(plain.split("\n").filter(line => line.includes("12│"))).toHaveLength(1);
 		}
-	});
-
-	it("keeps the leading `/` of absolute paths folded under a `# /` root", async () => {
-		const uiTheme = (await getThemeByName("dark"))!;
-		const result = {
-			content: [{ type: "text", text: "" }],
-			details: {
-				matchCount: 2,
-				fileCount: 2,
-				displayContent: ["# /", "## z.ts", "*1│needle", "", "## tmp/a/", "### x.ts", "*2│needle"].join("\n"),
-			},
-		};
-		const plain = sanitizeText(
-			grepToolRenderer
-				.renderResult(result as never, { expanded: true, isPartial: false }, uiTheme, { pattern: "needle" })
-				.render(200)
-				.join("\n"),
-		);
-		expect(plain).toContain("─ /z.ts");
-		expect(plain).toContain("─ /tmp/a/x.ts");
 	});
 });

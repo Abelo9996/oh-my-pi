@@ -203,7 +203,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 			parts: [
 				{ text: theme.tree.last, color: "dim" },
 				{ text: "Read", color: "muted" },
-				{ text: formatStyledPath(file.path, theme), color: "dim" },
+				{ text: formatStyledPath(file.path, theme) },
 				{ text: `(${detail})`, color: "dim" },
 			],
 			indent,

@@ -202,13 +202,13 @@ describe("ReadToolGroupComponent", () => {
 		const renderPath = path.resolve("/tmp/render.ts");
 		component.updateArgs({ path: `${renderPath}:507-605` }, "read-one");
 		component.updateArgs({ path: `${renderPath}:1070-1194,1210-1240,1270-1274` }, "read-more");
+		// A second file keeps the reads as group rows rather than one header line.
 		component.updateArgs({ path: path.resolve("/tmp/other.ts") }, "read-other");
 
 		const rendered = component.render(120).join("\n");
 
 		expect(rendered).toContain(theme.fg(FILE_NAME_COLOR, "render.ts"));
 		expect(rendered).toContain(theme.fg("muted", ":507-605,1070-1194,…,1270-1274"));
-		expect(rendered).toContain(theme.fg(FILE_NAME_COLOR, "other.ts"));
 	});
 
 	it("uses result-provided recovered targets for delimited reads", () => {

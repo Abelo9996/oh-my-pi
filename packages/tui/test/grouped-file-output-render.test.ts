@@ -84,16 +84,31 @@ describe("classifyGroupedLines", () => {
 		});
 	});
 
+	it("keeps the leading `/` of absolute paths folded under a `# /` root", () => {
+		const ctx = classifyGroupedLines(["# /", "## z.ts", "", "## tmp/a/", "### x.ts"], REPO_ROOT);
+		expect([ctx[1]?.displayPath, ctx[4]?.displayPath]).toEqual(["/z.ts", "/tmp/a/x.ts"]);
+	});
+
+	it("drops only a hashline tag from a file name, not other `#` endings", () => {
+		const ctx = classifyGroupedLines(["# a.ts#1A2B (1 replacement)", "# component.ts#dead"], REPO_ROOT);
+		expect(ctx[0]).toMatchObject({ displayPath: "a.ts", suffix: "(1 replacement)" });
+		expect(ctx[1]).toMatchObject({
+			displayPath: "component.ts#dead",
+			headerPath: path.join(REPO_ROOT, "component.ts#dead"),
+		});
+	});
+
 	it("links body lines before any header to the single-file search base", () => {
 		const searchBase = path.join(REPO_ROOT, "file.ts");
 		const ctx = classifyGroupedLines(["*7│needle();"], searchBase);
 		expect(ctx[0]).toMatchObject({ kind: "content", filePath: searchBase });
 	});
 
-	it("flags url-like headers for caller-side resolution without a filesystem path", () => {
+	it("leaves url-like headers and their body lines to caller-side resolution", () => {
 		const ctx = classifyGroupedLines(["# omp://docs/", "  body"], REPO_ROOT);
-		expect(ctx[0]).toMatchObject({ kind: "file", isUrl: true });
+		expect(ctx[0]).toMatchObject({ kind: "file", url: "omp://docs/" });
 		expect(ctx[0]?.headerPath).toBeUndefined();
+		expect(ctx[1]).toMatchObject({ kind: "content", url: "omp://docs/", filePath: undefined });
 	});
 });
 

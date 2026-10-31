@@ -97,3 +97,32 @@ describe("AST edit file hyperlinks", () => {
 		]);
 	});
 });
+
+describe("AST edit collapsed preview", () => {
+	it("cuts a long first diff to the preview and counts the files left out", () => {
+		const diffRows = Array.from({ length: 10 }, (_, i) => `${i % 2 ? "+" : "-"}${i + 1}│x`);
+		const displayContent = [
+			"# src/",
+			"## a.ts (5 replacements)",
+			...diffRows,
+			"## b.ts (1 replacement)",
+			"-1│y",
+			"+1│z",
+		];
+		const details: AstEditToolDetails = {
+			totalReplacements: 6,
+			filesTouched: 2,
+			filesSearched: 2,
+			applied: false,
+			limitReached: false,
+			displayContent: displayContent.join("\n"),
+		};
+		const rows = astEditToolRenderer
+			.renderResult({ content: [], details }, { expanded: false, isPartial: false }, uiTheme)
+			.render(120)
+			.map(line => Bun.stripANSI(line));
+		const body = rows.slice(1, -1);
+		expect(body).toHaveLength(6);
+		expect(body.at(-1)).toContain("… 1 more file");
+	});
+});
