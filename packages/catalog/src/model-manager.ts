@@ -688,12 +688,9 @@ export function fingerprintStaticModels<TApi extends Api>(
 	models: readonly (ModelSpec<TApi> | Model<TApi>)[],
 	policy: StaticFingerprintPolicy = {},
 ): string {
-	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}:empty`;
-	const content = `${MODEL_CACHE_FINGERPRINT_VERSION}:${Bun.hash(JSON.stringify(models)).toString(36)}`;
-	let policyKey = "";
-	if (policy.authoritative) policyKey += ":authoritative";
-	if (policy.additive) policyKey += ":additive";
-	return policyKey ? `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:${content}` : content;
+	const policyKey = `${policy.authoritative ? ":authoritative" : ""}${policy.additive ? ":additive" : ""}`;
+	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:empty`;
+	return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:${Bun.hash(JSON.stringify(models)).toString(36)}`;
 }
 
 function mergeDynamicModel<TApi extends Api>(
