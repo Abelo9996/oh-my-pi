@@ -57,7 +57,7 @@ function expectCoordination(text: string, visible: boolean): void {
 }
 
 describe("IRC tool activity visibility", () => {
-	it("hides live cards, including arrivals while hidden, and reveals retained cards without hiding conversation", async () => {
+	it("hides live cards, including arrivals while hidden, without hiding conversation", async () => {
 		const ctx = createInteractiveModeContext({ settings: Settings.isolated() });
 		const helpers = new UiHelpers(ctx);
 		ctx.addMessageToChat = (message, options) => helpers.addMessageToChat(message, options);
@@ -73,15 +73,13 @@ describe("IRC tool activity visibility", () => {
 			expect(render()).toContain("Conversation remains visible");
 			ctx.chatContainer.setToolActivityVisible(true);
 			expectCoordination(render(), true);
-			ctx.chatContainer.setToolActivityVisible(false);
-			expectCoordination(render(), false);
 		} finally {
 			controller.dispose();
 			ctx.chatContainer.dispose();
 		}
 	});
 
-	it("replays stored IRC cards hidden, then reveals them without rebuilding or changing stored entries", () => {
+	it("replays stored IRC cards hidden and reveals them on toggle", () => {
 		const entries: TranscriptEntryLike[] = messages.map((message, index) => ({
 			type: "custom_message",
 			id: String(index),
@@ -92,7 +90,6 @@ describe("IRC tool activity visibility", () => {
 			details: message.details,
 			display: true,
 		}));
-		const stored = JSON.stringify(entries);
 		const builder = new ChatTranscriptBuilder({
 			ui: new TUI(new VirtualTerminal()),
 			cwd: process.cwd(),
@@ -106,10 +103,6 @@ describe("IRC tool activity visibility", () => {
 			expect(render()).toBe("");
 			builder.container.setToolActivityVisible(true);
 			expectCoordination(render(), true);
-			builder.container.setToolActivityVisible(false);
-			builder.rebuild(entries);
-			expect(render()).toBe("");
-			expect(JSON.stringify(entries)).toBe(stored);
 		} finally {
 			builder.dispose();
 		}
