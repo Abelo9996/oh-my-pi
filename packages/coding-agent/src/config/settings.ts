@@ -1356,8 +1356,9 @@ export class Settings {
 
 	/**
 	 * Re-read the current global, project, and explicit overlay layers from disk
-	 * without replacing this instance or discarding runtime overrides.
-	 * In-memory overlays reload the persisted layers behind them and keep their own overrides.
+	 * without replacing this instance or discarding runtime overrides. An in-memory
+	 * overlay has no layers of its own on disk; `includeParents` reloads the persisted
+	 * settings behind it, keeping the overlay's own overrides.
 	 *
 	 * All sources are loaded and validated before any live layer is replaced, so
 	 * readers never observe a partially refreshed or invalid configuration.
@@ -1366,8 +1367,8 @@ export class Settings {
 	 * @throws Error when a source fails to load or a value fails its definition's
 	 * `validate` check; the previous layers stay in effect.
 	 */
-	async reloadFromDisk(): Promise<void> {
-		if (this.#parent) await this.#parent.reloadFromDisk();
+	async reloadFromDisk(options?: { includeParents?: boolean }): Promise<void> {
+		if (options?.includeParents && this.#parent) await this.#parent.reloadFromDisk(options);
 		if (!this.#persist) return;
 		await this.#exclusive("strict", () => this.#reloadPersistedLayers("strict"));
 	}

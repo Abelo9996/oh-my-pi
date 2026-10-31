@@ -288,7 +288,7 @@ describe("task spawn validation", () => {
 					createSession({
 						settings: {
 							"task.perCallModel": mode,
-							modelRoles: { smol: "anthropic/claude-haiku-4-5", slow: "openai/gpt-5*" },
+							modelRoles: { smol: "anthropic/claude-haiku-4-5", slow: "openai/gpt-5.5" },
 							"task.perCallModelAllow": ["openai/gpt-5.5"],
 						},
 					}),
@@ -297,21 +297,15 @@ describe("task spawn validation", () => {
 		};
 		for (const mode of ["off", "eval"]) {
 			const text = await description(mode);
-			for (const guidance of [
-				"`model`: one exact",
-				"anthropic/claude-haiku-4-5",
-				"openai/gpt-5*",
-				"openai/gpt-5.5",
-			]) {
+			for (const guidance of ["`model`: one exact", "anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) {
 				expect(text).not.toContain(guidance);
 			}
 		}
 		const text = await description("on");
 		expect(text).toContain("`model`: one exact");
-		// The allowlist could admit only slow's glob; smol's model would be refused at dispatch.
-		expect(text).toContain("openai/gpt-5*");
+		// The allowlist admits only slow's model; smol's would be refused at dispatch.
+		expect(text).toContain("`openai/gpt-5.5` (slow)");
 		expect(text).not.toContain("anthropic/claude-haiku-4-5");
-		expect(text).toContain("openai/gpt-5.5");
 	});
 
 	it("omits kind roles, role aliases, and default/inherit selectors from approved models", async () => {
@@ -341,7 +335,7 @@ describe("task spawn validation", () => {
 		}
 	});
 
-	it("preserves configured comma-list and glob selectors without consulting the model registry", async () => {
+	it("advertises provider-qualified role values as written and omits globs, without consulting the model registry", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const session = createSession({
 			settings: {
@@ -352,8 +346,8 @@ describe("task spawn validation", () => {
 		const catalogLookup = vi.fn(() => [{ provider: "mock", id: "registry-expanded" }]);
 		Object.assign(session, { modelRegistry: { getAll: catalogLookup, getAvailable: catalogLookup } });
 		const text = (await TaskTool.create(session)).description;
-		for (const selector of ["mock/second:high", "mock/*", "mock/first"]) expect(text).toContain(selector);
-		expect(text).not.toContain("mock/registry-expanded");
+		expect(text).toContain("`mock/second:high`, `mock/first` (review)");
+		expect(text).not.toContain("mock/*");
 		expect(catalogLookup).not.toHaveBeenCalled();
 	});
 
@@ -399,18 +393,18 @@ describe("task spawn validation", () => {
 		const session = createSession({
 			settings: {
 				"task.perCallModel": "on",
-				modelRoles: { smol: "mock/original*" },
-				"task.perCallModelAllow": ["mock/original-allowed"],
+				modelRoles: { smol: "mock/original-role" },
+				"task.perCallModelAllow": ["mock/original-role", "mock/original-allowed"],
 			},
 		});
 		const tool = await TaskTool.create(session);
-		expect(tool.description).toContain("mock/original*");
+		expect(tool.description).toContain("`mock/original-role` (smol)");
 		expect(tool.description).toContain("mock/original-allowed");
 
-		session.settings.overrideModelRoles({ smol: "mock/replacement*" });
-		cfgTaskPerCallModelAllow.override(session.settings, ["mock/replacement-allowed"]);
+		session.settings.overrideModelRoles({ smol: "mock/replacement-role" });
+		cfgTaskPerCallModelAllow.override(session.settings, ["mock/replacement-role", "mock/replacement-allowed"]);
 		const refreshed = tool.description;
-		expect(refreshed).toContain("mock/replacement*");
+		expect(refreshed).toContain("`mock/replacement-role` (smol)");
 		expect(refreshed).toContain("mock/replacement-allowed");
 		expect(refreshed).not.toContain("mock/original");
 

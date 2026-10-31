@@ -12,7 +12,6 @@
  */
 import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
-import { isFactoryDroidModel } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Settings } from "../config/settings";
@@ -111,9 +110,7 @@ export function createSettingsAwareStreamFn(
 		// layer picks it up, sends the beta header, and honors the response
 		// signals. Models without a rule-assigned chain are untouched.
 		const serverSideFallbackChain =
-			streamOptions?.fallbacks === undefined &&
-			!slowModeContext?.disableServerSideFallback &&
-			cfgProvidersAnthropicServerSideFallback.get(settings)
+			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
 		const fallbacks =
@@ -182,9 +179,10 @@ export function createSettingsAwareStreamFn(
 			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 			...(storeResponses !== undefined ? { storeResponses } : {}),
-			// The Factory transport attaches its own refusal chain, so a per-call switch must reach it.
-			...(slowModeContext?.disableServerSideFallback && isFactoryDroidModel(model)
-				? { disableServerSideFallback: true }
+			// A per-call worker never switches models: no fallback chain, including a
+			// caller-supplied one, and Factory drops its own refusal chain.
+			...(slowModeContext?.disableServerSideFallback
+				? { fallbacks: undefined, disableServerSideFallback: true }
 				: {}),
 			...(codexAccessPrograms !== undefined ? { codexAccessPrograms } : {}),
 			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),

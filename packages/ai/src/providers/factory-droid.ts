@@ -791,18 +791,11 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			};
 
 			for await (const event of streamWire(wire, attempt)) {
-				if (options?.disableServerSideFallback && wire === "anthropic-messages") {
-					const switchReason =
-						attempt.modelSwitchReason ??
-						(event.type === "done"
-							? (servedByAnotherModel(model.id, event.message.model, attempt.baseVariant) ??
-								(event.message.content.some(block => block.type === "fallback")
-									? "it carries a fallback handoff block"
-									: undefined))
-							: undefined);
-					if (switchReason !== undefined) {
-						throw new Error(`Factory did not keep this per-call request on ${model.id}: ${switchReason}.`);
-					}
+				// Set by the raw-frame observer of a per-call request, which aborts the attempt before content.
+				if (attempt.modelSwitchReason !== undefined) {
+					throw new Error(
+						`Factory did not keep this per-call request on ${model.id}: ${attempt.modelSwitchReason}.`,
+					);
 				}
 				if (event.type === "error") {
 					const regionMessage = asRegionUnavailableError(model, event.error.errorMessage);

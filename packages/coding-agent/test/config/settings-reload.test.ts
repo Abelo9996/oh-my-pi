@@ -54,7 +54,7 @@ describe("Settings layer refresh", () => {
 		expect(cfgProvidersMaxInFlightRequests.get(settings)).toEqual({ openai: 2 });
 	});
 
-	it("reloads an overlay's persisted role layers without discarding its own overrides", async () => {
+	it("reloads the persisted layers behind an overlay only when asked, keeping its own overrides", async () => {
 		await writeConfig({ modelRoles: { review: "mock/target" }, temperature: 0.1 });
 		const settings = await Settings.loadIsolated({ cwd: startProject, agentDir });
 		const overlay = settings.overlay({ temperature: 0.7 });
@@ -62,6 +62,8 @@ describe("Settings layer refresh", () => {
 
 		await writeConfig({ temperature: 0.2 });
 		await overlay.reloadFromDisk();
+		expect(overlay.getModelRole("review")).toBe("mock/target");
+		await overlay.reloadFromDisk({ includeParents: true });
 		expect(overlay.getModelRole("review")).toBeUndefined();
 		expect(cfgTemperature.get(settings)).toBe(0.2);
 		expect(cfgTemperature.get(overlay)).toBe(0.7);

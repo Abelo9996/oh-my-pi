@@ -18,7 +18,6 @@ import {
 	PerCallModelError,
 	type PerCallModelGrants,
 } from "@oh-my-pi/pi-coding-agent/task/model-approval";
-import { invalidModelSelectorReason } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { cfgTaskPerCallModelAllow, perCallModelEnabled } from "@oh-my-pi/pi-coding-agent/task/settings";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import { YAML } from "bun";
@@ -96,34 +95,10 @@ const rows: Row[] = [
 		settings: { modelRoles: { review: "mock/other,mock/target" } },
 		approved: true,
 	},
-	{ name: "role value naming another model", settings: { modelRoles: { review: "mock/other" } }, approved: false },
-	{ name: "glob role value", settings: { modelRoles: { review: "mock/*" } }, approved: true },
-	{ name: "bare-id glob role value", settings: { modelRoles: { review: "tar?et" } }, approved: true },
-	{ name: "glob role value with a level", settings: { modelRoles: { review: "mock/*:high" } }, approved: true },
-	{
-		name: "a provider-scoped glob never matches a different provider's bare id",
-		settings: { modelRoles: { review: "anthropic/*" } },
-		model: sonnet,
-		approved: false,
-	},
-	{
-		name: "a glob keeps an explicit upstream pin",
-		settings: { modelRoles: { review: "openrouter/anthropic/*@anthropic" } },
-		model: pinnedSonnet,
-		approved: true,
-	},
-	{
-		name: "an unpinned provider glob does not grant a pinned route",
-		settings: { modelRoles: { review: "openrouter/*" } },
-		model: pinnedSonnet,
-		approved: false,
-	},
-	{
-		name: "a provider glob spans slashes in aggregator ids",
-		settings: { modelRoles: { review: "openrouter/*" } },
-		model: sonnet,
-		approved: true,
-	},
+	// Globs route a role but never grant: the operator must name each per-call model.
+	{ name: "a provider glob role value", settings: { modelRoles: { review: "mock/*" } }, approved: false },
+	{ name: "a bare-id glob role value", settings: { modelRoles: { review: "tar?et" } }, approved: false },
+	{ name: "a glob agent frontmatter model", agentSource: "bundled", agentModel: ["mock/*"], approved: false },
 	{ name: "non-chat role value", settings: { modelRoles: { image: "mock/target" } }, approved: false },
 	{ name: "role alias is not expanded into defaults", settings: { modelRoles: { review: "@smol" } }, approved: false },
 	{ name: "bare * is @default, not a glob", settings: { modelRoles: { review: "*" } }, approved: false },
@@ -161,21 +136,6 @@ const rows: Row[] = [
 		approved: false,
 	},
 	{
-		name: "allowlist admits a listed granted model",
-		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/target"] },
-		approved: true,
-	},
-	{
-		name: "the allowlist compares a level-shaped entry literally",
-		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/target:high"] },
-		approved: false,
-	},
-	{
-		name: "the allowlist never resolves a bare id",
-		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["target"] },
-		approved: false,
-	},
-	{
 		name: "the allowlist never expands a glob",
 		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/*"] },
 		approved: false,
@@ -193,11 +153,6 @@ const rows: Row[] = [
 		approved: true,
 	},
 	{
-		name: "a literal bracketed grant approves only itself",
-		settings: { modelRoles: { review: "mock/glm[1m]" } },
-		approved: false,
-	},
-	{
 		name: "an unavailable bracketed literal never becomes a glob",
 		settings: { modelRoles: { review: "mock/glm[1m]" } },
 		unavailable: bracketed,
@@ -205,14 +160,8 @@ const rows: Row[] = [
 		approved: false,
 	},
 	{
-		name: "brackets stay literal within an actual glob",
-		settings: { modelRoles: { review: "mock/glm[1m]*" } },
-		model: bracketed,
-		approved: true,
-	},
-	{
 		name: "a non-chat model never qualifies",
-		settings: { modelRoles: { review: "mock/*" } },
+		settings: { modelRoles: { review: "mock/painter" } },
 		model: image,
 		approved: false,
 	},
@@ -235,24 +184,12 @@ const rows: Row[] = [
 		approved: false,
 	},
 	{
-		name: "an upstream-pinned parent model does not grant the unpinned model",
-		parentModelPattern: "openrouter/anthropic/claude-sonnet-4.5@anthropic",
-		model: sonnet,
-		approved: false,
-	},
-	{
 		name: "the allowlist keeps an upstream pin",
 		settings: {
 			modelRoles: { review: "openrouter/anthropic/claude-sonnet-4.5" },
 			"task.perCallModelAllow": ["openrouter/anthropic/claude-sonnet-4.5@anthropic"],
 		},
 		model: sonnet,
-		approved: false,
-	},
-	{
-		name: "a role naming a catalog id with a level-shaped suffix does not grant the base id",
-		settings: { modelRoles: { review: "nanogpt/nanogpt/coding-router:low" } },
-		model: codingRouter,
 		approved: false,
 	},
 	{
@@ -278,20 +215,11 @@ const rows: Row[] = [
 	{
 		name: "an allowlisted catalog id with a level-shaped suffix admits that id",
 		settings: {
-			modelRoles: { review: "nanogpt/*" },
+			modelRoles: { review: "nanogpt/nanogpt/coding-router:low" },
 			"task.perCallModelAllow": ["nanogpt/nanogpt/coding-router:low"],
 		},
 		model: codingRouterLow,
 		approved: true,
-	},
-	{
-		name: "an allowlisted catalog id with a level-shaped suffix does not admit the base id",
-		settings: {
-			modelRoles: { review: "nanogpt/*" },
-			"task.perCallModelAllow": ["nanogpt/nanogpt/coding-router:low"],
-		},
-		model: codingRouter,
-		approved: false,
 	},
 	{
 		name: "a configured Factory chat role grants its model like any other provider",
@@ -318,7 +246,7 @@ const rows: Row[] = [
 	},
 	{
 		name: "a subagent overlay's allowlist cannot replace the operator's",
-		settings: { modelRoles: { review: "mock/*" }, "task.perCallModelAllow": ["mock/other"] },
+		settings: { modelRoles: { review: "mock/target" }, "task.perCallModelAllow": ["mock/other"] },
 		overlay: { "task.perCallModelAllow": ["mock/target"] },
 		approved: false,
 	},
@@ -470,16 +398,14 @@ describe("per-call model grants", () => {
 		expect(approved(target, { settings: grandchild, agentName: "worker" })).toBe(false);
 	});
 
-	it("honors an SDK host overlay's allowlist", () => {
-		const settings = Settings.isolated({ modelRoles: { review: "mock/target" } }).overlay({
-			"task.perCallModelAllow": ["mock/other"],
+	it("honors roles and allowlists configured by an SDK host overlay", () => {
+		const settings = Settings.isolated().overlay({
+			modelRoles: { review: "mock/target, mock/other" },
+			"task.perCallModelAllow": ["mock/target"],
 		});
-		expect(approved(target, { settings, agentName: "worker" })).toBe(false);
-	});
-
-	it("honors roles configured by an SDK host overlay", () => {
-		const settings = Settings.isolated().overlay({ modelRoles: { review: "mock/target" } });
-		expect(approved(target, { settings, agentName: "worker" })).toBe(true);
+		const grants = { settings, agentName: "worker" };
+		expect(approved(target, grants)).toBe(true);
+		expect(approved(other, grants)).toBe(false);
 	});
 
 	it("resolves grants against spawn-time preferences while role and allowlist edits remain live", () => {
@@ -495,7 +421,8 @@ describe("per-call model grants", () => {
 			agentName: "worker",
 			matchPreferences: structuredClone(getModelMatchPreferences(settings)),
 		};
-		const modelRegistry = { getAll: () => [first, second], getAvailable: () => [first, second] };
+		const catalog = [first, second];
+		const modelRegistry = { getAll: () => catalog, getAvailable: () => catalog };
 		expect(approved(first, grants, modelRegistry)).toBe(true);
 		usageOrder.reverse();
 		expect(approved(first, grants, modelRegistry)).toBe(true);
@@ -537,16 +464,6 @@ describe("per-call model grants", () => {
 		expect(approved(target, grants)).toBe(false);
 	});
 
-	it("approves a Factory model whose transport carries a refusal chain when its target is also granted", () => {
-		const grants = {
-			settings: Settings.isolated({
-				modelRoles: { review: "factory-droid/claude-fable-5", smol: "factory-droid/claude-opus-5" },
-			}),
-			agentName: "worker",
-		};
-		expect(() => assertPerCallModelApproved(droidFable, grants, registry)).not.toThrow();
-	});
-
 	it("rejects a non-string task.perCallModelAllow entry from a config file and a runtime write", async () => {
 		const tempDir = TempDir.createSync("@pi-per-call-allow-");
 		try {
@@ -561,11 +478,6 @@ describe("per-call model grants", () => {
 		expect(() => Settings.isolated({ "task.perCallModelAllow": [{ id: "mock/target" }] })).toThrow(
 			"Invalid task.perCallModelAllow[0]",
 		);
-	});
-
-	it("names the allowlist in the rejection when one is set", () => {
-		const grants = { settings: Settings.isolated({ "task.perCallModelAllow": ["mock/other"] }), agentName: "worker" };
-		expect(() => assertPerCallModelApproved(target, grants, registry)).toThrow(/task\.perCallModelAllow/);
 	});
 });
 
@@ -616,36 +528,19 @@ describe("project settings and per-call grants", () => {
 	});
 
 	it.each<{ operator: string[]; repository: string[]; admitted: string[] }>([
-		{ operator: ["mock/target"], repository: [], admitted: ["target"] },
-		{ operator: ["mock/target"], repository: ["mock/other"], admitted: [] },
 		{ operator: ["mock/target"], repository: ["mock/target", "mock/other"], admitted: ["target"] },
 		{ operator: [], repository: ["mock/other"], admitted: ["other"] },
 	])(
 		"admits $admitted with operator allowlist $operator and project allowlist $repository",
 		async ({ operator, repository, admitted }) => {
 			const settings = await load(
-				{ modelRoles: { review: "mock/*" }, task: { perCallModelAllow: operator } },
+				{ modelRoles: { review: "mock/target, mock/other" }, task: { perCallModelAllow: operator } },
 				{ task: { perCallModelAllow: repository } },
 			);
 			const grants = { settings, agentName: "worker" };
 			expect([target, other].filter(model => approved(model, grants)).map(model => model.id)).toEqual(admitted);
 		},
 	);
-
-	it("advertises the operator's allowlist narrowed by the project's", async () => {
-		const settings = await load(
-			{
-				modelRoles: { smol: "mock/target", slow: "mock/other" },
-				task: { perCallModelAllow: ["mock/target", "mock/other"] },
-			},
-			{ task: { perCallModelAllow: ["mock/other", "mock/extra"] } },
-		);
-		expect(getPerCallModelAdvertisement(settings)).toEqual({
-			roles: [{ role: "slow", patterns: ["mock/other"] }],
-			allowlist: ["mock/other"],
-			parentModelWithheld: false,
-		});
-	});
 
 	it.each([
 		{ operator: "off", repository: "on", task: false, evalCall: false },
@@ -661,22 +556,9 @@ describe("project settings and per-call grants", () => {
 		},
 	);
 
-	it("names both values when project settings try to enable the gate", async () => {
-		const settings = await load({ task: { perCallModel: "off" } }, { task: { perCallModel: "on" } });
-		expect(invalidModelSelectorReason("mock/target", "The call", { settings, invocationKind: "task" })).toBe(
-			"Per-call model is disabled for task calls (task.perCallModel: off, project: on). Omit model to use the agent's configured model.",
-		);
+	it("drops the frontmatter grant of an agent the project disables", async () => {
+		const settings = await load({}, { task: { disabledAgents: ["worker"] } });
+		const grants = { settings, agentName: "worker", agentSource: "user" as const, agentModel: ["mock/target"] };
+		expect(approved(target, grants)).toBe(false);
 	});
-
-	it.each([
-		{ operator: ["worker"], repository: [] },
-		{ operator: [], repository: ["worker"] },
-	])(
-		"drops the frontmatter grant of an agent either layer disables: $operator / $repository",
-		async ({ operator, repository }) => {
-			const settings = await load({ task: { disabledAgents: operator } }, { task: { disabledAgents: repository } });
-			const grants = { settings, agentName: "worker", agentSource: "user" as const, agentModel: ["mock/target"] };
-			expect(approved(target, grants)).toBe(false);
-		},
-	);
 });

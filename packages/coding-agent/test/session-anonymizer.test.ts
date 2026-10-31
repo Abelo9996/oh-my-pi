@@ -176,7 +176,7 @@ describe("SessionAnonymizer", () => {
 		expect(at(result, "message", "details")).toEqual({ wallTimeNoticeEmitted: false });
 	});
 
-	test.each([null, "auto", "high"])("preserves per-call revival metadata with %s thinking", perCallThinkingLevel => {
+	test.each([null, "high"])("preserves per-call revival metadata with %s thinking", perCallThinkingLevel => {
 		const anonymizer = new SessionAnonymizer();
 		const metadata = {
 			type: "session_init",

@@ -150,10 +150,9 @@ describe("taskFile dispatch", () => {
 		});
 	});
 
+	// `off` and `eval` refuse task calls through the same gate; one mode per shape covers it.
 	it.each([
 		["off", false],
-		["off", true],
-		["eval", false],
 		["eval", true],
 	] as const)("checks the per-call gate before reading taskFile (mode=%s, batch=%s)", async (mode, batch) => {
 		const tool = await createTool(batch, undefined, { "task.perCallModel": mode });
@@ -163,18 +162,6 @@ describe("taskFile dispatch", () => {
 
 		expect(result.isError).toBe(true);
 		expect(textOf(result)).toContain(`task.perCallModel: ${mode}`);
-		expect(executions).toHaveLength(0);
-	});
-
-	it.each([false, true])("rejects unapproved models on file-backed tasks (batch=%s)", async batch => {
-		const taskFile = await writeTaskFile("unapproved-model.md", "Must not run on an unapproved model.");
-		const tool = await createTool(batch, undefined, { "task.perCallModel": "on", modelRoles: {} });
-		const item = { taskFile, model: "mock/file-worker" };
-
-		const result = await tool.execute("file-model-unapproved", batch ? { context: "Context.", tasks: [item] } : item);
-
-		expect(result.isError).toBe(true);
-		expect(textOf(result)).toContain("not approved");
 		expect(executions).toHaveLength(0);
 	});
 

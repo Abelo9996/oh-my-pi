@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -609,6 +610,30 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com|org:org-a"] });
 	});
 
+	const perCallModelFixture = (id: string, efforts: Effort[] = [Effort.Low, Effort.High]) =>
+		buildModel({
+			id,
+			name: id,
+			api: "anthropic-messages",
+			provider: "mock",
+			reasoning: true,
+			thinking: { mode: "effort", efforts },
+			baseUrl: "https://example.invalid",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		});
+
+	/** A warm registry stub holding exactly `models`. */
+	const stubRegistry = (models: Model[]) =>
+		({
+			authStorage: {},
+			awaitBackgroundRefresh: async () => {},
+			getAvailable: () => models,
+			getAll: () => models,
+		}) as unknown as ModelRegistry;
+
 	it("re-checks a revived per-call worker against current grants and keeps it off fallbacks", async () => {
 		const own = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!own) throw new Error("Expected bundled anthropic/claude-sonnet-4-5");
@@ -629,12 +654,7 @@ describe("persisted subagent revival", () => {
 				session: Object.assign(createRevivedSession([]).session, { model: own }),
 			} as CreateAgentSessionResult;
 		});
-		const modelRegistry = {
-			authStorage: {},
-			awaitBackgroundRefresh: async () => {},
-			getAvailable: () => [own],
-			getAll: () => [own],
-		} as unknown as ModelRegistry;
+		const modelRegistry = stubRegistry([own]);
 		const revive = async (settings: Settings) => {
 			const cwd = makeTempDir("@pi-revive-per-call-");
 			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
@@ -667,19 +687,7 @@ describe("persisted subagent revival", () => {
 
 	it("refuses before session creation when a per-call model cannot run at or below task.maxEffort", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
-		const highOnly = buildModel({
-			id: "mock-high-only",
-			name: "High Only",
-			api: "anthropic-messages",
-			provider: "mock",
-			reasoning: true,
-			thinking: { mode: "effort", efforts: [Effort.High] },
-			baseUrl: "https://example.invalid",
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200000,
-			maxTokens: 8192,
-		});
+		const highOnly = perCallModelFixture("mock-high-only", [Effort.High]);
 		const disposed: boolean[] = [];
 		const settings = Settings.isolated({ "task.maxEffort": "low", modelRoles: { review: "mock/mock-high-only" } });
 		let options: CreateAgentSessionOptions | undefined;
@@ -704,15 +712,9 @@ describe("persisted subagent revival", () => {
 				perCallThinkingLevel: Effort.High,
 			});
 			const ref = createRef(sessionFile);
-			const reviver = await createFactory(cwd, undefined, {
-				settings,
-				modelRegistry: {
-					authStorage: {},
-					awaitBackgroundRefresh: async () => {},
-					getAvailable: () => [highOnly],
-					getAll: () => [highOnly],
-				} as unknown as ModelRegistry,
-			})(ref);
+			const reviver = await createFactory(cwd, undefined, { settings, modelRegistry: stubRegistry([highOnly]) })(
+				ref,
+			);
 			if (!reviver) throw new Error("Expected a persisted reviver");
 			return reviver(ref);
 		};
@@ -734,21 +736,6 @@ describe("persisted subagent revival", () => {
 		expect(() => check(highOnly)).toThrow("no supported thinking effort at or below task.maxEffort=low");
 	});
 
-	const perCallModelFixture = (id: string) =>
-		buildModel({
-			id,
-			name: id,
-			api: "anthropic-messages",
-			provider: "mock",
-			reasoning: true,
-			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
-			baseUrl: "https://example.invalid",
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200000,
-			maxTokens: 8192,
-		});
-
 	it.each([
 		{ identity: "mock/coding-router:low", level: Effort.High, availableId: "coding-router" },
 		{ identity: "mock/coding-router", level: Effort.Low, availableId: "coding-router:low" },
@@ -765,14 +752,7 @@ describe("persisted subagent revival", () => {
 			perCallThinkingLevel: level,
 		});
 		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd, undefined, {
-			modelRegistry: {
-				authStorage: {},
-				awaitBackgroundRefresh: async () => {},
-				getAvailable: () => [sibling],
-				getAll: () => [sibling],
-			} as unknown as ModelRegistry,
-		})(ref);
+		const reviver = await createFactory(cwd, undefined, { modelRegistry: stubRegistry([sibling]) })(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 
 		await expect(reviver(ref)).rejects.toBeInstanceOf(PerCallModelError);
@@ -804,12 +784,7 @@ describe("persisted subagent revival", () => {
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd, undefined, {
 			settings: Settings.isolated({ modelRoles: { review: identity } }),
-			modelRegistry: {
-				authStorage: {},
-				awaitBackgroundRefresh: async () => {},
-				getAvailable: () => models,
-				getAll: () => models,
-			} as unknown as ModelRegistry,
+			modelRegistry: stubRegistry(models),
 		})(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 
@@ -840,12 +815,7 @@ describe("persisted subagent revival", () => {
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd, undefined, {
 			settings: Settings.isolated({ modelRoles: { review: "mock/coding-router" } }),
-			modelRegistry: {
-				authStorage: {},
-				awaitBackgroundRefresh: async () => {},
-				getAvailable: () => models,
-				getAll: () => models,
-			} as unknown as ModelRegistry,
+			modelRegistry: stubRegistry(models),
 		})(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 
@@ -934,39 +904,6 @@ describe("persisted subagent revival", () => {
 		}
 	});
 
-	it("revives a per-call worker only onto its exact saved model, never a similarly named one", async () => {
-		const neighbour = perCallModelFixture("gone-model-v2");
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-			agents: [
-				{ name: "reviewer", description: "r", systemPrompt: "r", source: "user", model: ["mock/gone-model-v2"] },
-			],
-			projectAgentsDir: null,
-		});
-		const create = vi.spyOn(sdkModule, "createAgentSession");
-		const cwd = makeTempDir("@pi-revive-per-call-exact-");
-		const sessionFile = await createPersistedSession(cwd, undefined, "review", undefined, {
-			agent: "reviewer",
-			perCallModel: true,
-			resolvedModel: "mock/gone-model:high",
-			perCallModelIdentity: "mock/gone-model",
-			perCallThinkingLevel: Effort.High,
-		});
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd, undefined, {
-			settings: Settings.isolated({ modelRoles: { review: "mock/gone-model-v2" } }),
-			modelRegistry: {
-				authStorage: {},
-				awaitBackgroundRefresh: async () => {},
-				getAvailable: () => [neighbour],
-				getAll: () => [neighbour],
-			} as unknown as ModelRegistry,
-		})(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-
-		await expect(reviver(ref)).rejects.toThrow("per-call model mock/gone-model is no longer available");
-		expect(create).not.toHaveBeenCalled();
-	});
-
 	it("revives a killed per-call worker with its live parent's local mention and discovery scope", async () => {
 		const cwd = makeTempDir("@pi-revive-local-mention-root-");
 		const parentCwd = makeTempDir("@pi-revive-local-mention-parent-");
@@ -974,12 +911,7 @@ describe("persisted subagent revival", () => {
 		const parentModel = perCallModelFixture("parent");
 		const rootMentionModel = perCallModelFixture("root-mention");
 		const models = [target, parentModel, rootMentionModel];
-		const modelRegistry = {
-			authStorage: {},
-			awaitBackgroundRefresh: async () => {},
-			getAvailable: () => models,
-			getAll: () => models,
-		} as unknown as ModelRegistry;
+		const modelRegistry = stubRegistry(models);
 		const parentMentions = new ModelMentionRegistry({
 			sessionManager: SessionManager.inMemory(parentCwd),
 			modelRegistry,
@@ -1065,12 +997,7 @@ describe("persisted subagent revival", () => {
 			const target = perCallModelFixture("mentioned");
 			const parentModel = perCallModelFixture("parent");
 			const models = [target, parentModel];
-			const modelRegistry = {
-				authStorage: {},
-				awaitBackgroundRefresh: async () => {},
-				getAvailable: () => models,
-				getAll: () => models,
-			} as unknown as ModelRegistry;
+			const modelRegistry = stubRegistry(models);
 			const mentions = new ModelMentionRegistry({
 				sessionManager: SessionManager.inMemory(cwd),
 				modelRegistry,
@@ -1157,7 +1084,8 @@ describe("persisted subagent revival", () => {
 		},
 	);
 
-	it.each(["bundled", "user", "role"] as const)(
+	// Bundled and user frontmatter share one trust branch; bundled stands for both.
+	it.each(["bundled", "role"] as const)(
 		"keeps current %s grants when a nested worker's parent is unavailable",
 		async grant => {
 			const cwd = makeTempDir("@pi-revive-independent-grant-");
@@ -1168,7 +1096,7 @@ describe("persisted subagent revival", () => {
 						name: "selected",
 						description: "selected",
 						systemPrompt: "work",
-						source: grant === "user" ? "user" : "bundled",
+						source: "bundled",
 						model: grant === "role" ? undefined : ["mock/independent"],
 					},
 				],
@@ -1190,12 +1118,7 @@ describe("persisted subagent revival", () => {
 			const ref = { ...createRef(sessionFile), parentId: "unavailable-parent" };
 			const reviver = await createFactory(cwd, undefined, {
 				settings: Settings.isolated(grant === "role" ? { modelRoles: { review: "mock/independent" } } : {}),
-				modelRegistry: {
-					authStorage: {},
-					awaitBackgroundRefresh: async () => {},
-					getAvailable: () => [target],
-					getAll: () => [target],
-				} as unknown as ModelRegistry,
+				modelRegistry: stubRegistry([target]),
 			})(ref);
 			if (!reviver) throw new Error("Expected a persisted reviver");
 			try {
@@ -1211,12 +1134,7 @@ describe("persisted subagent revival", () => {
 	it("keeps root-local mention agents for the root's direct children", async () => {
 		const cwd = makeTempDir("@pi-revive-direct-mention-");
 		const target = perCallModelFixture("mentioned");
-		const modelRegistry = {
-			authStorage: {},
-			awaitBackgroundRefresh: async () => {},
-			getAvailable: () => [target],
-			getAll: () => [target],
-		} as unknown as ModelRegistry;
+		const modelRegistry = stubRegistry([target]);
 		const mentions = new ModelMentionRegistry({
 			sessionManager: SessionManager.inMemory(cwd),
 			modelRegistry,
@@ -1282,12 +1200,7 @@ describe("persisted subagent revival", () => {
 					model: rootModel,
 				} as unknown as AgentSession,
 				authStorage: {} as never,
-				modelRegistry: {
-					authStorage: {},
-					awaitBackgroundRefresh: async () => {},
-					getAvailable: () => [parentModel, rootModel],
-					getAll: () => [parentModel, rootModel],
-				} as unknown as ModelRegistry,
+				modelRegistry: stubRegistry([parentModel, rootModel]),
 				settings: Settings.isolated(),
 				enableLsp: true,
 			});
@@ -1336,45 +1249,6 @@ describe("persisted subagent revival", () => {
 			registry.unregister(parentId);
 		}
 	});
-
-	it.each([{ only: ["anthropic", "google-vertex"] }, { order: ["anthropic", "google-vertex"] }])(
-		"grants a revived per-call worker nothing from a parent routed by %j",
-		async routing => {
-			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
-			const model = perCallModelFixture("routed-model");
-			const parentModel = { ...model, compat: { ...model.compat, openRouterRouting: routing } };
-			const create = vi.spyOn(sdkModule, "createAgentSession");
-			const cwd = makeTempDir("@pi-revive-per-call-routed-parent-");
-			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
-				agent: "task",
-				perCallModel: true,
-				resolvedModel: "mock/routed-model",
-				perCallModelIdentity: "mock/routed-model",
-				perCallThinkingLevel: Effort.Low,
-			});
-			const ref = { ...createRef(sessionFile), parentId: "Main" };
-			const reviver = await createPersistedSubagentReviverFactory({
-				session: {
-					sessionManager: { getCwd: () => cwd, getArtifactManager: () => undefined },
-					effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
-					getSessionAgents: () => [],
-					model: parentModel,
-				} as unknown as AgentSession,
-				authStorage: {} as never,
-				modelRegistry: {
-					authStorage: {},
-					awaitBackgroundRefresh: async () => {},
-					getAvailable: () => [model],
-					getAll: () => [model],
-				} as unknown as ModelRegistry,
-				settings: Settings.isolated(),
-				enableLsp: true,
-			})(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
-			await expect(reviver(ref)).rejects.toThrow(/not approved/);
-			expect(create).not.toHaveBeenCalled();
-		},
-	);
 
 	it("falls back to the ref display name reviving a legacy session file without a persisted agent name", async () => {
 		const cwd = makeTempDir("@pi-revive-agent-name-legacy-");

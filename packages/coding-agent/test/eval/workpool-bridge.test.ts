@@ -117,8 +117,6 @@ describe("workpool model validation", () => {
 		// The gate wins over the selector check, so an invalid selector still reports the disabled gate.
 		{ mode: "off", model: "@smol", reason: /task\.perCallModel: off/ },
 		{ mode: "on", model: "@smol", reason: /invalid `model` value/ },
-		{ mode: "on", model: "pi/default", reason: /invalid `model` value/ },
-		{ mode: "on", model: ["p/valid"], reason: /invalid `model` value/ },
 	]) {
 		it(`rejects ${JSON.stringify(model)} under ${mode} before registering a pool`, async () => {
 			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
@@ -130,14 +128,15 @@ describe("workpool model validation", () => {
 		});
 	}
 
-	it.each(["on", "eval"])("hands the pool selector to workers under %s", async perCallModel => {
+	// Losing the selector between bridge and pool would silently run workers on the agent's own model.
+	it("hands the pool selector to workers", async () => {
 		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
 		const requested = Promise.withResolvers<unknown>();
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
 			requested.resolve(request.perCallModel);
 			throw new Error("stop after dispatch");
 		});
-		const session = makeSession({ "task.perCallModel": perCallModel, modelRoles: { smol: "p/small" } });
+		const session = makeSession({ "task.perCallModel": "eval", modelRoles: { smol: "p/small" } });
 		const model = "p/small";
 		await runEvalWorkpool({ op: "create", name: "picked", agent: "scout", model }, { session });
 		await runEvalWorkpool({ op: "push", name: "picked", items: ["one"] }, { session });

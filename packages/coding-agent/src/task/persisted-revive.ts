@@ -45,6 +45,7 @@ import {
 	parentModelGrantPattern,
 	PerCallModelError,
 	PerCallModelUnavailableError,
+	type PerCallModelGrants,
 } from "./model-approval";
 import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
@@ -218,6 +219,24 @@ export function createPersistedSubagentReviverFactory(
 							)
 						: undefined;
 					const matchPreferences = structuredClone(getModelMatchPreferences(ctx.settings.grantAuthority()));
+					// One grants object per live parent model keeps approval decisions cached across requests.
+					const grantsByParentModel = new Map<string | undefined, PerCallModelGrants>();
+					const grantsFor = (parentModelPattern: string | undefined): PerCallModelGrants => {
+						let grants = grantsByParentModel.get(parentModelPattern);
+						if (!grants) {
+							grants = {
+								settings: ctx.settings,
+								agentName: init.agent ?? ref.displayName,
+								agentModel: configuredAgent?.model,
+								agentSource: configuredAgent?.source,
+								agentRemoved: configuredAgent === undefined,
+								parentModelPattern,
+								matchPreferences,
+							};
+							grantsByParentModel.set(parentModelPattern, grants);
+						}
+						return grants;
+					};
 					assertApprovedModel = model => {
 						// Parent models grant only while the real parent is live, including
 						// after this revival; transcript metadata never substitutes for it.
@@ -226,15 +245,7 @@ export function createPersistedSubagentReviverFactory(
 						try {
 							assertPerCallModelApproved(
 								model,
-								{
-									settings: ctx.settings,
-									agentName: init.agent ?? ref.displayName,
-									agentModel: configuredAgent?.model,
-									agentSource: configuredAgent?.source,
-									agentRemoved: configuredAgent === undefined,
-									parentModelPattern: parentModel ? parentModelGrantPattern(parentModel) : undefined,
-									matchPreferences,
-								},
+								grantsFor(parentModel ? parentModelGrantPattern(parentModel) : undefined),
 								ctx.modelRegistry,
 							);
 						} catch (error) {

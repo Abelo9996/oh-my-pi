@@ -415,27 +415,18 @@ function preflightPerCallModel(
 		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
 	};
 	// A cold registry is checked again in the executor once models are loaded.
-	if (!modelRegistry || modelRegistry.getAvailable().length === 0) return grants;
-	const exact = { exactOnly: true };
-	const model = resolveModelOverride(
-		[perCallModel],
-		{ getAvailable: () => modelRegistry.getAvailable("chat") },
-		settings,
-		exact,
-	).model;
-	if (!model) {
-		const other = resolveModelOverride(
-			[perCallModel],
-			{ getAvailable: () => modelRegistry.getAvailable("all") },
-			settings,
-			exact,
-		).model;
-		// Discovery still running may add it; the executor checks again once the refresh settles.
-		if (!other && modelRegistry.isBackgroundRefreshPending()) return grants;
+	const available = modelRegistry?.getAvailable("all");
+	if (!modelRegistry || !available?.length) return grants;
+	const model = resolveModelOverride([perCallModel], { getAvailable: () => available }, settings, {
+		exactOnly: true,
+	}).model;
+	// Discovery still running may add it; the executor checks again once the refresh settles.
+	if (!model && modelRegistry.isBackgroundRefreshPending()) return grants;
+	if (!model || modelKind(model) !== "chat") {
 		throw new StructuredSubagentError(
 			"preflight",
-			other
-				? `\`model\` ${JSON.stringify(perCallModel)} is a ${modelKind(other)} model; a subagent needs a chat model.`
+			model
+				? `\`model\` ${JSON.stringify(perCallModel)} is a ${modelKind(model)} model; a subagent needs a chat model.`
 				: `No available model matches \`model\` ${JSON.stringify(perCallModel)}. Use the exact provider/model-id and a supported thinking level. Stop and report an unavailable model instead of substituting another or dropping \`model\`.`,
 		);
 	}
@@ -489,7 +480,10 @@ function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRo
 export async function resolveEffectiveSubagentPolicy(
 	request: StructuredSubagentRequest,
 ): Promise<EffectiveSubagentPolicy> {
-	await request.session.settings.reloadFromDisk();
+	// A per-call model is approved against the operator settings behind any overlay, so reload those too.
+	await request.session.settings.reloadFromDisk({
+		includeParents: request.perCallModel !== undefined || request.seanceModel !== undefined,
+	});
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;

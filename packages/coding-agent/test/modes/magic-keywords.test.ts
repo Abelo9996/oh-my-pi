@@ -105,15 +105,14 @@ describe("workflow notice", () => {
 	it("lists the per-call model option only when task.perCallModel admits it for eval", () => {
 		const off = renderWorkflowNotice(base);
 		const on = renderWorkflowNotice({ ...base, perCallModel: true });
-		const jsOnly = renderWorkflowNotice({ ...base, perCallModel: true, py: false });
 
-		expect(off).not.toContain("model=None");
-		expect(off).not.toContain("model?");
-		expect(on).toContain("merge=None, tools=None, model=None)");
-		expect(on).toContain("context=None, tools=None, model=None)");
-		expect(on).toContain("merge, tools, model })");
-		expect(on).toContain("context, tools, model })");
-		expect(jsOnly).toContain("merge?, tools?, model? })");
-		expect(jsOnly).toContain("context?, tools?, model? })");
+		// agent() and workpool(), in both the Python and JS spellings.
+		for (const [text, count] of [
+			[off, 0],
+			[on, 2],
+		] as const) {
+			expect(text.match(/model=None\)/g) ?? []).toHaveLength(count);
+			expect(text.match(/, model \}\)/g) ?? []).toHaveLength(count);
+		}
 	});
 });
