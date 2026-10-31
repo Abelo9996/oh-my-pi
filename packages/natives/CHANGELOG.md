@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `listWorkspace({ pruneExcludedDirs: false })` to list `node_modules`, `.git`, `dist`, and the other standard dependency/build/cache directories instead of pruning them ([#17539](https://github.com/can1357/oh-my-pi/issues/17539))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

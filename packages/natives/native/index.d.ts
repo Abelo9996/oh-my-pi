@@ -2668,6 +2668,12 @@ export interface ListWorkspaceOptions {
   /** Respect .gitignore files. Default: true. */
   gitignore?: boolean
   /**
+   * Prune dependency, VCS, build-output, and cache directories
+   * (`node_modules`, `.git`, `dist`, `target`, …). Disable for explicit
+   * directory listings that must show every child. Default: true.
+   */
+  pruneExcludedDirs?: boolean
+  /**
    * Also surface AGENTS.md files in directories at depth 1..=4, even when
    * gitignore would otherwise hide the file. Walks deeper than `maxDepth`
    * to find them. Default: false.
