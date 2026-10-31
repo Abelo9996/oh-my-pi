@@ -359,12 +359,13 @@ interface ActiveAdvisor {
 	providerWaitRetries: number;
 	/**
 	 * Credential switches spent on the current failing batch, bounded by one
-	 * traversal of the provider's account pool. A switch only predicts a free
+	 * traversal of `provider`'s account pool. A switch only predicts a free
 	 * sibling; when retries keep landing on the same capped account, the spent
 	 * budget hands recovery to model fallback, a bounded wait, or the quota
-	 * latch (issue #17472). Reset with {@link providerWaitRetries}.
+	 * latch (issue #17472). A fallback to another provider starts that provider's
+	 * own budget. Reset with {@link providerWaitRetries}.
 	 */
-	credentialSwitches: number;
+	credentialSwitches: { provider: string; count: number } | undefined;
 	signature: string;
 }
 /** First index whose provider usage may anchor the advisor's context estimate. */
@@ -1686,7 +1687,7 @@ export class SessionAdvisors {
 				pendingCoveredTurn: 0,
 				retryFallbackPendingSuccess: false,
 				providerWaitRetries: 0,
-				credentialSwitches: 0,
+				credentialSwitches: undefined,
 				signature,
 			};
 			this.#refreshAdvisorProviderIdentity(advisorRef);
@@ -2266,16 +2267,16 @@ export class SessionAdvisors {
 	 * will use it.
 	 */
 	#spendCredentialSwitch(advisor: ActiveAdvisor, provider: string): boolean {
-		const siblings = this.#host.modelRegistry.authStorage.credentials.list(provider).length - 1;
-		if (advisor.credentialSwitches >= siblings) return false;
-		advisor.credentialSwitches++;
+		const spent = advisor.credentialSwitches?.provider === provider ? advisor.credentialSwitches.count : 0;
+		if (spent >= this.#host.modelRegistry.authStorage.credentials.list(provider).length - 1) return false;
+		advisor.credentialSwitches = { provider, count: spent + 1 };
 		return true;
 	}
 
 	/** Start the next failing batch with fresh provider-wait and credential-switch budgets. */
 	#resetRecoveryBudgets(advisor: ActiveAdvisor): void {
 		advisor.providerWaitRetries = 0;
-		advisor.credentialSwitches = 0;
+		advisor.credentialSwitches = undefined;
 	}
 
 	/**
