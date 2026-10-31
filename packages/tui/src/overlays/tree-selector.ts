@@ -181,25 +181,34 @@ interface EntryPart {
 	strong?: boolean;
 }
 
+/**
+ * Native span token for a theme color. Terminals style the semantic tokens
+ * (`path`, `accent`, …) but not every theme color name, so colors with a
+ * semantic twin are sent as that token.
+ */
+function nativeToken(color: ThemeColor): string {
+	return color === "statusLinePath" ? "path" : color;
+}
+
 /** An entry part as a native span: its theme color, plus `strong` when bold. */
 function partSpan(part: EntryPart): TspSpan {
 	const value = treeRowText(part.t);
-	if (!part.strong) return span(value, part.s);
-	return span(value, part.s ? `${part.s} strong` : "strong");
+	const color = part.s && nativeToken(part.s);
+	if (!part.strong) return span(value, color);
+	return span(value, color ? `${color} strong` : "strong");
 }
 
 /**
  * The `assistant:` label color: `success`, unless the theme paints it the same as
- * the `user:` label's `accent` (`dark-terminal`, `*-poimandres`). Then the first
- * fallback hue that differs; link and warning colors are skipped so the label
- * does not read as a link or an alert.
+ * the `user:` label's `accent` (`dark-terminal`, `*-poimandres`). Then the path
+ * color, a hue terminals can render natively, and `muted` if that matches too.
  */
 function assistantLabelColor(): ThemeColor {
 	const accent = theme.getColorHex("accent").toLowerCase();
-	for (const color of ["success", "thinkingMedium", "syntaxFunction"] as const) {
+	for (const color of ["success", "statusLinePath"] as const) {
 		if (theme.getColorHex(color).toLowerCase() !== accent) return color;
 	}
-	return "success";
+	return "muted";
 }
 
 /** A cached native tree item and the inputs it was built from. */

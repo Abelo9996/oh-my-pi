@@ -351,14 +351,17 @@ describe("session tree picker", () => {
 		expect(hueFree(byId.get("u1"))).not.toBe(hueFree(byId.get("a1")));
 	});
 
-	test("user and assistant labels get different hues in a theme whose accent and success match", async () => {
+	test("user and assistant labels get different terminal-renderable hues when accent and success match", async () => {
 		await initTheme(false, undefined, undefined, "dark-terminal", "dark-terminal");
 		try {
 			const byId = new Map(treeProps(treeSelector()).items?.map(item => [item.id, item]));
+			// Semantic tokens terminals style natively, with the theme color each one draws.
+			const semantic: Record<string, ThemeColor> = { accent: "accent", success: "success", path: "statusLinePath" };
 			const labelHex = (id: string) => {
 				const label = byId.get(id)?.label;
 				const token = typeof label === "string" ? undefined : label?.[0]?.s?.split(" ")[0];
-				return theme.getColorHex(token as ThemeColor).toLowerCase();
+				expect(token && token in semantic).toBe(true);
+				return theme.getColorHex(semantic[token!]!).toLowerCase();
 			};
 			expect(labelHex("a1")).not.toBe(labelHex("u1"));
 		} finally {
