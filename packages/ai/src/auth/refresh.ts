@@ -910,7 +910,12 @@ export class OAuthRefresher {
 		return "disabled";
 	}
 
-	async refresh(
+	/**
+	 * Refresh `credential` unless it is still fresh. Shutdown waits for the
+	 * refresh, and for the caller's synchronous save of its result, before the
+	 * store closes.
+	 */
+	refresh(
 		provider: Provider,
 		credential: OAuthCredential,
 		credentialId: number | undefined,
@@ -918,13 +923,14 @@ export class OAuthRefresher {
 		reason?: OAuthRefreshReason,
 		rejectedAccess?: string,
 	): Promise<OAuthCredentials> {
+		if (this.#shuttingDown) return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
 		const authRecovery = reason === "auth-recovery";
 		if (authRecovery && credentialId !== undefined && !this.#oauthCredentialRefreshInFlight.has(credentialId)) {
 			const recent = this.#recentMint(credentialId);
 			// A token the provider has just rejected is not a usable recent mint.
-			if (recent && recent.credential.access !== rejectedAccess) return recent.credential;
+			if (recent && recent.credential.access !== rejectedAccess) return Promise.resolve(recent.credential);
 		}
-		return this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess);
+		return this.#track(this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess));
 	}
 
 	/** Refresh without recent-mint reuse; still shares the per-credential in-flight request. */
@@ -973,7 +979,8 @@ export class OAuthRefresher {
 			.finally(() => {
 				this.#oauthCredentialRefreshInFlight.delete(credentialId);
 			});
-		this.#oauthCredentialRefreshInFlight.set(credentialId, promise);
+		// Tracked apart from the caller: a refresh its caller abandoned still has to finish before the store closes.
+		this.#oauthCredentialRefreshInFlight.set(credentialId, this.#track(promise));
 		return raceSignal(promise, signal, "credential refresh aborted");
 	}
 
@@ -1114,6 +1121,7 @@ export class OAuthRefresher {
 		signal?: AbortSignal,
 		options?: OAuthRefreshByIdOptions,
 	): Promise<AuthCredentialSnapshotEntry> {
+		if (this.#shuttingDown) throw new AIError.AbortError("OAuth refresh stopped during shutdown");
 		const existing = this.#oauthRefreshInFlight.get(id);
 		if (existing) {
 			const joined = await raceSignal(existing, signal, "credential refresh aborted");
@@ -1148,7 +1156,8 @@ export class OAuthRefresher {
 				this.#oauthRefreshInFlight.delete(id);
 			}
 		})();
-		this.#oauthRefreshInFlight.set(id, promise);
+		// Saves by id itself; tracked so the store stays open until that save lands.
+		this.#oauthRefreshInFlight.set(id, this.#track(promise));
 		return raceSignal(promise, signal, "credential refresh aborted");
 	}
 
